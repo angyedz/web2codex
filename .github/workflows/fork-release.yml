@@ -77,7 +77,12 @@ jobs:
 
       - name: Install Linux build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config llvm musl-tools libcap-dev libasound2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config musl-tools libcap-dev libasound2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev
+
+      - name: Configure verified Rusty V8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
 
       - name: Resolve release version
         id: version
@@ -88,10 +93,8 @@ jobs:
           python .github/scripts/set_fork_release_version.py "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Build the complete Codex package
+      - name: Build the native WebView browser
         shell: bash
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           browser_target="$TARGET"
@@ -109,15 +112,62 @@ jobs:
           if [[ "$TARGET" == *-unknown-linux-musl ]]; then
             cargo clean --manifest-path codex-rs/Cargo.toml --target "$browser_target"
           fi
-          python scripts/build_codex_package.py \
-            --target "$TARGET" \
-            --variant codex \
-            --package-version "$RELEASE_VERSION" \
-            --cargo-profile release \
-            --package-dir "$RUNNER_TEMP/codex-package-$TARGET" \
-            --archive-output "$RUNNER_TEMP/codex-package-$TARGET.tar.gz" \
-            --web-browser-bin "$browser_bin" \
+
+      - name: Install Zig for native musl builds
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Configure native musl toolchain
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+          CODEX_MUSL_RELEASE_LINK_FLAGS: "1"
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy for musl
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+
+      - name: Build the complete Codex package
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          browser_suffix=""
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            browser_suffix=".exe"
+          fi
+          package_args=(
+            --target "$TARGET"
+            --variant codex
+            --package-version "$RELEASE_VERSION"
+            --cargo-profile release
+            --package-dir "$RUNNER_TEMP/codex-package-$TARGET"
+            --archive-output "$RUNNER_TEMP/codex-package-$TARGET.tar.gz"
+            --web-browser-bin "$RUNNER_TEMP/codex-web-browser$browser_suffix"
             --force
+          )
+          if [[ "$TARGET" == *-unknown-linux-musl ]]; then
+            bwrap_path="codex-rs/target/$TARGET/release/bwrap"
+            cargo build --locked --release --manifest-path codex-rs/Cargo.toml \
+              --target "$TARGET" --bin bwrap
+            strip --strip-debug --strip-unneeded "$bwrap_path"
+            bwrap_sha256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+            echo "CODEX_BWRAP_SHA256=$bwrap_sha256" >> "$GITHUB_ENV"
+            export CODEX_BWRAP_SHA256="$bwrap_sha256"
+            package_args+=(--bwrap-bin "$bwrap_path")
+          fi
+          python scripts/build_codex_package.py "${package_args[@]}"
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
