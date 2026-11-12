@@ -56,8 +56,8 @@ jobs:
     env:
       CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      # The standard ARM macOS runner has 7 GB RAM and 14 GB storage.
-      CARGO_BUILD_JOBS: "1"
+      # Keep the small ARM macOS runner serial; use two Cargo jobs elsewhere to shorten builds.
+      CARGO_BUILD_JOBS: ${{ matrix.os == 'macos-15' && '1' || '2' }}
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       CARGO_PROFILE_RELEASE_LTO: "false"
