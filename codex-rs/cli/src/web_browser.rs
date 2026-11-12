@@ -143,17 +143,6 @@ pub(crate) fn run(command: WebCommand) -> anyhow::Result<()> {
 }
 
 fn print_account_capabilities() -> anyhow::Result<()> {
-    let models = codex_models_manager::bundled_models_response()
-        .context("failed to read the bundled Codex model catalog")?;
-    println!("Codex model catalog in this harness:");
-    for model in models.models.iter().filter(|model| {
-        model.visibility == codex_protocol::openai_models::ModelVisibility::List
-            && model.supported_in_api
-    }) {
-        println!("  {} ({})", model.display_name, model.slug);
-    }
-    println!("The signed-in account controls which models are actually available.");
-
     let path = data_directory()?.join("account-capabilities.json");
     let contents = match fs::read(&path) {
         Ok(contents) => contents,
@@ -182,7 +171,7 @@ fn print_account_capabilities() -> anyhow::Result<()> {
     }
 
     println!(
-        "Last observed ChatGPT Web picker options (Unix time {}):",
+        "ChatGPT Web picker snapshot (last observed at Unix time {}):",
         capabilities.detected_at_unix_seconds
     );
     if capabilities.picker_options.is_empty() {
