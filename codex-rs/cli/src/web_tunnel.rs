@@ -82,7 +82,11 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
 
     fs::create_dir_all(&paths.directory)?;
     let _ = fs::remove_file(&paths.health_url);
+    // A crash during the previous startup can leave the short-lived raw key file behind.
+    // No active runtime remains at this point, so clear it before any fallible setup step.
+    let _ = fs::remove_file(&paths.api_key);
     let client = install_tunnel_client()?;
+    remove_obsolete_client_versions(&paths, &client);
     let codex = std::env::current_exe().context("failed to locate the Codex executable")?;
     if let Err(error) = write_private_file(&paths.api_key, api_key.as_bytes()) {
         let _ = fs::remove_file(&paths.api_key);
@@ -160,13 +164,23 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
             print_mcp_observation(&paths.health_url);
             return Ok(());
         }
-        if let Some(status) = child.try_wait()? {
-            let _ = force_terminate_tunnel_process(pid);
-            remove_runtime_state(&paths);
-            bail!(
-                "tunnel-client exited during startup with {status}; see {}",
-                paths.log.display()
-            );
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let _ = force_terminate_tunnel_process(pid);
+                let _ = child.wait();
+                remove_runtime_state(&paths);
+                bail!(
+                    "tunnel-client exited during startup with {status}; see {}",
+                    paths.log.display()
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = force_terminate_tunnel_process(pid);
+                let _ = child.wait();
+                remove_runtime_state(&paths);
+                return Err(error).context("failed to monitor tunnel-client startup");
+            }
         }
         thread::sleep(Duration::from_millis(200));
     }
