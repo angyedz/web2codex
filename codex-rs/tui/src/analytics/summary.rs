@@ -28,6 +28,15 @@ impl Live {
 }
 
 impl AnalyticsView {
+    pub(crate) fn select_usage_summary(&mut self, view: Option<TokenActivityView>) {
+        self.select_summary(view);
+        self.summary_only = true;
+    }
+
+    pub(crate) fn show_full_dashboard(&mut self) {
+        self.summary_only = false;
+    }
+
     pub(crate) fn select_summary(&mut self, view: Option<TokenActivityView>) {
         self.section = Section::Summary;
         self.zoomed = true;

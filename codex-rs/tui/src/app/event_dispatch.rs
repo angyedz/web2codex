@@ -2164,16 +2164,6 @@ impl App {
                             self.chat_widget
                                 .finish_status_rate_limit_refresh(request_id, snapshots);
                         }
-                        RateLimitRefreshOrigin::UsageMenu { request_id } => {
-                            self.chat_widget.finish_usage_menu_rate_limit_refresh(
-                                request_id,
-                                snapshots,
-                                rate_limit_reset_credits.ok_or_else(|| {
-                                    "account/rateLimits/read response did not include rateLimitResetCredits"
-                                    .to_string()
-                                }),
-                            );
-                        }
                         RateLimitRefreshOrigin::ResetPicker { request_id } => {
                             self.chat_widget.finish_rate_limit_reset_credits_refresh(
                                 request_id,
@@ -2215,13 +2205,6 @@ impl App {
                             self.chat_widget
                                 .finish_status_rate_limit_refresh(request_id, Vec::new());
                         }
-                        RateLimitRefreshOrigin::UsageMenu { request_id } => {
-                            self.chat_widget.finish_usage_menu_rate_limit_refresh(
-                                request_id,
-                                Vec::new(),
-                                Err(err),
-                            );
-                        }
                         RateLimitRefreshOrigin::ResetPicker { request_id } => {
                             self.chat_widget.finish_rate_limit_reset_credits_refresh(
                                 request_id,
@@ -2245,10 +2228,27 @@ impl App {
                 let mut view = self.retained_analytics.take().unwrap_or_else(|| {
                     Box::new(crate::analytics::AnalyticsView::new(self.keymap.list.clone()))
                 });
+                view.show_full_dashboard();
                 view.keymap = self.keymap.list.clone();
                 if summary_view.is_some() {
                     view.select_summary(summary_view);
                 }
+                view.open(
+                    app_server.request_handle(),
+                    tui.frame_requester(),
+                    self.model_catalog.try_list_models()?,
+                    std::sync::Arc::new(self.config.clone()),
+                );
+                self.overlay = Some(Overlay::Analytics(view));
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::OpenUsageStatistics { view: summary_view } => {
+                tui.enter_alt_screen()?;
+                let mut view = self.retained_analytics.take().unwrap_or_else(|| {
+                    Box::new(crate::analytics::AnalyticsView::new(self.keymap.list.clone()))
+                });
+                view.keymap = self.keymap.list.clone();
+                view.select_usage_summary(summary_view);
                 view.open(
                     app_server.request_handle(),
                     tui.frame_requester(),

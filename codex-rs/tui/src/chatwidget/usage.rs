@@ -9,92 +9,10 @@ use uuid::Uuid;
 use super::reset_credits::reset_credit_options;
 use super::*;
 
-const USAGE_MENU_VIEW_ID: &str = "usage-menu";
 const RATE_LIMIT_RESET_VIEW_ID: &str = "rate-limit-reset";
 const RATE_LIMIT_RESET_CONFIRMATION_VIEW_ID: &str = "rate-limit-reset-confirmation";
 
 impl ChatWidget {
-    pub(super) fn open_usage_menu(&mut self) {
-        self.clear_pending_rate_limit_reset_hint();
-        let should_refresh_reset_availability = self.available_rate_limit_reset_credits == Some(0);
-        self.bottom_pane
-            .show_selection_view(self.usage_menu_params());
-        if should_refresh_reset_availability {
-            let request_id = self.take_next_rate_limit_reset_request_id();
-            self.pending_usage_menu_rate_limit_request_id = Some(request_id);
-            self.app_event_tx.send(AppEvent::RefreshRateLimits {
-                origin: RateLimitRefreshOrigin::UsageMenu { request_id },
-            });
-        }
-        self.request_redraw();
-    }
-
-    fn usage_menu_params(&self) -> SelectionViewParams {
-        let reset_eligible = self.has_chatgpt_account;
-        let (reset_action_enabled, reset_description) =
-            match (reset_eligible, self.available_rate_limit_reset_credits) {
-                (true, Some(available_count)) if available_count > 0 => {
-                    (true, format!("{available_count} available"))
-                }
-                (true, None) => (true, "Check availability".to_string()),
-                (true, Some(_)) | (false, _) => (false, "None available".to_string()),
-            };
-
-        SelectionViewParams {
-            view_id: Some(USAGE_MENU_VIEW_ID),
-            title: Some("Usage".to_string()),
-            subtitle: Some("Account usage and resets.".to_string()),
-            footer_hint: Some(usage_hint_line(&self.bottom_pane.list_keymap(), "open")),
-            items: vec![
-                SelectionItem {
-                    name: "View analytics".to_string(),
-                    description: Some("Usage history".to_string()),
-                    actions: vec![Box::new(|tx| {
-                        tx.send(AppEvent::OpenAnalytics { view: None });
-                    })],
-                    dismiss_on_select: true,
-                    ..Default::default()
-                },
-                SelectionItem {
-                    name: "Redeem reset".to_string(),
-                    description: Some(reset_description),
-                    is_disabled: !reset_action_enabled,
-                    actions: vec![Box::new(|tx| {
-                        tx.send(AppEvent::OpenRateLimitResetCredits);
-                    })],
-                    dismiss_on_select: true,
-                    ..Default::default()
-                },
-            ],
-            ..SelectionViewParams::picker()
-        }
-    }
-
-    pub(crate) fn finish_usage_menu_rate_limit_refresh(
-        &mut self,
-        request_id: u64,
-        snapshots: Vec<RateLimitSnapshot>,
-        result: Result<RateLimitResetCreditsSummary, String>,
-    ) {
-        if self.pending_usage_menu_rate_limit_request_id != Some(request_id) {
-            return;
-        }
-        self.pending_usage_menu_rate_limit_request_id = None;
-        for snapshot in snapshots {
-            self.on_rate_limit_snapshot(Some(snapshot));
-        }
-        if let Ok(response) = result {
-            self.available_rate_limit_reset_credits = Some(response.available_count);
-        }
-        let params = self.usage_menu_params();
-        if self
-            .bottom_pane
-            .replace_selection_view_if_present(USAGE_MENU_VIEW_ID, params)
-        {
-            self.request_redraw();
-        }
-    }
-
     pub(crate) fn show_rate_limit_reset_loading_popup(&mut self) -> u64 {
         self.clear_pending_rate_limit_reset_hint();
         self.pending_rate_limit_reset_idempotency_key = None;
@@ -517,11 +435,9 @@ impl ChatWidget {
         self.pending_rate_limit_reset_request_id = None;
         self.pending_rate_limit_reset_idempotency_key = None;
         self.rate_limit_reset_picker_request_id = None;
-        self.pending_usage_menu_rate_limit_request_id = None;
         self.available_rate_limit_reset_credits = None;
         self.rate_limit_snapshots_by_limit_id.clear();
         self.clear_pending_rate_limit_reset_hint();
-        self.bottom_pane.dismiss_view_by_id(USAGE_MENU_VIEW_ID);
         self.bottom_pane
             .dismiss_view_by_id(RATE_LIMIT_RESET_VIEW_ID);
         self.bottom_pane
@@ -553,7 +469,7 @@ impl ChatWidget {
         }
         self.pending_rate_limit_reset_hint = Some(history_cell::new_info_event(
             format!(
-                "You have {available_count} {} available. Run /usage to use one.",
+                "You have {available_count} {} available. Use the reset action in the rate-limit notice to redeem one.",
                 reset_label(available_count)
             ),
             /*hint*/ None,

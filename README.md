@@ -21,19 +21,33 @@ The release installers verify package SHA-256 digests. Run `codex` to start the 
 ## Open ChatGPT Web
 
 ```text
-codex web          # Open the private browser window
+codex web          # First run: choose an account; later runs open ChatGPT
 codex web open
-codex web login    # Open ChatGPT so you can sign in to its separate profile
+codex web login    # Choose Free/Go, Plus, or Pro, then sign in to ChatGPT
 codex web setup
 codex web start    # Start an idle hidden process; ChatGPT is not loaded
 codex web hide     # Hide the window and release the WebView's memory
 codex web status
+codex web models   # Show this harness's models and last observed ChatGPT picker text
 codex web stop
 ```
 
-The WebView is created only after an explicit open, login, or setup command. Hiding or closing the window releases the WebView while keeping the lightweight controller alive; the separate profile preserves sign-in data. Use `codex web stop` to exit the controller. It never launches automatically.
+The WebView is created only after an explicit open, login, or setup command. On the first `codex web`, the account chooser appears; later runs open ChatGPT at its Temporary Chat entry URL. Every `codex web open` (and `setup`) reloads that entry URL, even if the current WebView had navigated to a regular conversation. Hiding or closing the window releases the WebView while keeping the lightweight controller alive; the separate profile preserves sign-in data. Use `codex web stop` to exit the controller. It never launches automatically.
+
+`codex web login` first asks which account you intend to use. It records only that choice in the
+private browser data directory and opens the standard ChatGPT sign-in page. Later `codex web` and
+`codex web open` commands start at ChatGPT's Temporary Chat entry URL. The account's actual picker text
+is observed from ChatGPT after opening it. `codex web models` lists the model catalog bundled with this
+harness and shows the last observed picker text, or reports unknown when no scan was detected. It does
+not grant or infer account entitlements; ChatGPT remains authoritative.
 
 Windows uses the Microsoft Edge WebView2 Runtime, which is included with Windows 11. Other Windows systems can install it using [Microsoft's WebView2 deployment guide](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution). macOS uses the built-in WKWebView. On Linux, the CLI is built for musl while the browser sidecar uses the system GNU/WebKitGTK 4.1 stack; opening the browser requires glibc, GTK 3, and WebKitGTK 4.1 runtime libraries. These Linux libraries are not bundled with the release.
+
+## Connect the workspace to ChatGPT
+
+Run `codex web tunnel configure` from the workspace you want ChatGPT to access. Enter the tunnel ID and runtime API key when prompted. Codex installs the official OpenAI tunnel client, verifies its release SHA-256 digest, and starts it hidden in the background. In ChatGPT, add an MCP connector named **Codex Web**, choose **Connection: Tunnel**, and enter the same tunnel ID. The connector exposes workspace file read/write/search and command tools.
+
+Use `codex web tunnel status`, `codex web tunnel start`, and `codex web tunnel stop` to manage the runtime. `codex web tunnel remove` stops it and deletes the saved credentials. The API key stays in Codex's encrypted secret store; startup writes it to a temporary private file for tunnel-client to read, then removes that file after the runtime is healthy. The key is not passed through the tunnel client's environment to its MCP child. Tunnel logs are capped at 4 MiB, and after a successful tunnel-client update older cached binaries are removed. MCP discovery is reported separately; ChatGPT confirms it when the connector first initializes.
 
 ## Build from source
 

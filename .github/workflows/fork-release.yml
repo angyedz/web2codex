@@ -169,6 +169,33 @@ jobs:
           fi
           python scripts/build_codex_package.py "${package_args[@]}"
 
+      - name: Smoke-test the assembled package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$RUNNER_TEMP/codex-package-$TARGET"
+          cli="$package/bin/codex"
+          browser="$package/codex-resources/codex-web-browser"
+          test -x "$cli"
+          test -f "$browser"
+          "$cli" --version
+          "$cli" web --help >/dev/null
+
+      - name: Smoke-test the assembled package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP "codex-package-$env:TARGET"
+          $cli = Join-Path $package "bin/codex.exe"
+          $browser = Join-Path $package "codex-resources/codex-web-browser.exe"
+          if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw "Missing packaged CLI: $cli" }
+          if (-not (Test-Path -LiteralPath $browser -PathType Leaf)) { throw "Missing packaged WebView browser: $browser" }
+          & $cli --version
+          if ($LASTEXITCODE -ne 0) { throw "Packaged codex --version failed with exit code $LASTEXITCODE" }
+          & $cli web --help *> $null
+          if ($LASTEXITCODE -ne 0) { throw "Packaged codex web --help failed with exit code $LASTEXITCODE" }
+
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: codex-package-${{ matrix.target }}

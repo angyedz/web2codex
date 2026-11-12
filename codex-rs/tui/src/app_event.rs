@@ -218,10 +218,8 @@ pub(crate) struct PluginRemoteSectionError {
 /// updates the cached snapshots and any available reset-credit notice (no
 /// status card to finalize). A `StatusCommand` is tied to a specific `/status`
 /// invocation and must call `finish_status_rate_limit_refresh` when done so the
-/// card stops showing a "refreshing" state. A `UsageMenu` refreshes a cached
-/// zero reset count so the disabled menu entry can become available without a
-/// restart. A `ResetPicker` refreshes the rate limits and detailed reset-credit
-/// rows before showing redemption choices.
+/// card stops showing a "refreshing" state. A `ResetPicker` refreshes the rate
+/// limits and detailed reset-credit rows before showing redemption choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RateLimitRefreshOrigin {
     /// Eagerly fetched after bootstrap for `/status` data and reset availability.
@@ -229,8 +227,6 @@ pub(crate) enum RateLimitRefreshOrigin {
     /// User-initiated via `/status`; the `request_id` correlates with the
     /// status card that should be updated when the fetch completes.
     StatusCommand { request_id: u64 },
-    /// User reopened `/usage` while the cached reset-credit count was zero.
-    UsageMenu { request_id: u64 },
     /// User opened the reset-credit picker.
     ResetPicker { request_id: u64 },
     /// Refresh requested after a reset credit was successfully consumed.
@@ -919,7 +915,12 @@ pub(crate) enum AppEvent {
         view: Option<crate::analytics::TokenActivityView>,
     },
 
-    /// Open the reset-credit flow selected from the `/usage` menu.
+    /// Open token statistics without account limit history sections.
+    OpenUsageStatistics {
+        view: Option<crate::analytics::TokenActivityView>,
+    },
+
+    /// Open the account reset-credit flow selected from a rate-limit surface.
     OpenRateLimitResetCredits,
 
     /// Confirm the reset credit selected from the reset-credit picker.

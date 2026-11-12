@@ -38,7 +38,6 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
-const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
 impl ChatWidget {
     /// Dispatch a bare slash command and record its staged local-history entry.
@@ -564,9 +563,8 @@ impl ChatWidget {
                 );
             }
             SlashCommand::Usage => {
-                if self.ensure_usage_command_available() {
-                    self.open_usage_menu();
-                }
+                self.app_event_tx
+                    .send(AppEvent::OpenUsageStatistics { view: None });
             }
             SlashCommand::Ide => {
                 self.handle_ide_command();
@@ -838,18 +836,14 @@ impl ChatWidget {
             SlashCommand::Pwd => {
                 self.add_error_message("Usage: /pwd".to_string());
             }
-            SlashCommand::Usage => {
-                if self.ensure_usage_command_available() {
-                    match crate::analytics::TokenActivityView::parse(trimmed) {
-                        Some(view) => self
-                            .app_event_tx
-                            .send(AppEvent::OpenAnalytics { view: Some(view) }),
-                        None => self.add_error_message(
-                            "Usage: /usage [daily|weekly|cumulative]".to_string(),
-                        ),
-                    }
+            SlashCommand::Usage => match crate::analytics::TokenActivityView::parse(trimmed) {
+                Some(view) => self
+                    .app_event_tx
+                    .send(AppEvent::OpenUsageStatistics { view: Some(view) }),
+                None => {
+                    self.add_error_message("Usage: /usage [daily|weekly|cumulative]".to_string())
                 }
-            }
+            },
             SlashCommand::Voice => match trimmed.to_ascii_lowercase().as_str() {
                 "settings" => self.app_event_tx.send(AppEvent::OpenRealtimeSettings),
                 "mute" => self.app_event_tx.send(AppEvent::VoiceControl {
@@ -1274,14 +1268,6 @@ impl ChatWidget {
             allow_elevate_sandbox,
             side_conversation_active: self.active_side_conversation,
         }
-    }
-
-    fn ensure_usage_command_available(&mut self) -> bool {
-        if self.has_codex_backend_auth {
-            return true;
-        }
-        self.add_error_message(USAGE_CHATGPT_LOGIN_REQUIRED.to_string());
-        false
     }
 
     fn queued_command_drain_result(&self, cmd: SlashCommand) -> QueueDrain {

@@ -158,6 +158,9 @@ impl AnalyticsView {
     }
 
     pub(super) fn visible_sections(&self) -> &'static [Section] {
+        if self.summary_only {
+            return &[Section::Summary];
+        }
         match self.account_kind() {
             Some(AccountKind::Consumer) if self.plan.enabled => &[
                 Section::Summary,

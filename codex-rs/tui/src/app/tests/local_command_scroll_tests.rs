@@ -2,7 +2,6 @@
 //! steal the reader's position in the owned transcript.
 
 use super::*;
-use codex_app_server_protocol::RateLimitResetCreditsSummary;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use pretty_assertions::assert_eq;
@@ -511,18 +510,9 @@ async fn dynamic_service_tier_command_returns_to_latest() -> Result<()> {
 }
 
 #[tokio::test]
-async fn usage_picker_opens_analytics_without_moving_the_background_transcript() -> Result<()> {
+async fn usage_command_opens_analytics_without_moving_the_background_transcript() -> Result<()> {
     let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
     set_chatgpt_auth(&mut app.chat_widget);
-    let startup_request = app.chat_widget.start_rate_limit_reset_startup_check();
-    assert!(app.chat_widget.finish_rate_limit_reset_hint_refresh(
-        startup_request,
-        Vec::new(),
-        Ok(RateLimitResetCreditsSummary {
-            available_count: 1,
-            credits: None,
-        }),
-    ));
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut server = start_config_write_test_app_server(&app).await?;
     tui.set_owned_screen(/*owned*/ true)?;
@@ -530,20 +520,26 @@ async fn usage_picker_opens_analytics_without_moving_the_background_transcript()
     while events.try_recv().is_ok() {}
 
     submit_local_command(&mut app, "/usage");
-    let follow = events.try_recv().expect("usage command follow event");
-    assert_matches!(&follow, AppEvent::FollowTranscript);
-    app.handle_event(&mut tui, &mut server, follow).await?;
-    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("View analytics"));
-    while events.try_recv().is_ok() {}
+    let mut opened = None;
+    while let Ok(event) = events.try_recv() {
+        if let AppEvent::OpenUsageStatistics { view } = event {
+            opened = Some(view);
+            break;
+        }
+        app.handle_event(&mut tui, &mut server, event).await?;
+    }
+    let view = opened.expect("usage command opens token statistics");
+    assert_eq!(view, None);
+    let held = transcript_buffer(&mut app);
     app.transcript_view
         .jump_to_entry(&app.transcript_cells, /*index*/ 0);
 
-    app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    let open = events.try_recv().expect("usage picker action");
-    assert_matches!(&open, AppEvent::OpenAnalytics { view: None });
-    let held = transcript_buffer(&mut app);
-    app.handle_event(&mut tui, &mut server, open).await?;
+    app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::OpenUsageStatistics { view },
+    )
+    .await?;
     assert!(matches!(app.overlay.as_ref(), Some(Overlay::Analytics(_))));
     assert_eq!(transcript_buffer(&mut app), held);
     assert!(!app.transcript_view.is_following());

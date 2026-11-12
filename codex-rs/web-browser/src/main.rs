@@ -7,7 +7,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -20,8 +20,136 @@ use uuid::Uuid;
 use wry::WebViewBuilderExtDarwin;
 use wry::{WebContext, WebView, WebViewBuilder};
 
-const CHATGPT_URL: &str = "https://chatgpt.com/";
+const CHATGPT_SIGN_IN_URL: &str = "https://chatgpt.com/";
+const CHATGPT_TEMPORARY_CHAT_URL: &str = "https://chatgpt.com/?temporary-chat=true";
 const STALE_LOCK_AGE: Duration = Duration::from_secs(30);
+const ACCOUNT_CAPABILITY_PROBE_SCRIPT: &str = r##"
+(() => {
+  if (window.top !== window || location.origin !== "https://chatgpt.com") return;
+  let reported = false;
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const visible = element => {
+    if (!element || !element.isConnected) return false;
+    for (let parent = element; parent; parent = parent.parentElement) {
+      if (parent.matches("[hidden], [inert], [aria-hidden='true']")) return false;
+      const style = getComputedStyle(parent);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+    }
+    return true;
+  };
+  const uniqueVisible = (root, selector) => {
+    try {
+      const matches = [...root.querySelectorAll(selector)].filter(visible);
+      return matches.length === 1 ? matches[0] : null;
+    } catch (_) {
+      return null;
+    }
+  };
+  const emit = picker_options => {
+    if (reported) return;
+    reported = true;
+    window.ipc.postMessage(JSON.stringify({ type: "account-capabilities", probe_version: 3, picker_options }));
+  };
+  const composerSelector = [
+    '[data-testid="prompt-textarea"]',
+    "#prompt-textarea",
+    '[contenteditable="true"][data-lexical-editor="true"]',
+    'form[data-chatgpt-composer] [data-composer-markdown][contenteditable="true"][role="textbox"]'
+  ].join(",");
+  (async () => {
+    const deadline = Date.now() + 10000;
+    let observations = 0;
+    while (!reported && Date.now() < deadline) {
+      if (location.origin !== "https://chatgpt.com") return;
+      const composer = uniqueVisible(document, composerSelector);
+      const form = composer?.closest("form");
+      if (!composer || !form || document.readyState !== "complete") {
+        observations = 0;
+        await sleep(250);
+        continue;
+      }
+      const control = uniqueVisible(form, 'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]');
+      if (control) {
+        observations += 1;
+        if (observations >= 2) {
+          const expanded = control.getAttribute("aria-expanded");
+          const state = control.getAttribute("data-state");
+          const wasOpen = expanded === "true" || state === "open";
+          if (!wasOpen) control.click();
+          const menuDeadline = Date.now() + 5000;
+          while (!reported && Date.now() < menuDeadline) {
+            const menus = [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(visible);
+            if (menus.length === 1) {
+              const options = [...menus[0].querySelectorAll('[role="menuitem"], [role="option"], button')]
+                .filter(visible)
+                .map(element => (element.getAttribute("aria-label") || element.innerText || element.textContent || "").replace(/\s+/g, " ").trim())
+                .filter(text => text.length > 0 && text.length <= 120)
+                .filter((text, index, all) => all.indexOf(text) === index)
+                .slice(0, 40);
+              if (options.length > 0) {
+                emit(options);
+                if (!wasOpen) control.click();
+                return;
+              }
+            }
+            await sleep(250);
+          }
+          if (!wasOpen) control.click();
+          emit([]);
+          return;
+        }
+      } else {
+        observations = 0;
+      }
+      await sleep(250);
+    }
+  })().catch(() => {});
+})();
+"##;
+const ACCOUNT_CHOOSER_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in to Codex Web</title>
+  <style>
+    :root { color-scheme: dark; font: 15px/1.5 system-ui, sans-serif; background: #111318; color: #f2f3f5; }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 28px; }
+    main { width: min(100%, 520px); }
+    h1 { margin: 0 0 8px; font-size: 26px; letter-spacing: -.03em; }
+    p { color: #a8acb6; margin: 0 0 24px; }
+    .choices { display: grid; gap: 12px; }
+    button { width: 100%; min-height: 58px; border: 1px solid #343943; border-radius: 12px; padding: 14px 18px; background: #1a1d24; color: inherit; text-align: left; font: inherit; font-weight: 600; cursor: pointer; }
+    button:hover, button:focus-visible { background: #252a34; border-color: #737d90; outline: none; }
+    button:disabled { cursor: wait; opacity: .65; }
+    #status { min-height: 24px; margin-top: 16px; font-size: 13px; }
+    .note { margin-top: 18px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Sign in to ChatGPT</h1>
+    <p>Choose the account you want to use. The choice is saved locally; ChatGPT still controls what that account can access.</p>
+    <div class="choices">
+      <button data-tier="free-go">Login with Free/Go account</button>
+      <button data-tier="plus">Login with Plus account</button>
+      <button data-tier="pro">Login with Pro account</button>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+    <p class="note">Sign-in stays in this private Codex Web browser profile.</p>
+  </main>
+  <script>
+    const buttons = [...document.querySelectorAll("button[data-tier]")];
+    const status = document.querySelector("#status");
+    for (const button of buttons) button.addEventListener("click", () => {
+      for (const item of buttons) item.disabled = true;
+      status.textContent = "Opening ChatGPT sign-in…";
+      window.ipc.postMessage(button.dataset.tier);
+    });
+  </script>
+</body>
+</html>"##;
 #[cfg(target_os = "windows")]
 const WEBVIEW_CREATION_CONTEXT: &str =
     "failed to create the native WebView; install the Microsoft Edge WebView2 Runtime";
@@ -41,8 +169,32 @@ struct BrowserState {
     token: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AccountCapabilities {
+    probe_version: u8,
+    picker_options: Vec<String>,
+    detected_at_unix_seconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum AccountTierChoice {
+    FreeGo,
+    Plus,
+    Pro,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowserPage {
+    SignIn,
+    TemporaryChat,
+    AccountChooser,
+}
+
 enum BrowserEvent {
-    Open(SyncSender<Result<(), String>>),
+    Open(BrowserPage, SyncSender<Result<(), String>>),
+    ContinueLogin(AccountTierChoice),
+    AccountCapabilities(AccountCapabilities),
     Hide,
     Stop(SyncSender<()>),
 }
@@ -106,6 +258,8 @@ fn run_background() -> anyhow::Result<()> {
         event_loop,
         window,
         data_dir.join("profile"),
+        data_dir.join("selected-account-tier.json"),
+        data_dir.join("account-capabilities.json"),
         state_path,
         lock_file,
     )
@@ -115,26 +269,45 @@ fn run_event_loop(
     event_loop: tao::event_loop::EventLoop<BrowserEvent>,
     window: Window,
     profile_dir: PathBuf,
+    selected_account_tier_path: PathBuf,
+    account_capabilities_path: PathBuf,
     state_path: PathBuf,
     lock_file: PathBuf,
 ) -> ! {
     let window_id = window.id();
     let mut web_context: Option<WebContext> = None;
     let mut webview: Option<WebView> = None;
+    let mut browser_page: Option<BrowserPage> = None;
+    let event_proxy = event_loop.create_proxy();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
-            Event::UserEvent(BrowserEvent::Open(reply)) => {
-                if webview.is_none() {
+            Event::UserEvent(BrowserEvent::Open(page, reply)) => {
+                // An explicit open always returns to the Temporary Chat entry URL, even if the
+                // current WebView navigated to a regular conversation while it was visible.
+                let rebuilding_webview = page == BrowserPage::TemporaryChat
+                    || webview.is_none()
+                    || browser_page != Some(page);
+                if page == BrowserPage::AccountChooser
+                    || (page == BrowserPage::TemporaryChat && rebuilding_webview)
+                {
+                    let _ = fs::remove_file(&account_capabilities_path);
+                }
+                if rebuilding_webview {
+                    webview = None;
+                    web_context = None;
                     if let Err(error) = prepare_profile_directory(&profile_dir) {
                         let _ = reply.send(Err(error.to_string()));
                         return;
                     }
                     let context = web_context
                         .get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
-                    match build_webview(&window, context) {
-                        Ok(created) => webview = Some(created),
+                    match build_webview(&window, context, page, event_proxy.clone()) {
+                        Ok(created) => {
+                            webview = Some(created);
+                            browser_page = Some(page);
+                        }
                         Err(error) => {
                             let _ = reply.send(Err(error.to_string()));
                             return;
@@ -145,12 +318,39 @@ fn run_event_loop(
                 window.set_focus();
                 let _ = reply.send(Ok(()));
             }
+            Event::UserEvent(BrowserEvent::ContinueLogin(tier)) => {
+                if browser_page != Some(BrowserPage::AccountChooser) {
+                    return;
+                }
+                let Some(view) = webview.as_ref() else {
+                    return;
+                };
+                if let Err(_error) = store_account_tier(&selected_account_tier_path, tier) {
+                    let _ = view.evaluate_script(
+                        "document.querySelector('#status').textContent = 'Could not save your account choice. Please try again.'; for (const button of document.querySelectorAll('button[data-tier]')) button.disabled = false;",
+                    );
+                    return;
+                }
+                if let Err(_error) = view.load_url(CHATGPT_SIGN_IN_URL) {
+                    let _ = view.evaluate_script(
+                        "document.querySelector('#status').textContent = 'Could not open ChatGPT. Please try again.'; for (const button of document.querySelectorAll('button[data-tier]')) button.disabled = false;",
+                    );
+                    return;
+                }
+                browser_page = Some(BrowserPage::SignIn);
+            }
+            Event::UserEvent(BrowserEvent::AccountCapabilities(capabilities)) => {
+                if let Err(error) = store_account_capabilities(&account_capabilities_path, capabilities) {
+                    eprintln!("failed to save ChatGPT account capabilities: {error:#}");
+                }
+            }
             Event::UserEvent(BrowserEvent::Hide) => {
                 window.set_visible(false);
                 // Keep only the lightweight controller resident while hidden.
                 // WebView cookies and local storage live in the persistent profile.
                 webview = None;
                 web_context = None;
+                browser_page = None;
             }
             Event::UserEvent(BrowserEvent::Stop(reply)) => {
                 window.set_visible(false);
@@ -166,21 +366,111 @@ fn run_event_loop(
                 window.set_visible(false);
                 webview = None;
                 web_context = None;
+                browser_page = None;
             }
             _ => {}
         }
     })
 }
 
-fn build_webview(window: &Window, context: &mut WebContext) -> anyhow::Result<WebView> {
+fn build_webview(
+    window: &Window,
+    context: &mut WebContext,
+    page: BrowserPage,
+    event_proxy: EventLoopProxy<BrowserEvent>,
+) -> anyhow::Result<WebView> {
     let builder = WebViewBuilder::new_with_web_context(context);
     #[cfg(target_os = "macos")]
     let builder = builder.with_data_store_identifier(PROFILE_DATA_STORE_ID);
 
-    builder
-        .with_url(CHATGPT_URL)
-        .build(window)
-        .context(WEBVIEW_CREATION_CONTEXT)
+    let builder = builder
+        .with_initialization_script(ACCOUNT_CAPABILITY_PROBE_SCRIPT)
+        .with_ipc_handler(move |request| {
+            let body = request.body().as_str();
+            let tier = match body {
+                "free-go" => Some(AccountTierChoice::FreeGo),
+                "plus" => Some(AccountTierChoice::Plus),
+                "pro" => Some(AccountTierChoice::Pro),
+                _ => None,
+            };
+            if let Some(tier) = tier {
+                let _ = event_proxy.send_event(BrowserEvent::ContinueLogin(tier));
+                return;
+            }
+            let Ok(message) = serde_json::from_str::<serde_json::Value>(body) else {
+                return;
+            };
+            if message.get("type").and_then(serde_json::Value::as_str)
+                != Some("account-capabilities")
+            {
+                return;
+            }
+            if message
+                .get("probe_version")
+                .and_then(serde_json::Value::as_u64)
+                != Some(3)
+            {
+                return;
+            }
+            let Some(picker_options) = message
+                .get("picker_options")
+                .and_then(serde_json::Value::as_array)
+            else {
+                return;
+            };
+            if picker_options.len() > 40 {
+                return;
+            }
+            let picker_options = picker_options
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|option| !option.is_empty() && option.len() <= 120)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let detected_at_unix_seconds = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ =
+                event_proxy.send_event(BrowserEvent::AccountCapabilities(AccountCapabilities {
+                    probe_version: 3,
+                    picker_options,
+                    detected_at_unix_seconds,
+                }));
+        });
+
+    let builder = match page {
+        BrowserPage::SignIn => builder.with_url(CHATGPT_SIGN_IN_URL),
+        BrowserPage::TemporaryChat => builder.with_url(CHATGPT_TEMPORARY_CHAT_URL),
+        BrowserPage::AccountChooser => builder.with_html(ACCOUNT_CHOOSER_HTML),
+    };
+
+    builder.build(window).context(WEBVIEW_CREATION_CONTEXT)
+}
+
+fn store_account_tier(path: &Path, tier: AccountTierChoice) -> anyhow::Result<()> {
+    fs::write(path, serde_json::to_vec(&tier)?).with_context(|| {
+        format!(
+            "failed to save the selected ChatGPT account type at {}",
+            path.display()
+        )
+    })?;
+    restrict_file_permissions(path)
+}
+
+fn store_account_capabilities(
+    path: &Path,
+    capabilities: AccountCapabilities,
+) -> anyhow::Result<()> {
+    let contents = serde_json::to_vec(&capabilities)?;
+    fs::write(path, contents).with_context(|| {
+        format!(
+            "failed to save ChatGPT account capabilities at {}",
+            path.display()
+        )
+    })?;
+    restrict_file_permissions(path)
 }
 
 fn prepare_profile_directory(profile_dir: &Path) -> anyhow::Result<()> {
@@ -290,9 +580,17 @@ fn handle_control_request(
             let _ = write_response(&mut stream, "204 No Content", "");
             false
         }
-        "/open" => {
+        "/open" | "/login" => {
             let (reply, result) = mpsc::sync_channel(1);
-            if event_proxy.send_event(BrowserEvent::Open(reply)).is_err() {
+            let page = if request_path == "/login" {
+                BrowserPage::AccountChooser
+            } else {
+                BrowserPage::TemporaryChat
+            };
+            if event_proxy
+                .send_event(BrowserEvent::Open(page, reply))
+                .is_err()
+            {
                 let _ = write_response(&mut stream, "503 Service Unavailable", "browser stopped");
                 return false;
             }
