@@ -383,7 +383,13 @@ async fn run_command_under_sandbox(
         .context("sandbox command must not be empty")?;
     let cwd = PathUri::from_abs_path(cwd);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let manager = SandboxManager::for_inherited_terminal(allow_unix_sockets);
+    let manager = if sandbox_state.is_some() {
+        // MCP commands are non-interactive and must not inherit the broader
+        // process scratch grants used by terminal-launched commands on macOS.
+        SandboxManager::for_file_system_helpers()
+    } else {
+        SandboxManager::for_inherited_terminal(allow_unix_sockets)
+    };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let manager = SandboxManager::new();
     let workspace_roots = sandbox_state.is_none().then(|| {
