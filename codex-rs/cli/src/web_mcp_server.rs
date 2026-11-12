@@ -8,6 +8,10 @@ use std::time::Duration;
 use anyhow::Context;
 use codex_mcp::SandboxState;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemPath;
+use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -317,11 +321,36 @@ impl WebMcpServer {
             AbsolutePathBuf::from_absolute_path(command_temp_dir.path()).map_err(|error| {
                 format!("Could not resolve the private command temp directory: {error}")
             })?;
-        let permission_profile = PermissionProfile::workspace_write_with(
+        let workspace_write_profile = PermissionProfile::workspace_write_with(
             &[temp_root],
             NetworkSandboxPolicy::Restricted,
             /*exclude_tmpdir_env_var*/ true,
             /*exclude_slash_tmp*/ true,
+        );
+        let mut file_system = workspace_write_profile.file_system_sandbox_policy();
+        let root_read_entries = file_system
+            .entries
+            .iter_mut()
+            .filter(|entry| {
+                matches!(
+                    &entry.path,
+                    FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root
+                    }
+                ) && entry.access == FileSystemAccessMode::Read
+            })
+            .collect::<Vec<_>>();
+        if root_read_entries.len() != 1 {
+            return Err("Could not prepare the restricted MCP command sandbox".to_string());
+        }
+        root_read_entries.into_iter().for_each(|entry| {
+            entry.path = FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            };
+        });
+        let permission_profile = PermissionProfile::from_runtime_permissions(
+            &file_system,
+            NetworkSandboxPolicy::Restricted,
         );
         let sandbox_state = SandboxState {
             permission_profile,

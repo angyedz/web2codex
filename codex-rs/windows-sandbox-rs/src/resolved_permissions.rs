@@ -101,7 +101,8 @@ impl ResolvedWindowsSandboxPermissions {
     }
 
     /// Rejects filesystem policies that the elevated Windows sandbox cannot
-    /// enforce safely.
+    /// enforce safely. Rootless policies are allowed when they provide scoped
+    /// readable roots or the platform's minimal read set.
     pub fn validate_elevated_filesystem_policy(&self, cwd: &Path) -> Result<()> {
         let root = cwd
             .ancestors()
@@ -110,8 +111,14 @@ impl ResolvedWindowsSandboxPermissions {
         let root_is_denied = ReadDenyMatcher::try_new_for_local_paths(&self.file_system, cwd)
             .map_err(anyhow::Error::msg)?
             .is_some_and(|matcher| matcher.is_local_path_read_denied(root));
-        if !self.file_system.can_read_local_path_with_cwd(root, cwd) || root_is_denied {
-            anyhow::bail!("elevated Windows sandbox requires effective `:root` read access");
+        let has_scoped_read_roots = self.file_system.include_platform_defaults()
+            || !self.readable_roots_for_cwd(cwd).is_empty();
+        if root_is_denied
+            || (!self.file_system.can_read_local_path_with_cwd(root, cwd) && !has_scoped_read_roots)
+        {
+            anyhow::bail!(
+                "elevated Windows sandbox requires `:root` read access or scoped readable roots"
+            );
         }
         Ok(())
     }
@@ -558,19 +565,23 @@ mod tests {
     }
 
     #[test]
-    fn elevated_filesystem_policy_requires_effective_root_read_access() {
+    fn elevated_filesystem_policy_requires_root_or_scoped_read_access() {
         let tmp = TempDir::new().expect("tempdir");
         let cwd = tmp.path().join("workspace");
         let denied_path = tmp.path().join("private");
         std::fs::create_dir_all(&cwd).expect("create cwd");
 
-        let default_root_denied = ResolvedWindowsSandboxPermissions::try_from_permission_profile(
+        let workspace_scoped_only = ResolvedWindowsSandboxPermissions::try_from_permission_profile(
             &permission_profile_with_entries(vec![FileSystemSandboxEntry::new(
                 FileSystemPath::Special {
                     value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
                 },
                 FileSystemAccessMode::Write,
             )]),
+        )
+        .expect("managed permission profile");
+        let no_read_roots = ResolvedWindowsSandboxPermissions::try_from_permission_profile(
+            &permission_profile_with_entries(Vec::new()),
         )
         .expect("managed permission profile");
         let root_read_with_carveout =
@@ -626,9 +637,14 @@ mod tests {
             .expect("managed permission profile");
 
         assert!(
-            default_root_denied
+            no_read_roots
                 .validate_elevated_filesystem_policy(&cwd)
                 .is_err()
+        );
+        assert!(
+            workspace_scoped_only
+                .validate_elevated_filesystem_policy(&cwd)
+                .is_ok()
         );
         assert!(
             root_read_with_carveout
