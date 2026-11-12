@@ -108,28 +108,29 @@ const ACCOUNT_CAPABILITY_PROBE_SCRIPT: &str = r##"
 "##;
 const TEMPORARY_CHAT_ENFORCEMENT_SCRIPT: &str = r##"
 (() => {
-  if (window.top !== window || location.origin !== "https://chatgpt.com") return;
+  if (window.top !== window) return;
 
   const chatOrigin = "https://chatgpt.com";
+  const chatHosts = new Set(["chatgpt.com", "chat.openai.com"]);
   const temporaryChatUrl = `${chatOrigin}/?temporary-chat=true`;
+  const isChatUrl = url => url.protocol === "https:" && chatHosts.has(url.hostname.toLowerCase().replace(/\.$/, ""));
   const preserveTemporaryChat = value => {
-    if (value == null) return value;
+    if (value == null) return null;
     try {
       const url = new URL(value, location.href);
-      if (url.origin !== chatOrigin) return value;
-      if (url.pathname !== "/") return temporaryChatUrl;
+      if (!isChatUrl(url)) return null;
+      if (url.origin !== chatOrigin || url.pathname !== "/") return temporaryChatUrl;
       url.searchParams.set("temporary-chat", "true");
       return `${url.pathname}${url.search}${url.hash}`;
     } catch (_) {
-      return value;
+      return null;
     }
   };
   const ensureTemporaryChat = () => {
-    if (location.origin !== chatOrigin) return;
-    const url = new URL(location.href);
-    if (url.pathname !== "/" || url.searchParams.get("temporary-chat") !== "true") {
-      location.replace(temporaryChatUrl);
-    }
+    const current = new URL(location.href);
+    if (!isChatUrl(current)) return;
+    const destination = preserveTemporaryChat(current.href);
+    if (destination && new URL(destination, current.href).href !== current.href) location.replace(destination);
   };
 
   // Keep the WebView on Temporary Chat, including when ChatGPT uses SPA history
@@ -138,16 +139,67 @@ const TEMPORARY_CHAT_ENFORCEMENT_SCRIPT: &str = r##"
     const original = history[method];
     history[method] = function(state, title, url) {
       const next = preserveTemporaryChat(url);
-      if (next === temporaryChatUrl && url != null) {
+      if (url != null && next == null) return original.call(this, state, title, url);
+      if (url != null) {
+        const target = new URL(url, location.href);
+        if (isChatUrl(target) && (target.origin !== chatOrigin || target.pathname !== "/")) {
+          location.replace(temporaryChatUrl);
+          return;
+        }
+      }
+      if (next === temporaryChatUrl) {
         location.replace(temporaryChatUrl);
         return;
       }
-      return original.call(this, state, title, next);
+      return original.call(this, state, title, next ?? url);
     };
   }
   addEventListener("popstate", ensureTemporaryChat, true);
   addEventListener("pageshow", ensureTemporaryChat, true);
+  // The Navigation API can be used for same-document route changes without
+  // calling the History methods wrapped above. Cancel non-entry routes there too.
+  if (window.navigation?.addEventListener) {
+    window.navigation.addEventListener("navigate", event => {
+      let target;
+      try {
+        target = new URL(event.destination.url);
+      } catch (_) {
+        return;
+      }
+      if (!isChatUrl(target)) return;
+      const isTemporaryEntry = target.origin === chatOrigin
+        && target.pathname === "/"
+        && target.searchParams.get("temporary-chat") === "true";
+      if (!isTemporaryEntry && event.cancelable) {
+        event.preventDefault();
+        location.replace(temporaryChatUrl);
+      }
+    }, true);
+  }
   ensureTemporaryChat();
+
+  // Links can be handled by ChatGPT's delegated click handlers before a route
+  // reaches the browser navigation layer. Preserve normal root/new-chat links,
+  // but keep saved-chat and other app routes on the Temporary Chat entry.
+  document.addEventListener("click", event => {
+    const anchor = event.composedPath().find(node => node instanceof HTMLAnchorElement);
+    if (!anchor || anchor.hasAttribute("download")) return;
+    let target;
+    try {
+      target = new URL(anchor.href, location.href);
+    } catch (_) {
+      return;
+    }
+    if (!isChatUrl(target)) return;
+    if (target.origin === chatOrigin && target.pathname === "/") {
+      target.searchParams.set("temporary-chat", "true");
+      anchor.href = `${target.pathname}${target.search}${target.hash}`;
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    location.replace(temporaryChatUrl);
+  }, true);
 
   // The browser instance was opened in Temporary Chat; prevent its visible control
   // from switching this ChatGPT session to saved-chat mode.
@@ -456,8 +508,17 @@ fn build_webview(
             let Ok(target) = url::Url::parse(&target) else {
                 return false;
             };
-            if matches!(target.host_str(), Some("chatgpt.com" | "chat.openai.com")) {
-                return target.scheme() == "https" && target.path() == "/";
+            if target.host_str() == Some("chatgpt.com") {
+                return target.scheme() == "https"
+                    && target.port_or_known_default() == Some(443)
+                    && target.path() == "/";
+            }
+            if target.host_str() == Some("chat.openai.com") {
+                // The legacy hostname is accepted only at its root so the
+                // initialization script can immediately canonicalize it.
+                return target.scheme() == "https"
+                    && target.port_or_known_default() == Some(443)
+                    && target.path() == "/";
             }
             target.scheme() == "https"
                 || (target.scheme() == "http"
