@@ -19,7 +19,9 @@ use zip::ZipArchive;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GetLastError, HLOCAL, LocalFree};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_SUCCESS, FILETIME, GetLastError, HLOCAL, LocalFree,
+};
 #[cfg(windows)]
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
@@ -32,7 +34,8 @@ use windows_sys::Win32::Security::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 use crate::web_environment::safe_subprocess_environment;
@@ -42,6 +45,7 @@ const MAX_RELEASE_JSON: usize = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_API_KEY_BYTES: usize = 16 * 1024;
 const CONNECTOR_NAME: &str = "Web2Codex";
 
 #[derive(Deserialize)]
@@ -63,6 +67,7 @@ struct RuntimePaths {
     api_key: PathBuf,
     log: PathBuf,
     pid: PathBuf,
+    process_start: PathBuf,
     signature: PathBuf,
     health_url: PathBuf,
 }
@@ -81,6 +86,14 @@ impl Drop for RemoveFileOnDrop {
 }
 
 pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !api_key.is_empty(),
+        "OpenAI tunnel API key must not be empty"
+    );
+    anyhow::ensure!(
+        api_key.len() <= MAX_API_KEY_BYTES,
+        "OpenAI tunnel API key exceeds the 16 KiB limit"
+    );
     let workspace = workspace
         .canonicalize()
         .with_context(|| format!("workspace does not exist: {}", workspace.display()))?;
@@ -104,9 +117,17 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     }
 
     fs::create_dir_all(&paths.directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&paths.directory, fs::Permissions::from_mode(0o700))?;
+    }
     #[cfg(windows)]
     set_private_windows_acl(&paths.directory, true)?;
-    let _ = fs::remove_file(&paths.health_url);
+    // Never allow a URL left by a previous run to satisfy this process's readiness check.
+    // If it cannot be removed, fail closed instead of starting against stale health state.
+    remove_file_if_exists(&paths.health_url)
+        .context("failed to remove the previous tunnel health URL")?;
     // A crash during the previous startup can leave the short-lived raw key file behind.
     // No active runtime remains at this point, so clear it before any fallible setup step.
     remove_file_if_exists(&paths.api_key)
@@ -114,11 +135,10 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     let client = install_tunnel_client()?;
     remove_obsolete_client_versions(&paths, &client);
     let codex = std::env::current_exe().context("failed to locate the Codex executable")?;
+    let _api_key_cleanup = RemoveFileOnDrop(paths.api_key.clone());
     if let Err(error) = write_private_file(&paths.api_key, api_key.as_bytes()) {
-        let _ = fs::remove_file(&paths.api_key);
         return Err(error).context("failed to write the temporary tunnel API key file");
     }
-    let _api_key_cleanup = RemoveFileOnDrop(paths.api_key.clone());
     write_profile(&paths, tunnel_id, &paths.api_key, &codex, &workspace)?;
 
     let log = File::create(&paths.log)
@@ -127,6 +147,9 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
         file: log,
         bytes_written: 0,
     }));
+    // Verify the executable against its protected digest sidecar immediately before launch.
+    // install_tunnel_client also checks the cache, but later file operations leave a TOCTOU gap.
+    verify_cached_tunnel_client(&client)?;
     let mut command = Command::new(&client);
     command
         .arg("run")
@@ -168,7 +191,15 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
         capture_bounded_log(stderr, Arc::clone(&log));
     }
     let pid = child.id();
+    let Some(process_start) = process_start_token(pid) else {
+        let _ = force_terminate_tunnel_process(pid);
+        let _ = child.wait();
+        remove_runtime_state(&paths)
+            .context("failed to clean runtime state after process identity lookup failed")?;
+        bail!("could not record the tunnel-client process identity; refusing to start without it");
+    };
     if let Err(error) = write_private_file(&paths.pid, pid.to_string().as_bytes())
+        .and_then(|()| write_private_file(&paths.process_start, process_start.as_bytes()))
         .and_then(|()| write_private_file(&paths.signature, signature.as_bytes()))
     {
         let _ = terminate_tunnel_process(pid);
@@ -274,6 +305,19 @@ pub(crate) fn stop() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    anyhow::ensure!(
+        process_group_exists(pid),
+        "a tunnel health listener is responding, but recorded PID {pid} is no longer active; refusing to stop a potentially unrelated process"
+    );
+    let recorded_start = fs::read_to_string(&paths.process_start).ok();
+    let actual_start = process_start_token(pid);
+    anyhow::ensure!(
+        recorded_start
+            .as_deref()
+            .is_some_and(|recorded| Some(recorded.trim()) == actual_start.as_deref()),
+        "a tunnel health listener is responding, but the recorded process identity is missing or no longer matches PID {pid}; automatic stop is refused to protect unrelated processes. Recovery: use the previous Web2Codex binary to run `web2codex web tunnel stop`, or verify that PID {pid}'s executable path identifies the tunnel-client before ending only that PID"
+    );
+
     terminate_tunnel_process(pid)?;
     for _ in 0..50 {
         if !process_group_exists(pid) && !health_check(&health_url, "/healthz") {
@@ -299,6 +343,7 @@ fn remove_runtime_state(paths: &RuntimePaths) -> anyhow::Result<()> {
     for path in [
         &paths.api_key,
         &paths.pid,
+        &paths.process_start,
         &paths.signature,
         &paths.health_url,
     ] {
@@ -332,8 +377,76 @@ fn process_group_exists(pid: u32) -> bool {
     if process.is_null() {
         return false;
     }
+    let mut exit_code = 0u32;
+    let is_running =
+        unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0 && exit_code == 259; // STILL_ACTIVE
     unsafe { CloseHandle(process) };
-    true
+    is_running
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_token(pid: u32) -> Option<String> {
+    // Linux /proc/<pid>/stat field 22 is process start time in clock ticks. The comm
+    // field can contain spaces and parentheses, so parse fields after its final ')'.
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let command_end = stat.rfind(')')?;
+    stat[command_end + 1..]
+        .split_whitespace()
+        .nth(19)
+        .map(str::to_owned)
+}
+
+#[cfg(target_os = "macos")]
+fn process_start_token(pid: u32) -> Option<String> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    // SAFETY: proc_pidinfo fills a caller-owned proc_bsdinfo buffer of the supplied size.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let expected_size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let expected_size_i32 = i32::try_from(expected_size).ok()?;
+    let bytes_read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            expected_size_i32,
+        )
+    };
+    (bytes_read == expected_size_i32)
+        .then(|| format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec))
+}
+
+#[cfg(windows)]
+fn process_start_token(pid: u32) -> Option<String> {
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut creation = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exit = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut kernel = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut user = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let succeeded =
+        unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } != 0;
+    unsafe { CloseHandle(process) };
+    succeeded.then(|| format!("{}:{}", creation.dwHighDateTime, creation.dwLowDateTime))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn process_start_token(_pid: u32) -> Option<String> {
+    None
 }
 
 #[cfg(unix)]
@@ -352,6 +465,8 @@ fn terminate_tunnel_process(pid: u32) -> anyhow::Result<()> {
 fn terminate_tunnel_process(pid: u32) -> anyhow::Result<()> {
     let status = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .env_clear()
+        .envs(safe_subprocess_environment())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -431,7 +546,16 @@ fn runtime_ready() -> bool {
     runtime_paths()
         .ok()
         .and_then(|paths| {
-            let pid = fs::read_to_string(paths.pid).ok()?.trim().parse::<u32>().ok()?;
+            let pid = fs::read_to_string(paths.pid)
+                .ok()?
+                .trim()
+                .parse::<u32>()
+                .ok()?;
+            let expected_start = fs::read_to_string(paths.process_start).ok()?;
+            let actual_start = process_start_token(pid)?;
+            if actual_start != expected_start.trim() {
+                return None;
+            }
             let url = fs::read_to_string(paths.health_url).ok()?;
             Some(process_group_exists(pid) && health_check(&url, "/readyz"))
         })
@@ -448,6 +572,7 @@ fn runtime_paths() -> anyhow::Result<RuntimePaths> {
         api_key: directory.join("runtime-api-key.tmp"),
         log: directory.join("tunnel-client.log"),
         pid: directory.join("tunnel-client.pid"),
+        process_start: directory.join("tunnel-client.start"),
         signature: directory.join("runtime.signature"),
         health_url: directory.join("health-url.txt"),
         directory,
@@ -558,14 +683,14 @@ fn write_private_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     let mut file = options
         .open(path)
         .with_context(|| format!("failed to write {}", path.display()))?;
-    file.write_all(contents)?;
+    #[cfg(windows)]
+    set_private_windows_acl(path, false)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
-    #[cfg(windows)]
-    set_private_windows_acl(path, false)?;
+    file.write_all(contents)?;
     Ok(())
 }
 
@@ -796,7 +921,9 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
             }
         }
         let recorded_digest = fs::read_to_string(&digest_path).unwrap_or_default();
-        if recorded_digest.trim().eq_ignore_ascii_case(&sha256_file(&executable).unwrap_or_default())
+        if recorded_digest
+            .trim()
+            .eq_ignore_ascii_case(&sha256_file(&executable).unwrap_or_default())
             && !recorded_digest.trim().is_empty()
         {
             return Ok(executable);
@@ -883,18 +1010,70 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
 }
 
 fn sha256_file(path: &Path) -> anyhow::Result<String> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to verify cached tunnel-client at {}", path.display()))?;
+    let size = fs::metadata(path)
+        .with_context(|| {
+            format!(
+                "failed to inspect cached tunnel-client at {}",
+                path.display()
+            )
+        })?
+        .len();
+    anyhow::ensure!(
+        size > 0 && size <= MAX_BINARY_BYTES,
+        "cached tunnel-client binary size is invalid"
+    );
+    let mut file = File::open(path).with_context(|| {
+        format!(
+            "failed to verify cached tunnel-client at {}",
+            path.display()
+        )
+    })?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 16 * 1024];
+    let mut bytes_read = 0u64;
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
         }
+        bytes_read = bytes_read.saturating_add(count as u64);
+        anyhow::ensure!(
+            bytes_read <= MAX_BINARY_BYTES,
+            "cached tunnel-client binary is too large"
+        );
         hasher.update(&buffer[..count]);
     }
+    anyhow::ensure!(
+        bytes_read == size,
+        "cached tunnel-client binary changed while hashing"
+    );
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_cached_tunnel_client(executable: &Path) -> anyhow::Result<()> {
+    let file_name = executable
+        .file_name()
+        .context("cached tunnel-client path has no executable name")?;
+    let mut digest_name = file_name.to_os_string();
+    digest_name.push(".sha256");
+    let digest_path = executable.with_file_name(digest_name);
+    let expected = fs::read_to_string(&digest_path).with_context(|| {
+        format!(
+            "failed to read cached tunnel-client digest at {}",
+            digest_path.display()
+        )
+    })?;
+    let expected = expected.trim();
+    anyhow::ensure!(
+        expected.len() == 64 && expected.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "cached tunnel-client digest is invalid"
+    );
+    let actual = sha256_file(executable)?;
+    anyhow::ensure!(
+        actual.eq_ignore_ascii_case(expected),
+        "cached tunnel-client SHA-256 verification failed"
+    );
+    Ok(())
 }
 
 fn target_asset_parts() -> anyhow::Result<(&'static str, &'static str)> {
