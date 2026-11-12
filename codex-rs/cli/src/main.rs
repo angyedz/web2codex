@@ -77,6 +77,7 @@ mod remote_control_cmd;
 mod sandbox_setup;
 mod sandbox_uninstall;
 mod state_db_recovery;
+mod web2codex_update;
 mod web_browser;
 mod web_environment;
 mod web_mcp_server;
@@ -190,7 +191,7 @@ enum Subcommand {
     /// Generate shell completion scripts.
     Completion(CompletionCommand),
 
-    /// Update Codex to the latest version.
+    /// Update Web2Codex from the latest GitHub Release.
     Update,
 
     /// Open the fork's private ChatGPT WebView window.
@@ -802,7 +803,11 @@ fn handle_app_exit(
         std::process::exit(1);
     }
     if let Some(action) = update_action {
-        run_update_action(action, cli_executable)?;
+        if matches!(&action, UpdateAction::Daemon(_)) {
+            run_update_action(action, cli_executable)?;
+        } else {
+            web2codex_update::run()?;
+        }
     }
     Ok(())
 }
@@ -906,12 +911,7 @@ fn run_update_command() -> anyhow::Result<()> {
 
     #[cfg(not(debug_assertions))]
     {
-        let Some(action) = codex_tui::get_update_action() else {
-            anyhow::bail!(
-                "Could not detect the Codex installation method. Please update manually: https://developers.openai.com/codex/cli/"
-            );
-        };
-        run_update_action(action, /*cli_executable*/ None)
+        web2codex_update::run()
     }
 }
 
