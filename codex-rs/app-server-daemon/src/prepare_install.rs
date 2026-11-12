@@ -167,7 +167,10 @@ async fn prepare_from_package(
     } else {
         "bin/web2codex"
     };
-    let source_entrypoint = metadata["entrypoint"].as_str().unwrap_or_default();
+    let source_entrypoint = metadata["entrypoint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     let winget = cfg!(windows)
         && metadata["layoutVersion"] == 1
         && source_entrypoint == format!("codex-{target}.exe");
@@ -181,9 +184,9 @@ async fn prepare_from_package(
     let entrypoint = if winget {
         codex_entrypoint
     } else {
-        source_entrypoint
+        source_entrypoint.as_str()
     };
-    validate_package(source, source_entrypoint)?;
+    validate_package(source, &source_entrypoint)?;
     // A local build may replace the executable while confirmation is pending.
     let running_identity = managed_install::executable_identity(running_exe).await?;
     if mode == InstallMode::Replace {
@@ -250,7 +253,7 @@ async fn prepare_from_package(
     let staged_exe = if cfg!(target_os = "macos") && stage.path().join("CodexCLI.app").is_dir() {
         Path::new("CodexCLI.app/Contents/MacOS/codex")
     } else {
-        Path::new(source_entrypoint)
+        Path::new(&source_entrypoint)
     };
     anyhow::ensure!(
         package_tree(source, /*destination*/ None, &mut BTreeMap::new())? == digest
@@ -284,7 +287,7 @@ async fn prepare_from_package(
                 .as_object_mut()
                 .context("invalid WinGet voice manifest checksums")?;
             let checksum = checksums
-                .remove(source_entrypoint)
+                .remove(&source_entrypoint)
                 .context("WinGet voice manifest is missing the CLI checksum")?;
             checksums.insert(entrypoint.to_string(), checksum);
             let bytes = serde_json::to_vec_pretty(&voice)?;

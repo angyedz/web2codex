@@ -100,9 +100,9 @@ pub(super) async fn run(http: &impl InstallerHttp, legacy: &Daemon) -> Result<Up
         .as_str()
         .filter(|entrypoint| {
             if cfg!(windows) {
-                matches!(entrypoint, "bin/codex.exe" | "bin/web2codex.exe")
+                matches!(*entrypoint, "bin/codex.exe" | "bin/web2codex.exe")
             } else {
-                matches!(entrypoint, "bin/codex" | "bin/web2codex")
+                matches!(*entrypoint, "bin/codex" | "bin/web2codex")
             }
         })
         .context("prepared daemon package has an unsupported CLI entrypoint")?;
