@@ -5802,6 +5802,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tao",
+ "url",
  "uuid",
  "wry",
 ]

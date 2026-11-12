@@ -1,0 +1,40 @@
+use std::ffi::OsString;
+
+/// Keep credentials from the parent Codex process out of MCP shell commands and
+/// the tunnel-client process that launches them.
+pub(crate) fn safe_subprocess_environment() -> impl Iterator<Item = (OsString, OsString)> {
+    const SAFE_VARIABLES: &[&str] = &[
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "COLORTERM",
+        #[cfg(windows)]
+        "USERPROFILE",
+        #[cfg(windows)]
+        "HOMEDRIVE",
+        #[cfg(windows)]
+        "HOMEPATH",
+        #[cfg(windows)]
+        "SystemRoot",
+        #[cfg(windows)]
+        "WINDIR",
+        #[cfg(windows)]
+        "COMSPEC",
+        #[cfg(windows)]
+        "PATHEXT",
+        #[cfg(windows)]
+        "APPDATA",
+        #[cfg(windows)]
+        "LOCALAPPDATA",
+    ];
+
+    SAFE_VARIABLES
+        .iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
+}

@@ -52,7 +52,7 @@ web2codex web hide            # Hide the window and release WebView memory
 web2codex web stop            # Stop the controller
 ```
 
-The first `web2codex web` opens the account chooser. Later runs start ChatGPT in Temporary Chat mode. Opening ChatGPT again reloads the Temporary Chat entry; the browser also preserves that mode on its new-chat surface and blocks the recognized mode switch. ChatGPT controls the actual server-side conversation behavior.
+The first `web2codex web` opens the account chooser. Later runs start ChatGPT in Temporary Chat mode. The private WebView returns to the Temporary Chat entry if ChatGPT tries to open a saved-chat route, preserves the mode during new-chat navigation, and blocks the recognized mode switch. ChatGPT controls the actual server-side conversation behavior.
 
 The chooser records the account type you selected, but does not verify your subscription. `web2codex web models` lists the model catalog bundled with the CLI and the last model-picker text observed in ChatGPT Web. The browser snapshot is informational; ChatGPT decides which models the signed-in account can use.
 

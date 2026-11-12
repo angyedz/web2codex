@@ -78,6 +78,7 @@ mod sandbox_setup;
 mod sandbox_uninstall;
 mod state_db_recovery;
 mod web_browser;
+mod web_environment;
 mod web_mcp_server;
 mod web_tunnel;
 #[cfg(not(windows))]

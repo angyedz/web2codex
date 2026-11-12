@@ -213,7 +213,8 @@ fn configure_tunnel_credentials() -> anyhow::Result<()> {
         is_valid_tunnel_id(&tunnel_id),
         "invalid tunnel ID; expected tunnel_<32 lowercase letters or digits> or tunnel_<4-character namespace>_<32 lowercase letters or digits>"
     );
-    let api_key = prompt_hidden("OpenAI tunnel API key: ")?;
+    let api_key =
+        prompt_hidden("OpenAI tunnel runtime API key (Tunnels Read + Use, not an admin key): ")?;
     let (manager, scope, api_key_name, tunnel_id_name) = tunnel_secrets()?;
     let previous_tunnel_id = manager.get(&scope, &tunnel_id_name)?;
     manager

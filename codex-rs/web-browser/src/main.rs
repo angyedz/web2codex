@@ -111,36 +111,43 @@ const TEMPORARY_CHAT_ENFORCEMENT_SCRIPT: &str = r##"
   if (window.top !== window || location.origin !== "https://chatgpt.com") return;
 
   const chatOrigin = "https://chatgpt.com";
-  const isNewChatUrl = url => url.origin === chatOrigin && url.pathname === "/";
-  const keepTemporaryChatOnNewChat = value => {
+  const temporaryChatUrl = `${chatOrigin}/?temporary-chat=true`;
+  const preserveTemporaryChat = value => {
     if (value == null) return value;
     try {
       const url = new URL(value, location.href);
-      if (!isNewChatUrl(url)) return value;
+      if (url.origin !== chatOrigin) return value;
+      if (url.pathname !== "/") return temporaryChatUrl;
       url.searchParams.set("temporary-chat", "true");
       return `${url.pathname}${url.search}${url.hash}`;
     } catch (_) {
       return value;
     }
   };
-  const ensureTemporaryNewChat = () => {
-    if (location.origin !== chatOrigin || location.pathname !== "/") return;
+  const ensureTemporaryChat = () => {
+    if (location.origin !== chatOrigin) return;
     const url = new URL(location.href);
-    if (url.searchParams.get("temporary-chat") === "true") return;
-    url.searchParams.set("temporary-chat", "true");
-    history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    if (url.pathname !== "/" || url.searchParams.get("temporary-chat") !== "true") {
+      location.replace(temporaryChatUrl);
+    }
   };
 
-  // Keep the Temporary Chat entry mode on SPA navigation to a new-chat surface.
+  // Keep the WebView on Temporary Chat, including when ChatGPT uses SPA history
+  // navigation to open a saved conversation.
   for (const method of ["pushState", "replaceState"]) {
     const original = history[method];
     history[method] = function(state, title, url) {
-      return original.call(this, state, title, keepTemporaryChatOnNewChat(url));
+      const next = preserveTemporaryChat(url);
+      if (next === temporaryChatUrl && url != null) {
+        location.replace(temporaryChatUrl);
+        return;
+      }
+      return original.call(this, state, title, next);
     };
   }
-  addEventListener("popstate", ensureTemporaryNewChat, true);
-  addEventListener("pageshow", ensureTemporaryNewChat, true);
-  ensureTemporaryNewChat();
+  addEventListener("popstate", ensureTemporaryChat, true);
+  addEventListener("pageshow", ensureTemporaryChat, true);
+  ensureTemporaryChat();
 
   // The browser instance was opened in Temporary Chat; prevent its visible control
   // from switching this ChatGPT session to saved-chat mode.
@@ -442,6 +449,22 @@ fn build_webview(
 
     let builder = builder
         .with_initialization_script(ACCOUNT_CAPABILITY_PROBE_SCRIPT)
+        .with_navigation_handler(move |target| {
+            if page != BrowserPage::TemporaryChat {
+                return true;
+            }
+            let Ok(target) = url::Url::parse(&target) else {
+                return false;
+            };
+            if matches!(target.host_str(), Some("chatgpt.com" | "chat.openai.com")) {
+                return target.scheme() == "https" && target.path() == "/";
+            }
+            target.scheme() == "https"
+                || (target.scheme() == "http"
+                    && target.host_str().is_some_and(|host| {
+                        host == "localhost" || host == "127.0.0.1" || host == "[::1]"
+                    }))
+        })
         .with_ipc_handler(move |request| {
             let body = request.body().as_str();
             let tier = match body {

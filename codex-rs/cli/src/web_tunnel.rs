@@ -16,12 +16,33 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use zip::ZipArchive;
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GetLastError, HLOCAL, LocalFree};
+#[cfg(windows)]
+use windows_sys::Win32::Security::Authorization::{
+    EXPLICIT_ACCESS_W, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
+    TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Security::{
+    DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
+    TOKEN_QUERY, TOKEN_USER, TokenUser,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+
+use crate::web_environment::safe_subprocess_environment;
+
 const RELEASE_API: &str = "https://api.github.com/repos/openai/tunnel-client/releases/latest";
 const MAX_RELEASE_JSON: usize = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
-const CONNECTOR_NAME: &str = "Codex Web";
+const CONNECTOR_NAME: &str = "Web2Codex";
 
 #[derive(Deserialize)]
 struct Release {
@@ -71,6 +92,8 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
         && fs::read_to_string(&paths.signature)
             .is_ok_and(|saved| saved.trim() == signature.as_str())
     {
+        remove_file_if_exists(&paths.api_key)
+            .context("failed to remove a stale temporary tunnel API key file")?;
         println!("OpenAI Secure MCP Tunnel is already running for this workspace.");
         print_connector_instructions(tunnel_id);
         print_mcp_observation(&paths.health_url);
@@ -81,10 +104,13 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     }
 
     fs::create_dir_all(&paths.directory)?;
+    #[cfg(windows)]
+    set_private_windows_acl(&paths.directory, true)?;
     let _ = fs::remove_file(&paths.health_url);
     // A crash during the previous startup can leave the short-lived raw key file behind.
     // No active runtime remains at this point, so clear it before any fallible setup step.
-    let _ = fs::remove_file(&paths.api_key);
+    remove_file_if_exists(&paths.api_key)
+        .context("failed to clear a stale temporary tunnel API key file")?;
     let client = install_tunnel_client()?;
     remove_obsolete_client_versions(&paths, &client);
     let codex = std::env::current_exe().context("failed to locate the Codex executable")?;
@@ -107,8 +133,8 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
         .arg("--profile-file")
         .arg(&paths.profile)
         .current_dir(&workspace)
-        .env_remove("CONTROL_PLANE_API_KEY")
-        .env_remove("OPENAI_API_KEY")
+        .env_clear()
+        .envs(safe_subprocess_environment())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -147,16 +173,24 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     {
         let _ = terminate_tunnel_process(pid);
         let _ = child.wait();
-        remove_runtime_state(&paths);
-        return Err(error).context("failed to save tunnel-client process state");
+        return Err(match remove_runtime_state(&paths) {
+            Ok(()) => error.context("failed to save tunnel-client process state"),
+            Err(cleanup_error) => error.context(format!(
+                "failed to save tunnel-client process state; cleanup also failed: {cleanup_error:#}"
+            )),
+        });
     }
     for _ in 0..150 {
         if runtime_ready() {
             if let Err(error) = fs::remove_file(&paths.api_key) {
                 let _ = force_terminate_tunnel_process(pid);
                 let _ = child.wait();
-                remove_runtime_state(&paths);
-                return Err(error).context("failed to remove the temporary tunnel API key file");
+                return Err(match remove_runtime_state(&paths) {
+                    Ok(()) => error.context("failed to remove the temporary tunnel API key file"),
+                    Err(cleanup_error) => error.context(format!(
+                        "failed to remove the temporary tunnel API key file; cleanup also failed: {cleanup_error:#}"
+                    )),
+                });
             }
             remove_obsolete_client_versions(&paths, &client);
             println!("OpenAI Secure MCP Tunnel runtime is ready.");
@@ -168,7 +202,8 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
             Ok(Some(status)) => {
                 let _ = force_terminate_tunnel_process(pid);
                 let _ = child.wait();
-                remove_runtime_state(&paths);
+                remove_runtime_state(&paths)
+                    .context("failed to clean runtime state after tunnel-client exited")?;
                 bail!(
                     "tunnel-client exited during startup with {status}; see {}",
                     paths.log.display()
@@ -178,7 +213,8 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
             Err(error) => {
                 let _ = force_terminate_tunnel_process(pid);
                 let _ = child.wait();
-                remove_runtime_state(&paths);
+                remove_runtime_state(&paths)
+                    .context("failed to clean runtime state after a startup monitoring error")?;
                 return Err(error).context("failed to monitor tunnel-client startup");
             }
         }
@@ -186,7 +222,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     }
     let _ = force_terminate_tunnel_process(pid);
     let _ = child.wait();
-    remove_runtime_state(&paths);
+    remove_runtime_state(&paths).context("failed to clean runtime state after startup timeout")?;
     bail!(
         "tunnel-client did not become ready within 30 seconds; see {}",
         paths.log.display()
@@ -221,7 +257,7 @@ pub(crate) fn stop() -> anyhow::Result<()> {
             !health_check(&health_url, "/healthz"),
             "a tunnel runtime is responding but its PID record is missing; refusing to start or stop an unmanaged process"
         );
-        remove_runtime_state(&paths);
+        remove_runtime_state(&paths)?;
         println!("OpenAI Secure MCP Tunnel is already stopped.");
         return Ok(());
     };
@@ -233,7 +269,7 @@ pub(crate) fn stop() -> anyhow::Result<()> {
                 "tunnel-client process {pid} is still running but its health listener is unavailable; state files were kept to avoid stopping an unrelated process"
             );
         }
-        remove_runtime_state(&paths);
+        remove_runtime_state(&paths)?;
         println!("OpenAI Secure MCP Tunnel is already stopped.");
         return Ok(());
     }
@@ -241,7 +277,7 @@ pub(crate) fn stop() -> anyhow::Result<()> {
     terminate_tunnel_process(pid)?;
     for _ in 0..50 {
         if !process_group_exists(pid) && !health_check(&health_url, "/healthz") {
-            remove_runtime_state(&paths);
+            remove_runtime_state(&paths)?;
             println!("Stopped OpenAI Secure MCP Tunnel.");
             return Ok(());
         }
@@ -250,7 +286,7 @@ pub(crate) fn stop() -> anyhow::Result<()> {
     force_terminate_tunnel_process(pid)?;
     for _ in 0..30 {
         if !process_group_exists(pid) && !health_check(&health_url, "/healthz") {
-            remove_runtime_state(&paths);
+            remove_runtime_state(&paths)?;
             println!("Stopped OpenAI Secure MCP Tunnel.");
             return Ok(());
         }
@@ -259,11 +295,25 @@ pub(crate) fn stop() -> anyhow::Result<()> {
     bail!("tunnel-client process {pid} did not stop; its PID and health records were retained")
 }
 
-fn remove_runtime_state(paths: &RuntimePaths) {
-    let _ = fs::remove_file(&paths.pid);
-    let _ = fs::remove_file(&paths.signature);
-    let _ = fs::remove_file(&paths.health_url);
-    let _ = fs::remove_file(&paths.api_key);
+fn remove_runtime_state(paths: &RuntimePaths) -> anyhow::Result<()> {
+    for path in [
+        &paths.api_key,
+        &paths.pid,
+        &paths.signature,
+        &paths.health_url,
+    ] {
+        remove_file_if_exists(path)
+            .with_context(|| format!("failed to remove tunnel state file {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(unix)]
@@ -278,17 +328,12 @@ fn process_group_exists(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn process_group_exists(pid: u32) -> bool {
-    let filter = format!("PID eq {pid}");
-    let Ok(output) = Command::new("tasklist")
-        .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
         return false;
-    };
-    let pid_field = format!(",\"{pid}\",");
-    String::from_utf8_lossy(&output.stdout).contains(pid_field.as_str())
+    }
+    unsafe { CloseHandle(process) };
+    true
 }
 
 #[cfg(unix)]
@@ -385,8 +430,12 @@ fn print_mcp_observation(health_url_file: &Path) {
 fn runtime_ready() -> bool {
     runtime_paths()
         .ok()
-        .and_then(|paths| fs::read_to_string(paths.health_url).ok())
-        .is_some_and(|url| health_check(&url, "/readyz"))
+        .and_then(|paths| {
+            let pid = fs::read_to_string(paths.pid).ok()?.trim().parse::<u32>().ok()?;
+            let url = fs::read_to_string(paths.health_url).ok()?;
+            Some(process_group_exists(pid) && health_check(&url, "/readyz"))
+        })
+        .unwrap_or(false)
 }
 
 fn runtime_paths() -> anyhow::Result<RuntimePaths> {
@@ -515,6 +564,90 @@ fn write_private_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(windows)]
+    set_private_windows_acl(path, false)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_private_windows_acl(path: &Path, inherit_to_children: bool) -> anyhow::Result<()> {
+    use std::ptr::null_mut;
+
+    let mut token = null_mut();
+    anyhow::ensure!(
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } != 0,
+        "OpenProcessToken failed: {}",
+        unsafe { GetLastError() }
+    );
+    let mut token_user_size = 0u32;
+    unsafe {
+        GetTokenInformation(token, TokenUser, null_mut(), 0, &mut token_user_size);
+    }
+    if token_user_size < std::mem::size_of::<TOKEN_USER>() as u32 || token_user_size > 4096 {
+        unsafe { CloseHandle(token) };
+        anyhow::bail!("invalid current-user token information size");
+    }
+    let mut token_user_bytes = vec![0u8; token_user_size as usize];
+    let token_info_ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            token_user_bytes.as_mut_ptr().cast(),
+            token_user_size,
+            &mut token_user_size,
+        )
+    };
+    unsafe { CloseHandle(token) };
+    anyhow::ensure!(
+        token_info_ok != 0,
+        "GetTokenInformation(TokenUser) failed: {}",
+        unsafe { GetLastError() }
+    );
+
+    let token_user =
+        unsafe { std::ptr::read_unaligned(token_user_bytes.as_ptr().cast::<TOKEN_USER>()) };
+    let mut acl = null_mut();
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: 0x001F01FF, // FILE_ALL_ACCESS
+        grfAccessMode: SET_ACCESS,
+        grfInheritance: if inherit_to_children { 0x03 } else { 0 },
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: null_mut(),
+            MultipleTrusteeOperation: 0,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: token_user.User.Sid.cast(),
+        },
+    };
+    let acl_result = unsafe { SetEntriesInAclW(1, &entry, null_mut(), &mut acl) };
+    anyhow::ensure!(
+        acl_result == ERROR_SUCCESS,
+        "SetEntriesInAclW failed: {acl_result}"
+    );
+
+    let mut wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let set_result = unsafe {
+        SetNamedSecurityInfoW(
+            wide_path.as_mut_ptr(),
+            1, // SE_FILE_OBJECT
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            acl,
+            null_mut(),
+        )
+    };
+    unsafe { LocalFree(acl as HLOCAL) };
+    anyhow::ensure!(
+        set_result == ERROR_SUCCESS,
+        "SetNamedSecurityInfoW failed for {}: {}",
+        path.display(),
+        set_result
+    );
     Ok(())
 }
 
@@ -645,8 +778,31 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
     let paths = runtime_paths()?;
     let install_directory = paths.directory.join("bin").join(&release.tag_name);
     let executable = install_directory.join(executable_name);
+    let digest_path = install_directory.join(format!("{executable_name}.sha256"));
+    fs::create_dir_all(&install_directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&install_directory, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(windows)]
+    set_private_windows_acl(&install_directory, true)?;
     if executable.is_file() {
-        return Ok(executable);
+        #[cfg(windows)]
+        {
+            set_private_windows_acl(&executable, false)?;
+            if digest_path.is_file() {
+                set_private_windows_acl(&digest_path, false)?;
+            }
+        }
+        let recorded_digest = fs::read_to_string(&digest_path).unwrap_or_default();
+        if recorded_digest.trim().eq_ignore_ascii_case(&sha256_file(&executable).unwrap_or_default())
+            && !recorded_digest.trim().is_empty()
+        {
+            return Ok(executable);
+        }
+        remove_file_if_exists(&executable)?;
+        remove_file_if_exists(&digest_path)?;
     }
     let response = client
         .get(&asset.browser_download_url)
@@ -708,7 +864,7 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
     }
     let executable_bytes =
         executable_bytes.context("tunnel-client executable was missing from the release ZIP")?;
-    fs::create_dir_all(&install_directory)?;
+    let executable_digest = format!("{:x}", Sha256::digest(&executable_bytes));
     let temporary = install_directory.join(format!("{executable_name}.partial"));
     write_private_file(&temporary, &executable_bytes)?;
     fs::rename(&temporary, &executable).with_context(|| {
@@ -722,7 +878,23 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
     }
+    write_private_file(&digest_path, executable_digest.as_bytes())?;
     Ok(executable)
+}
+
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to verify cached tunnel-client at {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn target_asset_parts() -> anyhow::Result<(&'static str, &'static str)> {

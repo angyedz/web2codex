@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::web_environment::safe_subprocess_environment;
 use anyhow::Context;
 use codex_mcp::SandboxState;
 use codex_protocol::models::PermissionProfile;
@@ -373,13 +374,11 @@ impl WebMcpServer {
         process
             .args(["sandbox", "--sandbox-state-json", &sandbox_state, "--"])
             .current_dir(&self.workspace)
+            .env_clear()
+            .envs(safe_subprocess_environment())
             .env("TMPDIR", command_temp_dir.path())
             .env("TEMP", command_temp_dir.path())
             .env("TMP", command_temp_dir.path())
-            .env_remove("CONTROL_PLANE_API_KEY")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("OPENAI_ADMIN_KEY")
-            .env_remove("CODEX_ACCESS_TOKEN")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
