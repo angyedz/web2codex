@@ -159,7 +159,7 @@ fn print_account_capabilities() -> anyhow::Result<()> {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             println!("ChatGPT Web picker snapshot: unknown (not detected yet).");
-            println!("Open ChatGPT with `codex web open`, then check again.");
+            println!("Open ChatGPT with `web2codex web open`, then check again.");
             return Ok(());
         }
         Err(error) => {
@@ -171,13 +171,13 @@ fn print_account_capabilities() -> anyhow::Result<()> {
         Ok(capabilities) => capabilities,
         Err(_) => {
             println!("ChatGPT Web picker snapshot: unknown (saved scan is invalid).");
-            println!("Open ChatGPT with `codex web open` to refresh the scan.");
+            println!("Open ChatGPT with `web2codex web open` to refresh the scan.");
             return Ok(());
         }
     };
     if capabilities.probe_version != 3 {
         println!("ChatGPT Web picker snapshot: unknown (scan format is unsupported).");
-        println!("Open ChatGPT with `codex web open` to refresh the scan.");
+        println!("Open ChatGPT with `web2codex web open` to refresh the scan.");
         return Ok(());
     }
 
@@ -235,10 +235,10 @@ fn start_tunnel_runtime() -> anyhow::Result<()> {
     let (manager, scope, api_key_name, tunnel_id_name) = tunnel_secrets()?;
     let api_key = manager
         .get(&scope, &api_key_name)?
-        .context("OpenAI tunnel API key is not configured; run `codex web tunnel configure`")?;
+        .context("OpenAI tunnel API key is not configured; run `web2codex web tunnel configure`")?;
     let tunnel_id = manager
         .get(&scope, &tunnel_id_name)?
-        .context("OpenAI tunnel ID is not configured; run `codex web tunnel configure`")?;
+        .context("OpenAI tunnel ID is not configured; run `web2codex web tunnel configure`")?;
     let workspace = std::env::current_dir().context("failed to resolve the workspace directory")?;
     crate::web_tunnel::start(&tunnel_id, &api_key, &workspace)
 }

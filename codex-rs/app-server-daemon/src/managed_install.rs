@@ -59,15 +59,38 @@ pub(crate) fn package_root(codex_home: &Path) -> PathBuf {
 pub(crate) fn managed_codex_bin(codex_home: &Path) -> PathBuf {
     let root = package_root(codex_home);
     let current = root.join("current");
-    let packaged = current.join("bin").join(managed_codex_file_name());
-    let legacy = current.join(managed_codex_file_name());
-    if packaged.is_file()
-        || !legacy.is_file() && (cfg!(windows) || root.ends_with("app-server-daemon"))
-    {
-        packaged
-    } else {
-        legacy
+    let names = [
+        managed_codex_file_name(),
+        if cfg!(windows) {
+            "web2codex.exe"
+        } else {
+            "web2codex"
+        },
+    ];
+    let packaged = names
+        .iter()
+        .map(|name| current.join("bin").join(name))
+        .find(|path| path.is_file());
+    let legacy = names
+        .iter()
+        .map(|name| current.join(name))
+        .find(|path| path.is_file());
+    if let Some(packaged) = packaged {
+        return packaged;
     }
+    if let Some(legacy) = legacy {
+        return legacy;
+    }
+    let default_name = names[0];
+    if cfg!(windows) || root.ends_with("app-server-daemon") {
+        current.join("bin").join(default_name)
+    } else {
+        current.join(default_name)
+    }
+}
+
+fn managed_codex_file_name() -> &'static str {
+    if cfg!(windows) { "codex.exe" } else { "codex" }
 }
 
 /// Only latest-channel stable releases may run the public latest-version updater.
@@ -237,10 +260,6 @@ pub(crate) fn path_digest(path: &Path) -> [u8; 32] {
         }
     }
     *hasher.finalize().as_bytes()
-}
-
-fn managed_codex_file_name() -> &'static str {
-    if cfg!(windows) { "codex.exe" } else { "codex" }
 }
 
 fn parse_codex_version(output: &str) -> Result<String> {

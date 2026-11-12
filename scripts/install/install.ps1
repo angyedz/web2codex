@@ -21,6 +21,8 @@ $PreferReleasesOpenAICom = if ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALLER
 $ReleasesBaseUri = "https://releases.openai.com/codex"
 $GitHubRepository = if ([string]::IsNullOrWhiteSpace($env:CODEX_GITHUB_REPOSITORY)) { "openai/codex" } else { $env:CODEX_GITHUB_REPOSITORY }
 $GitHubTagPrefix = if ([string]::IsNullOrWhiteSpace($env:CODEX_GITHUB_TAG_PREFIX)) { "rust-v" } else { $env:CODEX_GITHUB_TAG_PREFIX }
+$CommandName = if ([string]::IsNullOrWhiteSpace($env:CODEX_COMMAND_NAME)) { "web2codex" } else { $env:CODEX_COMMAND_NAME }
+if ($CommandName -cnotmatch '^[A-Za-z0-9_-]+$') { throw "Invalid command name: $CommandName" }
 $ReleasesMetadataTimeoutSec = 30
 $ReleasesAssetTimeoutSec = 300
 
@@ -447,12 +449,12 @@ function Get-CurrentInstalledVersion {
         [string]$StandaloneCurrentDir
     )
 
-    $standaloneVersion = Get-VersionFromBinary -CodexPath (Join-Path $StandaloneCurrentDir "bin\codex.exe")
+    $standaloneVersion = Get-VersionFromBinary -CodexPath (Join-Path $StandaloneCurrentDir "bin\$CommandName.exe")
     if (-not [string]::IsNullOrWhiteSpace($standaloneVersion)) {
         return $standaloneVersion
     }
 
-    $standaloneVersion = Get-VersionFromBinary -CodexPath (Join-Path $StandaloneCurrentDir "codex.exe")
+    $standaloneVersion = Get-VersionFromBinary -CodexPath (Join-Path $StandaloneCurrentDir "$CommandName.exe")
     if (-not [string]::IsNullOrWhiteSpace($standaloneVersion)) {
         return $standaloneVersion
     }
@@ -772,7 +774,7 @@ function Test-PackageContentsAreComplete {
 
     $expectedFiles = @(
         "codex-package.json",
-        "bin\codex.exe",
+        "bin\$CommandName.exe",
         "bin\codex-code-mode-host.exe",
         "codex-path\rg.exe",
         "codex-resources\codex-command-runner.exe",
@@ -786,6 +788,9 @@ function Test-PackageContentsAreComplete {
             $expectedFiles += "bin\codex-exec-server.exe"
         }
         $packageMetadata = ConvertFrom-Json -InputObject $metadata -ErrorAction Stop
+        if ($packageMetadata.entrypoint -cne "bin/$CommandName.exe") {
+            return $false
+        }
         if ($null -ne $packageMetadata.webBrowser) {
             if ($packageMetadata.webBrowser -cne "codex-resources/codex-web-browser.exe") {
                 return $false
@@ -814,7 +819,7 @@ function Test-LegacyPlatformNpmContentsAreComplete {
     }
 
     $expectedFiles = @(
-        "codex.exe",
+        "$CommandName.exe",
         "codex-resources\codex-command-runner.exe",
         "codex-resources\codex-windows-sandbox-setup.exe",
         "codex-resources\rg.exe"
@@ -841,13 +846,13 @@ function Test-ReleaseIsComplete {
             if (-not (Test-PackageContentsAreComplete -PackageDir $ReleaseDir)) {
                 return $false
             }
-            $codexPath = Join-Path $ReleaseDir "bin\codex.exe"
+            $codexPath = Join-Path $ReleaseDir "bin\$CommandName.exe"
         }
         "LegacyPlatformNpm" {
             if (-not (Test-LegacyPlatformNpmContentsAreComplete -PackageDir $ReleaseDir)) {
                 return $false
             }
-            $codexPath = Join-Path $ReleaseDir "codex.exe"
+            $codexPath = Join-Path $ReleaseDir "$CommandName.exe"
         }
         default {
             throw "Unknown Codex installer layout: $Layout"
@@ -859,7 +864,7 @@ function Test-ReleaseIsComplete {
 }
 
 function Get-ExistingCodexCommand {
-    $existing = Get-Command codex -ErrorAction SilentlyContinue
+    $existing = Get-Command $CommandName -ErrorAction SilentlyContinue
     if ($null -eq $existing) {
         return $null
     }
@@ -947,7 +952,7 @@ function Test-VisibleCodexCommand {
         [string]$VisibleBinDir
     )
 
-    $codexCommand = Join-Path $VisibleBinDir "codex.exe"
+    $codexCommand = Join-Path $VisibleBinDir "$CommandName.exe"
     & $codexCommand --version *> $null
     if ($LASTEXITCODE -ne 0) {
         throw "Installed Codex command failed verification: $codexCommand --version"
@@ -1135,7 +1140,7 @@ try {
                 $resourcesDir = Join-Path $stagingDir "codex-resources"
                 New-Item -ItemType Directory -Force -Path $resourcesDir | Out-Null
                 $copyMap = @{
-                    "codex/codex.exe" = "codex.exe"
+                    "codex/codex.exe" = "$CommandName.exe"
                     "codex/codex-command-runner.exe" = "codex-resources\codex-command-runner.exe"
                     "codex/codex-windows-sandbox-setup.exe" = "codex-resources\codex-windows-sandbox-setup.exe"
                     "path/rg.exe" = "codex-resources\rg.exe"
@@ -1165,7 +1170,7 @@ try {
             throw "A dedicated daemon is already selected; retry the update."
         }
         if ($daemonOnly -and -not $deferSelection) {
-            $installedCodex = Join-Path $releaseDir $(if ($installLayout -eq "Package") { "bin\codex.exe" } else { "codex.exe" })
+            $installedCodex = Join-Path $releaseDir $(if ($installLayout -eq "Package") { "bin\$CommandName.exe" } else { "$CommandName.exe" })
             & $installedCodex app-server daemon pid-update-loop --check-package-ownership | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 throw "The production release does not support daemon-owned packages; the current selection was left unchanged."
@@ -1268,11 +1273,11 @@ if ($prioritizeVisibleBin) {
     }
 }
 
-Write-Step "Current PowerShell session: codex"
-Write-Step "Future PowerShell windows: open a new PowerShell window and run: codex"
+Write-Step "Current PowerShell session: $CommandName"
+Write-Step "Future PowerShell windows: open a new PowerShell window and run: $CommandName"
 Write-Host "Codex CLI $resolvedVersion installed successfully."
 
-$codexCommand = Join-Path $visibleBinDir "codex.exe"
+$codexCommand = Join-Path $visibleBinDir "$CommandName.exe"
 if (Prompt-YesNo "Start Codex now?") {
     Write-Step "Launching Codex"
     & $codexCommand

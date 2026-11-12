@@ -4,11 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 build = "build.rs"
-default-run = "codex"
+default-run = "web2codex"
 
 [[bin]]
 name = "codex"
 path = "src/main.rs"
+
+[[bin]]
+name = "web2codex"
+path = "src/main.rs"
+test = false
+bench = false
 
 [[bin]]
 name = "logs_client"

@@ -10,13 +10,20 @@ PREFER_RELEASES_OPENAI_COM="${CODEX_INSTALLER_USE_RELEASES_OPENAI_COM:-$DEFAULT_
 RELEASES_BASE_URL="https://releases.openai.com/codex"
 GITHUB_REPOSITORY="${CODEX_GITHUB_REPOSITORY:-openai/codex}"
 GITHUB_TAG_PREFIX="${CODEX_GITHUB_TAG_PREFIX:-rust-v}"
+COMMAND_NAME="${CODEX_COMMAND_NAME:-web2codex}"
+case "$COMMAND_NAME" in
+  "" | *[!A-Za-z0-9_-]*)
+    echo "Invalid command name: $COMMAND_NAME" >&2
+    exit 1
+    ;;
+esac
 RELEASES_CONNECT_TIMEOUT=10
 RELEASES_METADATA_TIMEOUT=30
 RELEASES_ASSET_TIMEOUT=300
 release_source="github"
 
 BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
-BIN_PATH="$BIN_DIR/codex"
+BIN_PATH="$BIN_DIR/$COMMAND_NAME"
 CODE_MODE_HOST_BIN_PATH="$BIN_DIR/codex-code-mode-host"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
@@ -873,7 +880,7 @@ prune_standalone_releases() (
     target="$(printf '%s\n' "$metadata" | awk -F '\t' '$1 == "target" {print $2}')"
     entrypoint="$(printf '%s\n' "$metadata" | awk -F '\t' '$1 == "entrypoint" {print $2}')"
     [ "${candidate##*/}" = "$version-$target" ] && [ "$version" != "latest" ] &&
-      [ "$entrypoint" = "bin/codex" ] && [ -f "$candidate/bin/codex" ] || continue
+      [ "$entrypoint" = "bin/$COMMAND_NAME" ] && [ -f "$candidate/$entrypoint" ] || continue
     validate_version "$version" >/dev/null 2>&1 || continue
     case "$target" in
       aarch64-apple-darwin | x86_64-apple-darwin | aarch64-unknown-linux-musl | x86_64-unknown-linux-musl) ;;
@@ -882,8 +889,8 @@ prune_standalone_releases() (
 
     # Reject symlinks (except the installer's own alias), special files and
     # mounts before rm -r. find -xdev alone would not protect nested mounts.
-    [ "$(readlink "$candidate/codex" 2>/dev/null)" = "bin/codex" ] || continue
-    if ! find "$candidate" -xdev ! -type f ! -type d ! -path "$candidate/codex" -print > "$tmp_dir/unowned"; then
+    [ "$(readlink "$candidate/$COMMAND_NAME" 2>/dev/null)" = "$entrypoint" ] || continue
+    if ! find "$candidate" -xdev ! -type f ! -type d ! -path "$candidate/$COMMAND_NAME" -print > "$tmp_dir/unowned"; then
       continue
     fi
     [ ! -s "$tmp_dir/unowned" ] || continue
@@ -960,13 +967,13 @@ version_from_binary() {
 }
 
 current_installed_version() {
-  version="$(version_from_binary "$CURRENT_LINK/bin/codex" || true)"
+  version="$(version_from_binary "$CURRENT_LINK/bin/$COMMAND_NAME" || true)"
   if [ -n "$version" ]; then
     printf '%s\n' "$version"
     return 0
   fi
 
-  version="$(version_from_binary "$CURRENT_LINK/codex" || true)"
+  version="$(version_from_binary "$CURRENT_LINK/$COMMAND_NAME" || true)"
   if [ -n "$version" ]; then
     printf '%s\n' "$version"
     return 0
@@ -976,7 +983,7 @@ current_installed_version() {
 }
 
 resolve_existing_codex() {
-  command -v codex 2>/dev/null || true
+  command -v "$COMMAND_NAME" 2>/dev/null || true
 }
 
 classify_existing_codex() {
@@ -1046,23 +1053,23 @@ prompt_yes_no() {
 print_launch_instructions() {
   case "$path_action" in
     added)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && $COMMAND_NAME"
+      step "Future terminals: open a new terminal and run: $COMMAND_NAME"
       step "PATH was added to $path_profile"
       ;;
     updated)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && $COMMAND_NAME"
+      step "Future terminals: open a new terminal and run: $COMMAND_NAME"
       step "PATH was updated in $path_profile"
       ;;
     configured)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && $COMMAND_NAME"
+      step "Future terminals: open a new terminal and run: $COMMAND_NAME"
       step "PATH is already configured in $path_profile"
       ;;
     *)
-      step "Current terminal: codex"
-      step "Future terminals: open a new terminal and run: codex"
+      step "Current terminal: $COMMAND_NAME"
+      step "Future terminals: open a new terminal and run: $COMMAND_NAME"
       ;;
   esac
 }
@@ -1111,7 +1118,7 @@ handle_conflicting_install() {
       warn "Failed to uninstall the existing $conflict_manager-managed Codex. Continuing with the standalone install."
     fi
   else
-    warn "Leaving the existing $conflict_manager-managed Codex installed. PATH order will determine which codex runs."
+    warn "Leaving the existing $conflict_manager-managed Codex installed. PATH order will determine which $COMMAND_NAME runs."
   fi
 }
 
@@ -1124,8 +1131,13 @@ install_package_release() {
   rm -rf "$stage_release"
   mkdir -p "$stage_release"
   tar -xzf "$archive_path" -C "$stage_release"
+  entrypoint="$(parse_release_metadata < "$stage_release/codex-package.json" | awk -F '\t' '$1 == "entrypoint" { print $2; exit }')"
+  [ "$entrypoint" = "bin/$COMMAND_NAME" ] || {
+    echo "Package entrypoint must be bin/$COMMAND_NAME; got ${entrypoint:-missing}." >&2
+    return 1
+  }
   chmod 0755 \
-    "$stage_release/bin/codex" \
+    "$stage_release/$entrypoint" \
     "$stage_release/bin/codex-code-mode-host" \
     "$stage_release/codex-path/rg"
   if [ -f "$stage_release/codex-resources/bwrap" ]; then
@@ -1134,7 +1146,7 @@ install_package_release() {
   if [ -f "$stage_release/bin/codex-exec-server" ]; then
     chmod 0755 "$stage_release/bin/codex-exec-server"
   fi
-  ln -sf "bin/codex" "$stage_release/codex"
+  ln -sf "$entrypoint" "$stage_release/$COMMAND_NAME"
 
   if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
     rm -rf "$release_dir"
@@ -1155,9 +1167,9 @@ install_legacy_platform_npm_release() {
   mkdir -p "$stage_release/codex-resources" "$extract_dir"
   tar -xzf "$archive_path" -C "$extract_dir"
 
-  cp "$vendor_root/codex/codex" "$stage_release/codex"
+  cp "$vendor_root/codex/codex" "$stage_release/$COMMAND_NAME"
   cp "$vendor_root/path/rg" "$stage_release/codex-resources/rg"
-  chmod 0755 "$stage_release/codex" "$stage_release/codex-resources/rg"
+  chmod 0755 "$stage_release/$COMMAND_NAME" "$stage_release/codex-resources/rg"
   if [ -f "$vendor_root/codex-resources/bwrap" ]; then
     cp "$vendor_root/codex-resources/bwrap" "$stage_release/codex-resources/bwrap"
     chmod 0755 "$stage_release/codex-resources/bwrap"
@@ -1181,10 +1193,12 @@ release_dir_is_complete() {
 
   case "$layout" in
     package)
+      metadata_entrypoint="$(parse_release_metadata < "$release_dir/codex-package.json" 2>/dev/null | awk -F '\t' '$1 == "entrypoint" { print $2; exit }')"
       [ -f "$release_dir/codex-package.json" ] &&
-        [ -x "$release_dir/bin/codex" ] &&
+        [ "$metadata_entrypoint" = "bin/$COMMAND_NAME" ] &&
+        [ -x "$release_dir/$metadata_entrypoint" ] &&
         [ -x "$release_dir/bin/codex-code-mode-host" ] &&
-        [ -x "$release_dir/codex" ] &&
+        [ -x "$release_dir/$COMMAND_NAME" ] &&
         [ -x "$release_dir/codex-path/rg" ] ||
         return 1
       # Older canonical packages do not advertise or contain the executor.
@@ -1196,7 +1210,7 @@ release_dir_is_complete() {
       fi
       ;;
     legacy-platform-npm)
-      [ -x "$release_dir/codex" ] &&
+      [ -x "$release_dir/$COMMAND_NAME" ] &&
         [ -x "$release_dir/codex-resources/rg" ] ||
         return 1
       ;;
@@ -1211,7 +1225,7 @@ release_dir_is_complete() {
       ;;
   esac
 
-  installed_version="$(version_from_binary "$release_dir/bin/codex" || version_from_binary "$release_dir/codex" || true)"
+  installed_version="$(version_from_binary "$release_dir/bin/$COMMAND_NAME" || version_from_binary "$release_dir/$COMMAND_NAME" || true)"
   [ "$installed_version" = "$expected_version" ]
 }
 
@@ -1225,17 +1239,17 @@ update_current_link() {
 release_codex_relative_path() {
   release_dir="$1"
 
-  if [ -x "$release_dir/bin/codex" ]; then
-    printf 'bin/codex\n'
+  if [ -x "$release_dir/bin/$COMMAND_NAME" ]; then
+    printf 'bin/%s\n' "$COMMAND_NAME"
   else
-    printf 'codex\n'
+    printf '%s\n' "$COMMAND_NAME"
   fi
 }
 
 update_visible_command() {
   release_dir="$1"
   mkdir -p "$BIN_DIR"
-  tmp_link="$BIN_DIR/.codex.$$"
+  tmp_link="$BIN_DIR/.$COMMAND_NAME.$$"
   codex_relative_path="$(release_codex_relative_path "$release_dir")"
 
   replace_path_with_symlink "$BIN_PATH" "$CURRENT_LINK/$codex_relative_path" "$tmp_link"
@@ -1440,9 +1454,9 @@ if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target"
   exit 1
 fi
 if [ "$DAEMON_ONLY" = "1" ] && [ "${CODEX_INSTALL_DEFER_SELECTION:-0}" != "1" ]; then
-  installed_codex="$release_dir/codex"
+  installed_codex="$release_dir/$COMMAND_NAME"
   if [ "$install_layout" = "package" ]; then
-    installed_codex="$release_dir/bin/codex"
+    installed_codex="$release_dir/bin/$COMMAND_NAME"
   fi
   if ! "$installed_codex" app-server daemon pid-update-loop --check-package-ownership >/dev/null 2>&1; then
     echo "The production release does not support daemon-owned packages; the current selection was left unchanged." >&2

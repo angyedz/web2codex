@@ -74,7 +74,7 @@ pub async fn update_from_cli(
             .ok()
             .map(|info| info.app_server_version),
         managed_codex_path,
-        message: "The CLI package is selected and pinned. Run `codex app-server daemon update` to return to production updates.".to_string(),
+        message: "The CLI package is selected and pinned. Run `web2codex app-server daemon update` to return to production updates.".to_string(),
     }))
 }
 
@@ -120,7 +120,7 @@ async fn prepare_from_package(
     } else {
         anyhow::ensure!(
             previous_root.join("current").symlink_metadata().is_ok(),
-            "no daemon package is selected; run `codex app-server daemon start` first"
+            "no daemon package is selected; run `web2codex app-server daemon start` first"
         );
     }
     std::fs::create_dir_all(&root)?;
@@ -157,19 +157,32 @@ async fn prepare_from_package(
     let version = manifest.version.to_string();
     let target = platform_target()?;
     let mut metadata: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
-    let entrypoint = if cfg!(windows) {
+    let codex_entrypoint = if cfg!(windows) {
         "bin/codex.exe"
     } else {
         "bin/codex"
+    };
+    let web2codex_entrypoint = if cfg!(windows) {
+        "bin/web2codex.exe"
+    } else {
+        "bin/web2codex"
     };
     let source_entrypoint = metadata["entrypoint"].as_str().unwrap_or_default();
     let winget = cfg!(windows)
         && metadata["layoutVersion"] == 1
         && source_entrypoint == format!("codex-{target}.exe");
     anyhow::ensure!(
-        metadata["target"] == target && (source_entrypoint == entrypoint || winget),
+        metadata["target"] == target
+            && (source_entrypoint == codex_entrypoint
+                || source_entrypoint == web2codex_entrypoint
+                || winget),
         "the CLI package does not match this platform or executable"
     );
+    let entrypoint = if winget {
+        codex_entrypoint
+    } else {
+        source_entrypoint
+    };
     validate_package(source, source_entrypoint)?;
     // A local build may replace the executable while confirmation is pending.
     let running_identity = managed_install::executable_identity(running_exe).await?;
@@ -310,8 +323,14 @@ async fn prepare_from_package(
         );
     } else {
         #[cfg(unix)]
-        if !stage.path().join("codex").exists() {
-            std::os::unix::fs::symlink("bin/codex", stage.path().join("codex"))?;
+        {
+            let executable_name = Path::new(entrypoint)
+                .file_name()
+                .context("CLI package entrypoint has no executable name")?;
+            let alias = stage.path().join(executable_name);
+            if alias.symlink_metadata().is_err() {
+                std::os::unix::fs::symlink(Path::new("bin").join(executable_name), alias)?;
+            }
         }
         #[cfg(windows)]
         windows::publish_release(stage.path(), &release).await?;
@@ -413,7 +432,7 @@ async fn prepare_from_package(
             ..daemon.clone()
         };
         selected.start_managed_backend(settings).await.context(
-            "daemon package selected but could not start; retry with `codex app-server daemon start`",
+            "daemon package selected but could not start; retry with `web2codex app-server daemon start`",
         )?;
         selected.wait_until_ready().await?;
     }
@@ -437,11 +456,13 @@ fn package_tree(
     let mut paths = vec![root.to_path_buf()];
     while let Some(path) = paths.pop() {
         let relative = path.strip_prefix(root)?;
-        // The Unix installer adds this alias outside the package layout.
-        if cfg!(unix)
-            && relative == Path::new("codex")
-            && std::fs::read_link(&path).ok().as_deref() == Some(Path::new("bin/codex"))
-        {
+        // The Unix installer adds the selected entrypoint alias outside the package layout.
+        let entrypoint_alias = relative.file_name().is_some_and(|name| {
+            relative.components().count() == 1
+                && std::fs::read_link(&path).ok().as_deref()
+                    == Some(Path::new("bin").join(name).as_path())
+        });
+        if cfg!(unix) && entrypoint_alias {
             continue;
         }
         anyhow::ensure!(

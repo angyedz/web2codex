@@ -122,11 +122,10 @@ use codex_terminal_detection::TerminalName;
     version,
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
-    // The executable is sometimes invoked via a platform‑specific name like
-    // `codex-x86_64-unknown-linux-musl`, but the help output should always use
-    // the generic `codex` command name that users run.
-    bin_name = "codex",
-    override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
+    // Use the installed command name in help, including the fork's web2codex
+    // entry point and target-specific release builds.
+    bin_name = env!("CARGO_BIN_NAME"),
+    override_usage = concat!(env!("CARGO_BIN_NAME"), " [OPTIONS] [PROMPT]\n       ", env!("CARGO_BIN_NAME"), " [OPTIONS] <COMMAND> [ARGS]")
 )]
 struct MultitoolCli {
     #[clap(flatten)]
@@ -537,13 +536,13 @@ struct LoginCommand {
 
     #[arg(
         long = "with-api-key",
-        help = "Read the API key from stdin (e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`)"
+        help = concat!("Read the API key from stdin (e.g. `printenv OPENAI_API_KEY | ", env!("CARGO_BIN_NAME"), " login --with-api-key`)")
     )]
     with_api_key: bool,
 
     #[arg(
         long = "with-access-token",
-        help = "Read the access token from stdin (e.g. `printenv CODEX_ACCESS_TOKEN | codex login --with-access-token`)"
+        help = concat!("Read the access token from stdin (e.g. `printenv CODEX_ACCESS_TOKEN | ", env!("CARGO_BIN_NAME"), " login --with-access-token`)")
     )]
     with_access_token: bool,
 
@@ -897,9 +896,11 @@ fn resolve_windows_update_command_from_path(
 fn run_update_command() -> anyhow::Result<()> {
     #[cfg(debug_assertions)]
     {
-        anyhow::bail!(
-            "`codex update` is not available in debug builds. Install a release build of Codex to use this command."
-        );
+        anyhow::bail!(concat!(
+            "`",
+            env!("CARGO_BIN_NAME"),
+            " update` is not available in debug builds. Install a release build of Web2Codex to use this command."
+        ));
     }
 
     #[cfg(not(debug_assertions))]
@@ -1731,9 +1732,11 @@ async fn dispatch_cli(
                         )
                         .await;
                     } else if login_cli.api_key.is_some() {
-                        eprintln!(
-                            "The --api-key flag is no longer supported. Pipe the key instead, e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`."
-                        );
+                        eprintln!(concat!(
+                            "The --api-key flag is no longer supported. Pipe the key instead, e.g. `printenv OPENAI_API_KEY | ",
+                            env!("CARGO_BIN_NAME"),
+                            " login --with-api-key`."
+                        ));
                         std::process::exit(1);
                     } else if login_cli.with_api_key {
                         let api_key = read_api_key_from_stdin();
@@ -2051,7 +2054,9 @@ fn profile_v2_for_subcommand<'a>(
             subcommand: DebugSubcommand::PromptInput(_),
         }) => Ok(Some(profile_v2)),
         _ => anyhow::bail!(
-            "--profile only applies to runtime commands, `codex mcp`, and `codex migrate-nfs-db`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex queue`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex migrate-nfs-db`, `codex sandbox`, and `codex debug prompt-input`."
+            "--profile only applies to runtime commands and `{} mcp` or `{} migrate-nfs-db`.",
+            env!("CARGO_BIN_NAME"),
+            env!("CARGO_BIN_NAME")
         ),
     }
 }
@@ -2866,7 +2871,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
 
 fn print_completion(cmd: CompletionCommand) {
     let mut app = MultitoolCli::command();
-    let name = "codex";
+    let name = env!("CARGO_BIN_NAME");
     generate(cmd.shell, &mut app, name, &mut std::io::stdout());
 }
 
@@ -4459,7 +4464,10 @@ enabled = true
 
         assert_eq!(
             err.to_string(),
-            "`--strict-config` is not supported for `codex mcp`"
+            format!(
+                "`--strict-config` is not supported for `{} mcp`",
+                env!("CARGO_BIN_NAME")
+            )
         );
 
         let cli = MultitoolCli::try_parse_from(["codex", "--strict-config", "remote-control"])

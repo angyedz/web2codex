@@ -1308,7 +1308,7 @@ mod tests {
                 "token expired",
             )
             .detail("OPENAI_API_KEY: present")
-            .remediation("Run `codex login`."),
+            .remediation(concat!("Run `", env!("CARGO_BIN_NAME"), " login`.")),
             DoctorCheck::new(
                 "updates.status",
                 "updates",

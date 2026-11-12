@@ -1,4 +1,4 @@
-name: Fork cross-platform build
+name: Web2Codex cross-platform build
 
 on:
   workflow_call:
@@ -97,7 +97,7 @@ jobs:
           workspaces: codex-rs -> target
 
       - name: Compile the fork's CLI
-        run: cargo build --locked --release -p codex-cli --bin codex
+        run: cargo build --locked --release -p codex-cli --bin web2codex
 
       - name: Compile the private WebView browser
         run: cargo build --locked --release -p codex-web-browser --bin codex-web-browser
@@ -108,18 +108,18 @@ jobs:
         run: |
           set -euo pipefail
           test -x target/release/codex-web-browser
-          target/release/codex --version
-          target/release/codex web --help >/dev/null
+          target/release/web2codex --version
+          target/release/web2codex web --help >/dev/null
 
       - name: Smoke-test the CLI on this runner (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $cli = Join-Path $PWD "target/release/codex.exe"
+          $cli = Join-Path $PWD "target/release/web2codex.exe"
           $browser = Join-Path $PWD "target/release/codex-web-browser.exe"
           if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw "Missing packaged CLI: $cli" }
           if (-not (Test-Path -LiteralPath $browser -PathType Leaf)) { throw "Missing WebView browser: $browser" }
           & $cli --version
-          if ($LASTEXITCODE -ne 0) { throw "codex --version failed with exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "web2codex --version failed with exit code $LASTEXITCODE" }
           & $cli web --help *> $null
-          if ($LASTEXITCODE -ne 0) { throw "codex web --help failed with exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "web2codex web --help failed with exit code $LASTEXITCODE" }

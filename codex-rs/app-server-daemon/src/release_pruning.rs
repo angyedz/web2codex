@@ -210,9 +210,16 @@ pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSetting
         let local = name
             .strip_prefix("local-")
             .and_then(|s| s.strip_suffix(&format!("-{}", manifest.target)));
+        let alias = match manifest.entrypoint.as_str() {
+            "bin/codex" => Some(("codex", "bin/codex")),
+            "bin/codex.exe" => Some(("codex.exe", "bin/codex.exe")),
+            "bin/web2codex" => Some(("web2codex", "bin/web2codex")),
+            "bin/web2codex.exe" => Some(("web2codex.exe", "bin/web2codex.exe")),
+            _ => None,
+        };
         if !(name == format!("{}-{}", manifest.version, manifest.target)
             || local.is_some_and(|digest| blake3::Hash::from_hex(digest).is_ok()))
-            || !matches!(manifest.entrypoint.as_str(), "bin/codex" | "bin/codex.exe")
+            || alias.is_none()
         {
             continue;
         }
@@ -226,8 +233,9 @@ pub(crate) async fn prune(daemon: &Daemon, root: &Path, settings: &DaemonSetting
         while let Some(child) = pending.pop() {
             // The Unix installer adds this alias; it never traverses outside the release.
             #[cfg(unix)]
-            if child == path.join("codex")
-                && std::fs::read_link(&child).ok().as_deref() == Some(Path::new("bin/codex"))
+            if let Some((alias_name, alias_target)) = alias
+                && child == path.join(alias_name)
+                && std::fs::read_link(&child).ok().as_deref() == Some(Path::new(alias_target))
             {
                 continue;
             }

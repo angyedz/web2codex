@@ -20,7 +20,7 @@ const WINDOWS_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from http
 const MACOS_APP_TOOLTIP: &str =
     "Use the **desktop app**. Run `codex app` to open it. It installs automatically if needed.";
 const LINUX_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from https://learn.chatgpt.com/docs/linux/linux-app and run `chatgpt`.";
-const WEB_VIEW_TOOLTIP: &str = "Open the **ChatGPT Web window** with `codex web`.";
+const WEB_VIEW_TOOLTIP: &str = "Open the **ChatGPT Web window** with `web2codex web`.";
 
 const RAW_TOOLTIPS: &str = include_str!("../assets/tooltips.txt");
 

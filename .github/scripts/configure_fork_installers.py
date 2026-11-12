@@ -78,7 +78,7 @@ def main() -> int:
 
     configure_shell_installer(args.shell_installer, args.repository)
     configure_powershell_installer(args.powershell_installer, args.repository)
-    print(f"Configured installers for {args.repository} and codex-web-v releases")
+    print(f"Configured Web2Codex installers for {args.repository} and codex-web-v releases")
     return 0
 
 

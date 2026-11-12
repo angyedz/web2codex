@@ -106,6 +106,63 @@ const ACCOUNT_CAPABILITY_PROBE_SCRIPT: &str = r##"
   })().catch(() => {});
 })();
 "##;
+const TEMPORARY_CHAT_ENFORCEMENT_SCRIPT: &str = r##"
+(() => {
+  if (window.top !== window || location.origin !== "https://chatgpt.com") return;
+
+  const chatOrigin = "https://chatgpt.com";
+  const isNewChatUrl = url => url.origin === chatOrigin && url.pathname === "/";
+  const keepTemporaryChatOnNewChat = value => {
+    if (value == null) return value;
+    try {
+      const url = new URL(value, location.href);
+      if (!isNewChatUrl(url)) return value;
+      url.searchParams.set("temporary-chat", "true");
+      return `${url.pathname}${url.search}${url.hash}`;
+    } catch (_) {
+      return value;
+    }
+  };
+  const ensureTemporaryNewChat = () => {
+    if (location.origin !== chatOrigin || location.pathname !== "/") return;
+    const url = new URL(location.href);
+    if (url.searchParams.get("temporary-chat") === "true") return;
+    url.searchParams.set("temporary-chat", "true");
+    history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  };
+
+  // Keep the Temporary Chat entry mode on SPA navigation to a new-chat surface.
+  for (const method of ["pushState", "replaceState"]) {
+    const original = history[method];
+    history[method] = function(state, title, url) {
+      return original.call(this, state, title, keepTemporaryChatOnNewChat(url));
+    };
+  }
+  addEventListener("popstate", ensureTemporaryNewChat, true);
+  addEventListener("pageshow", ensureTemporaryNewChat, true);
+  ensureTemporaryNewChat();
+
+  // The browser instance was opened in Temporary Chat; prevent its visible control
+  // from switching this ChatGPT session to saved-chat mode.
+  document.addEventListener("click", event => {
+    if (!(event.target instanceof Element)) return;
+    const control = event.target.closest(
+      'button, [role="button"], [role="switch"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]'
+    );
+    if (!control) return;
+    const label = [
+      control.getAttribute("aria-label"),
+      control.getAttribute("title"),
+      control.getAttribute("data-testid"),
+      control.innerText,
+      control.textContent
+    ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    if (!/(temporary[\s-]*(chat|conversation)|temp[\s-]*chat|временн\w*[\s-]*(чат|разговор)|(чат|разговор)[\s-]*временн\w*)/i.test(label)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+})();
+"##;
 const ACCOUNT_CHOOSER_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
@@ -439,6 +496,12 @@ fn build_webview(
                     detected_at_unix_seconds,
                 }));
         });
+
+    let builder = if page == BrowserPage::TemporaryChat {
+        builder.with_initialization_script(TEMPORARY_CHAT_ENFORCEMENT_SCRIPT)
+    } else {
+        builder
+    };
 
     let builder = match page {
         BrowserPage::SignIn => builder.with_url(CHATGPT_SIGN_IN_URL),

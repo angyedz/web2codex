@@ -94,11 +94,18 @@ pub(super) async fn run(http: &impl InstallerHttp, legacy: &Daemon) -> Result<Up
             && std::fs::read_to_string(root.join("auto-update-version"))? == name.to_string_lossy(),
         "installer did not prepare a latest-channel daemon package"
     );
-    let entrypoint = if cfg!(windows) {
-        "bin/codex.exe"
-    } else {
-        "bin/codex"
-    };
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(release.join("codex-package.json"))?)?;
+    let entrypoint = manifest["entrypoint"]
+        .as_str()
+        .filter(|entrypoint| {
+            if cfg!(windows) {
+                matches!(entrypoint, "bin/codex.exe" | "bin/web2codex.exe")
+            } else {
+                matches!(entrypoint, "bin/codex" | "bin/web2codex")
+            }
+        })
+        .context("prepared daemon package has an unsupported CLI entrypoint")?;
     let binary = release.join(entrypoint);
     let version = managed_install::managed_codex_version(&binary).await?;
     anyhow::ensure!(
@@ -166,14 +173,14 @@ pub(super) async fn run(http: &impl InstallerHttp, legacy: &Daemon) -> Result<Up
     };
     let running_version = if running.is_some() {
         selected.start_managed_backend(&settings).await.context(
-            "daemon migrated but could not start; retry with `codex app-server daemon start`",
+            "daemon migrated but could not start; retry with `web2codex app-server daemon start`",
         )?;
         Some(
             selected
                 .wait_until_ready()
                 .await
                 .context(
-                    "daemon migrated but is not ready; retry with `codex app-server daemon start`",
+                    "daemon migrated but is not ready; retry with `web2codex app-server daemon start`",
                 )?
                 .app_server_version,
         )

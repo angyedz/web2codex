@@ -1164,6 +1164,8 @@ def run_installer_in(
         {
             "CODEX_HOME": str(root / "codex-home"),
             "CODEX_INSTALL_DIR": str(root / "install-bin"),
+            # Keep these upstream-layout fixtures on the generic Codex alias.
+            "CODEX_COMMAND_NAME": "codex",
             "CODEX_NON_INTERACTIVE": "1",
             "CODEX_RELEASE": release,
             "CODEX_INSTALL_DAEMON_ONLY": "1" if daemon_only else "0",

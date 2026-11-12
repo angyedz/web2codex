@@ -132,7 +132,7 @@ pub struct DetachedLaunchRestricted;
 impl fmt::Display for DetachedLaunchRestricted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
-            "this Windows launcher prevents background processes from outliving it (for example, cargo run); build and run codex.exe directly to use the background server",
+            "this Windows launcher prevents background processes from outliving it (for example, cargo run); build and run web2codex.exe directly to use the background server",
         )
     }
 }

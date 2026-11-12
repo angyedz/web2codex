@@ -86,7 +86,7 @@ impl UpdateAction {
     /// Returns string representation of the command-line arguments for invoking the update.
     pub fn command_str(self) -> String {
         if matches!(self, Self::StandaloneUnix | Self::StandaloneWindows) {
-            return "codex update".to_string();
+            return "web2codex update".to_string();
         }
         let (command, args) = self.command_args();
         shlex::try_join(std::iter::once(command).chain(args.iter().map(String::as_str)))

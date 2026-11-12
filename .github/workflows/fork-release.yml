@@ -1,4 +1,4 @@
-name: Codex Web fork release
+name: Web2Codex release
 
 on:
   push:
@@ -149,7 +149,7 @@ jobs:
           fi
           package_args=(
             --target "$TARGET"
-            --variant codex
+            --variant web2codex
             --package-version "$RELEASE_VERSION"
             --cargo-profile release
             --package-dir "$RUNNER_TEMP/codex-package-$TARGET"
@@ -175,7 +175,7 @@ jobs:
         run: |
           set -euo pipefail
           package="$RUNNER_TEMP/codex-package-$TARGET"
-          cli="$package/bin/codex"
+          cli="$package/bin/web2codex"
           browser="$package/codex-resources/codex-web-browser"
           test -x "$cli"
           test -f "$browser"
@@ -187,14 +187,14 @@ jobs:
         shell: pwsh
         run: |
           $package = Join-Path $env:RUNNER_TEMP "codex-package-$env:TARGET"
-          $cli = Join-Path $package "bin/codex.exe"
+          $cli = Join-Path $package "bin/web2codex.exe"
           $browser = Join-Path $package "codex-resources/codex-web-browser.exe"
           if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw "Missing packaged CLI: $cli" }
           if (-not (Test-Path -LiteralPath $browser -PathType Leaf)) { throw "Missing packaged WebView browser: $browser" }
           & $cli --version
-          if ($LASTEXITCODE -ne 0) { throw "Packaged codex --version failed with exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Packaged web2codex --version failed with exit code $LASTEXITCODE" }
           & $cli web --help *> $null
-          if ($LASTEXITCODE -ne 0) { throw "Packaged codex web --help failed with exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Packaged web2codex web --help failed with exit code $LASTEXITCODE" }
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -247,7 +247,7 @@ jobs:
           if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" release-assets/* --repo "$REPOSITORY" --clobber
           elif [[ "$version" == *-* ]]; then
-            gh release create "$TAG" release-assets/* --repo "$REPOSITORY" --title "Codex Web $version" --generate-notes --prerelease
+            gh release create "$TAG" release-assets/* --repo "$REPOSITORY" --title "Web2Codex $version" --generate-notes --prerelease
           else
-            gh release create "$TAG" release-assets/* --repo "$REPOSITORY" --title "Codex Web $version" --generate-notes --latest
+            gh release create "$TAG" release-assets/* --repo "$REPOSITORY" --title "Web2Codex $version" --generate-notes --latest
           fi
