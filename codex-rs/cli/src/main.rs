@@ -77,6 +77,7 @@ mod remote_control_cmd;
 mod sandbox_setup;
 mod sandbox_uninstall;
 mod state_db_recovery;
+mod web_browser;
 #[cfg(not(windows))]
 mod wsl_paths;
 
@@ -189,6 +190,9 @@ enum Subcommand {
 
     /// Update Codex to the latest version.
     Update,
+
+    /// Open the fork's private ChatGPT WebView window.
+    Web(web_browser::WebCommand),
 
     /// Diagnose local Codex installation, config, auth, and runtime health.
     Doctor(DoctorCommand),
@@ -855,7 +859,7 @@ fn run_update_action(
             let command_path = crate::wsl_paths::normalize_for_wsl(cmd);
             let normalized_args: Vec<String> = args
                 .iter()
-                .map(crate::wsl_paths::normalize_for_wsl)
+                .map(|argument| crate::wsl_paths::normalize_for_wsl(argument))
                 .collect();
             std::process::Command::new(&command_path)
                 .args(&normalized_args)
@@ -1769,6 +1773,14 @@ async fn dispatch_cli(
             )?;
             run_update_command()?;
         }
+        Some(Subcommand::Web(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "web",
+            )?;
+            web_browser::run(command)?;
+        }
         Some(Subcommand::Doctor(doctor_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2438,6 +2450,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
+        Some(Subcommand::Web(_)) => Some("web"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
         Some(Subcommand::Sandbox(_)) => Some("sandbox"),
         Some(Subcommand::Debug(_)) => Some("debug"),

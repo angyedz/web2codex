@@ -20,9 +20,9 @@ pub enum UpdateAction {
     PnpmGlobalLatest,
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
-    /// Update via the standalone Unix installer.
+    /// Update via the latest GitHub Release's Unix installer.
     StandaloneUnix,
-    /// Update via `$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex`.
+    /// Update via the latest GitHub Release's Windows installer.
     StandaloneWindows,
 }
 
@@ -43,29 +43,41 @@ impl UpdateAction {
         }
     }
 
-    /// Returns the list of command-line arguments for invoking the update.
-    pub fn command_args(self) -> (&'static str, &'static [&'static str]) {
+    /// Returns the command and arguments for invoking the update.
+    pub fn command_args(self) -> (&'static str, Vec<String>) {
         match self {
-            UpdateAction::Daemon(source) => ("codex", source.command_args()),
-            UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex"]),
-            UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex"]),
-            UpdateAction::VitePlusGlobalLatest => ("vp", &["install", "-g", "@openai/codex"]),
-            UpdateAction::PnpmGlobalLatest => ("pnpm", &["add", "-g", "@openai/codex"]),
-            UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
+            UpdateAction::Daemon(source) => ("codex", owned_args(source.command_args())),
+            UpdateAction::NpmGlobalLatest => {
+                ("npm", owned_args(&["install", "-g", "@openai/codex"]))
+            }
+            UpdateAction::BunGlobalLatest => {
+                ("bun", owned_args(&["install", "-g", "@openai/codex"]))
+            }
+            UpdateAction::VitePlusGlobalLatest => {
+                ("vp", owned_args(&["install", "-g", "@openai/codex"]))
+            }
+            UpdateAction::PnpmGlobalLatest => ("pnpm", owned_args(&["add", "-g", "@openai/codex"])),
+            UpdateAction::BrewUpgrade => ("brew", owned_args(&["upgrade", "--cask", "codex"])),
             UpdateAction::StandaloneUnix => (
                 "sh",
-                &[
-                    "-c",
-                    r#"s=$(curl -fsSL https://chatgpt.com/codex/install.sh) && CODEX_NON_INTERACTIVE=1 eval "$s""#,
+                vec![
+                    "-c".to_string(),
+                    format!(
+                        r#"s=$(curl -fsSL {}) && CODEX_NON_INTERACTIVE=1 eval "$s""#,
+                        latest_release_installer_url("install.sh")
+                    ),
                 ],
             ),
             UpdateAction::StandaloneWindows => (
                 "powershell",
-                &[
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-c",
-                    "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex",
+                vec![
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-c".to_string(),
+                    format!(
+                        "$env:CODEX_NON_INTERACTIVE=1; irm {} | iex",
+                        latest_release_installer_url("install.ps1")
+                    ),
                 ],
             ),
         }
@@ -73,10 +85,24 @@ impl UpdateAction {
 
     /// Returns string representation of the command-line arguments for invoking the update.
     pub fn command_str(self) -> String {
+        if matches!(self, Self::StandaloneUnix | Self::StandaloneWindows) {
+            return "codex update".to_string();
+        }
         let (command, args) = self.command_args();
-        shlex::try_join(std::iter::once(command).chain(args.iter().copied()))
+        shlex::try_join(std::iter::once(command).chain(args.iter().map(String::as_str)))
             .unwrap_or_else(|_| format!("{command} {}", args.join(" ")))
     }
+}
+
+fn owned_args(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| (*arg).to_string()).collect()
+}
+
+fn latest_release_installer_url(asset: &str) -> String {
+    format!(
+        "https://github.com/{}/releases/latest/download/{asset}",
+        option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("openai/codex")
+    )
 }
 
 #[cfg(not(debug_assertions))]
@@ -156,18 +182,20 @@ mod tests {
     }
 
     #[test]
-    fn standalone_windows_update_command_reruns_latest_installer() {
+    fn standalone_windows_update_command_uses_latest_github_release() {
+        let (command, args) = UpdateAction::StandaloneWindows.command_args();
+        assert_eq!(command, "powershell");
         assert_eq!(
-            UpdateAction::StandaloneWindows.command_args(),
-            (
-                "powershell",
-                &[
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-c",
-                    "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex"
-                ][..],
-            )
+            args,
+            vec![
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-c".to_string(),
+                format!(
+                    "$env:CODEX_NON_INTERACTIVE=1; irm {} | iex",
+                    latest_release_installer_url("install.ps1")
+                ),
+            ]
         );
     }
 
@@ -175,10 +203,11 @@ mod tests {
     #[test]
     fn standalone_unix_update_fails_when_installer_download_fails() {
         let (command, args) = UpdateAction::StandaloneUnix.command_args();
-        let offline_command = args[1].replace("https://chatgpt.com", "file:///dev/null");
+        let installer_url = latest_release_installer_url("install.sh");
+        let offline_command = args[1].replace(&installer_url, "file:///dev/null");
         assert_ne!(offline_command, args[1], "installer URL must be replaced");
         let output = std::process::Command::new(command)
-            .args([args[0], &offline_command])
+            .args([args[0].as_str(), offline_command.as_str()])
             .env_clear()
             .env("HOME", "/dev/null")
             .env("PATH", "/usr/bin:/bin")

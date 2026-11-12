@@ -1,0 +1,176 @@
+name: Codex Web fork release
+
+on:
+  push:
+    tags:
+      - "codex-web-v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-web-fork-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  packages:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      TARGET: ${{ matrix.target }}
+      # The standard ARM macOS runner has 7 GB RAM and 14 GB storage.
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          toolchain: 1.95.0
+          target: ${{ matrix.target }}
+
+      - name: Install GNU target for the Linux WebView
+        if: runner.os == 'Linux'
+        shell: bash
+        run: rustup target add "${TARGET%-musl}-gnu"
+
+      - name: Configure short Cargo home (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cargoHome = Join-Path $env:SystemDrive "c"
+          New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
+          "CARGO_HOME=$cargoHome" >> $env:GITHUB_ENV
+          git config --global core.longpaths true
+
+      - uses: Swatinem/rust-cache@98c8021e33c2fb6d35f2c20c8a6a43b7cfe4a3cc # v2.8.0
+        with:
+          workspaces: codex-rs -> target
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config llvm musl-tools libcap-dev libasound2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#codex-web-v}"
+          python .github/scripts/set_fork_release_version.py "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build the complete Codex package
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          browser_target="$TARGET"
+          if [[ "$TARGET" == *-unknown-linux-musl ]]; then
+            browser_target="${TARGET%-musl}-gnu"
+          fi
+          browser_suffix=""
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            browser_suffix=".exe"
+          fi
+          cargo build --locked --release --manifest-path codex-rs/Cargo.toml \
+            --target "$browser_target" -p codex-web-browser --bin codex-web-browser
+          browser_bin="$RUNNER_TEMP/codex-web-browser$browser_suffix"
+          cp "codex-rs/target/$browser_target/release/codex-web-browser$browser_suffix" "$browser_bin"
+          if [[ "$TARGET" == *-unknown-linux-musl ]]; then
+            cargo clean --manifest-path codex-rs/Cargo.toml --target "$browser_target"
+          fi
+          python scripts/build_codex_package.py \
+            --target "$TARGET" \
+            --variant codex \
+            --package-version "$RELEASE_VERSION" \
+            --cargo-profile release \
+            --package-dir "$RUNNER_TEMP/codex-package-$TARGET" \
+            --archive-output "$RUNNER_TEMP/codex-package-$TARGET.tar.gz" \
+            --web-browser-bin "$browser_bin" \
+            --force
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-package-${{ matrix.target }}
+          path: ${{ runner.temp }}/codex-package-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: packages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: codex-package-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Stage fork installers and checksums
+        env:
+          CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cp scripts/install/install.sh release-assets/install.sh
+          cp scripts/install/install.ps1 release-assets/install.ps1
+          python3 .github/scripts/configure_fork_installers.py \
+            --repository "$CODEX_GITHUB_REPOSITORY" \
+            --shell-installer release-assets/install.sh \
+            --powershell-installer release-assets/install.ps1
+          (
+            cd release-assets
+            sha256sum codex-package-*.tar.gz > codex-package_SHA256SUMS
+          )
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${TAG#codex-web-v}"
+          if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --repo "$REPOSITORY" --clobber
+          elif [[ "$version" == *-* ]]; then
+            gh release create "$TAG" release-assets/* --repo "$REPOSITORY" --title "Codex Web $version" --generate-notes --prerelease
+          else
+            gh release create "$TAG" release-assets/* --repo "$REPOSITORY" --title "Codex Web $version" --generate-notes --latest
+          fi

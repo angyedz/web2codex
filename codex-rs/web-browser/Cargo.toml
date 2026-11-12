@@ -1,0 +1,16 @@
+[package]
+name = "codex-web-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tao = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+wry = { workspace = true }

@@ -80,17 +80,19 @@ running.
 For a new Linux or macOS machine:
 
 ```sh
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
+curl -fsSL https://github.com/OWNER/REPOSITORY/releases/latest/download/install.sh | sh
 $HOME/.codex/packages/standalone/current/codex app-server daemon bootstrap --remote-control
 ```
 
 On Windows, use a non-elevated PowerShell terminal whose host allows breakaway:
 
 ```powershell
-irm https://chatgpt.com/codex/install.ps1 | iex
+irm https://github.com/OWNER/REPOSITORY/releases/latest/download/install.ps1 | iex
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 & "$codexHome\packages\standalone\current\bin\codex.exe" app-server daemon bootstrap --remote-control
 ```
+
+Replace `OWNER/REPOSITORY` with the GitHub path of this fork.
 
 `bootstrap` can use any complete CLI package. If no daemon package is installed,
 it copies the invoking package into `CODEX_HOME/packages/app-server-daemon` and

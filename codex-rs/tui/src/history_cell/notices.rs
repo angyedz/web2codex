@@ -30,6 +30,8 @@ impl HistoryCell for UpdateAvailableHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         use ratatui_macros::line;
         use ratatui_macros::text;
+        let repository_url = crate::update_versions::github_repository_url();
+        let release_notes_url = crate::update_versions::latest_release_url();
         let update_instruction = if let Some(update_action) = self.update_action {
             line![
                 "Run ",
@@ -39,9 +41,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
         } else {
             line![
                 "See ",
-                "https://github.com/openai/codex"
-                    .fg(accent_color())
-                    .underlined(),
+                repository_url.fg(accent_color()).underlined(),
                 " for installation options."
             ]
         };
@@ -56,9 +56,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
             update_instruction,
             "",
             "See full release notes:",
-            "https://github.com/openai/codex/releases/latest"
-                .fg(accent_color())
-                .underlined(),
+            release_notes_url.fg(accent_color()).underlined(),
         ];
 
         let inner_width = content
@@ -70,10 +68,12 @@ impl HistoryCell for UpdateAvailableHistoryCell {
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
+        let repository_url = crate::update_versions::github_repository_url();
+        let release_notes_url = crate::update_versions::latest_release_url();
         let update_instruction = if let Some(update_action) = self.update_action {
             format!("Run {} to update.", update_action.command_str())
         } else {
-            "See https://github.com/openai/codex for installation options.".to_string()
+            format!("See {repository_url} for installation options.")
         };
         vec![
             Line::from("Update available!"),
@@ -81,7 +81,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
             Line::from(update_instruction),
             Line::from(""),
             Line::from("See full release notes:"),
-            Line::from("https://github.com/openai/codex/releases/latest"),
+            Line::from(release_notes_url),
         ]
     }
 

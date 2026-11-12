@@ -17,6 +17,7 @@ permissions:
 
 env:
   CODEX_REPO_ROOT: ${{ github.workspace }}
+  CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
 
 jobs:
   sign:

@@ -13,9 +13,6 @@ use std::path::Path;
 #[path = "tooltips/keybinding_tests.rs"]
 mod keybinding_tests;
 
-const ANNOUNCEMENT_TIP_URL: &str =
-    "https://raw.githubusercontent.com/openai/codex/main/announcement_tip.toml";
-
 const IS_MACOS: bool = cfg!(target_os = "macos");
 const IS_WINDOWS: bool = cfg!(target_os = "windows");
 
@@ -23,6 +20,7 @@ const WINDOWS_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from http
 const MACOS_APP_TOOLTIP: &str =
     "Use the **desktop app**. Run `codex app` to open it. It installs automatically if needed.";
 const LINUX_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from https://learn.chatgpt.com/docs/linux/linux-app and run `chatgpt`.";
+const WEB_VIEW_TOOLTIP: &str = "Open the **ChatGPT Web window** with `codex web`.";
 
 const RAW_TOOLTIPS: &str = include_str!("../assets/tooltips.txt");
 
@@ -96,17 +94,33 @@ impl LinuxDesktopSession {
 }
 
 fn linux_app_tooltip(session: LinuxDesktopSession) -> Option<&'static str> {
-    (session.has_display && !session.is_wsl).then_some(LINUX_APP_TOOLTIP)
+    (session.has_display && !session.is_wsl).then_some(if is_upstream_build() {
+        LINUX_APP_TOOLTIP
+    } else {
+        WEB_VIEW_TOOLTIP
+    })
 }
 
 fn app_tooltip() -> Option<&'static str> {
     if IS_MACOS {
-        Some(MACOS_APP_TOOLTIP)
+        Some(if is_upstream_build() {
+            MACOS_APP_TOOLTIP
+        } else {
+            WEB_VIEW_TOOLTIP
+        })
     } else if IS_WINDOWS {
-        Some(WINDOWS_APP_TOOLTIP)
+        Some(if is_upstream_build() {
+            WINDOWS_APP_TOOLTIP
+        } else {
+            WEB_VIEW_TOOLTIP
+        })
     } else {
         linux_app_tooltip(LinuxDesktopSession::current())
     }
+}
+
+fn is_upstream_build() -> bool {
+    crate::update_versions::github_repository() == "openai/codex"
 }
 
 fn pick_tooltip<R: Rng + ?Sized>(rng: &mut R, keymap: &TuiKeymap) -> Option<String> {
@@ -161,7 +175,6 @@ pub(crate) fn render_tooltip(mut template: &str, keymap: Option<&RuntimeKeymap>)
 }
 
 pub(crate) mod announcement {
-    use crate::tooltips::ANNOUNCEMENT_TIP_URL;
     use crate::version::CODEX_CLI_VERSION;
     use chrono::NaiveDate;
     use chrono::Utc;
@@ -249,9 +262,14 @@ pub(crate) mod announcement {
     }
 
     async fn fetch_announcement_tip_text(http_client_factory: HttpClientFactory) -> Option<String> {
+        if crate::update_versions::github_repository() != "openai/codex" {
+            return None;
+        }
         let client = RouteAwareClientPool::new(http_client_factory, ClientRouteClass::Other);
         let response = client
-            .get(ANNOUNCEMENT_TIP_URL)
+            .get(crate::update_versions::raw_repository_file_url(
+                "announcement_tip.toml",
+            ))
             .timeout(Duration::from_millis(2000))
             .send()
             .await

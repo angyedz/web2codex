@@ -172,6 +172,11 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--web-browser-bin",
+        type=Path,
+        help="Optional prebuilt native Codex Web browser executable to include.",
+    )
+    parser.add_argument(
         "--rg-bin",
         type=Path,
         help=(
@@ -244,6 +249,11 @@ def assemble_package(args: argparse.Namespace) -> Path:
         bwrap_bin=source_outputs.bwrap_bin,
         codex_command_runner_bin=source_outputs.codex_command_runner_bin,
         codex_windows_sandbox_setup_bin=source_outputs.codex_windows_sandbox_setup_bin,
+        web_browser_bin=resolve_optional_input_path(
+            args.web_browser_bin,
+            "prebuilt Codex Web browser executable",
+            "--web-browser-bin",
+        ),
     )
     prepare_package_dir(package_dir, force=args.force)
     build_package_dir(package_dir, args.package_version, variant, spec, inputs)
@@ -258,6 +268,17 @@ def assemble_package(args: argparse.Namespace) -> Path:
             and prebuilt is None
         ):
             strip_binary(package_dir / "bin" / filename, spec, tool=args.strip_tool)
+    if inputs.web_browser_bin is not None and (
+        args.strip == "all"
+        or (args.strip == "auto" and args.cargo_profile == "release")
+    ):
+        strip_binary(
+            package_dir
+            / "codex-resources"
+            / f"codex-web-browser{spec.exe_suffix}",
+            spec,
+            tool=args.strip_tool,
+        )
     validate_package_dir(package_dir, variant, spec)
     return package_dir
 

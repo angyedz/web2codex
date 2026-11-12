@@ -79,6 +79,13 @@ def build_package_dir(
             is_windows=True,
         )
 
+    if inputs.web_browser_bin is not None:
+        copy_executable(
+            inputs.web_browser_bin,
+            resources_dir / f"codex-web-browser{spec.exe_suffix}",
+            is_windows=spec.is_windows,
+        )
+
     metadata = {
         "layoutVersion": LAYOUT_VERSION,
         "version": version,
@@ -89,6 +96,10 @@ def build_package_dir(
         "resourcesDir": "codex-resources",
         "pathDir": "codex-path",
     }
+    if inputs.web_browser_bin is not None:
+        metadata["webBrowser"] = (
+            f"codex-resources/codex-web-browser{spec.exe_suffix}"
+        )
     write_json(package_dir / "codex-package.json", metadata)
 
 
@@ -130,6 +141,12 @@ def validate_package_dir(
                 f"Invalid package metadata field {key!r}: expected {expected!r}, got {actual!r}"
             )
 
+    web_browser = metadata.get("webBrowser")
+    if web_browser is not None and web_browser != (
+        f"codex-resources/codex-web-browser{spec.exe_suffix}"
+    ):
+        raise RuntimeError(f"Invalid package metadata field 'webBrowser': {web_browser!r}")
+
     required_files = [
         Path("bin") / variant.entrypoint_name(spec),
         Path("bin") / f"codex-code-mode-host{spec.exe_suffix}",
@@ -149,6 +166,11 @@ def validate_package_dir(
                 Path("codex-resources") / "codex-windows-sandbox-setup.exe",
             ]
         )
+
+    if web_browser is not None:
+        browser_path = Path(web_browser)
+        required_files.append(browser_path)
+        executable_files.append(browser_path)
 
     for relative_file in required_files:
         path = package_dir / relative_file

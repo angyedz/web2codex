@@ -19,6 +19,8 @@ $PreferReleasesOpenAICom = if ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALLER
     $env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM -match "^(?i:1|true|yes)$"
 }
 $ReleasesBaseUri = "https://releases.openai.com/codex"
+$GitHubRepository = if ([string]::IsNullOrWhiteSpace($env:CODEX_GITHUB_REPOSITORY)) { "openai/codex" } else { $env:CODEX_GITHUB_REPOSITORY }
+$GitHubTagPrefix = if ([string]::IsNullOrWhiteSpace($env:CODEX_GITHUB_TAG_PREFIX)) { "rust-v" } else { $env:CODEX_GITHUB_TAG_PREFIX }
 $ReleasesMetadataTimeoutSec = 30
 $ReleasesAssetTimeoutSec = 300
 
@@ -68,6 +70,10 @@ function Normalize-Version {
         return $RawVersion.Substring(6)
     }
 
+    if ($RawVersion.StartsWith("codex-web-v")) {
+        return $RawVersion.Substring(11)
+    }
+
     if ($RawVersion.StartsWith("v")) {
         return $RawVersion.Substring(1)
     }
@@ -80,8 +86,8 @@ function Assert-ValidReleaseVersion {
         [string]$Version
     )
 
-    if ($Version -cne "latest" -and $Version -cnotmatch "^[0-9]+\.[0-9]+\.[0-9]+(?:-alpha(?:\.[0-9]+){0,2}|-beta(?:\.[0-9]+)?)?$") {
-        throw "Invalid Codex release version: $Version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]]."
+    if ($Version -cne "latest" -and $Version -cnotmatch "^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$") {
+        throw "Invalid Codex release version: $Version. Expected latest or a semantic version."
     }
 }
 
@@ -172,9 +178,9 @@ function Resolve-ReleaseAssetSelection {
     $checksumFallbackUrl = $null
     if ($ResolvedRelease.Source -eq "ReleasesOpenAICom") {
         $packageUrl = "$ReleasesBaseUri/releases/$version/$packageAsset"
-        $packageFallbackUrl = "https://github.com/openai/codex/releases/download/rust-v$version/$packageAsset"
+        $packageFallbackUrl = "https://github.com/$GitHubRepository/releases/download/$GitHubTagPrefix$version/$packageAsset"
         $checksumUrl = "$ReleasesBaseUri/releases/$version/$checksumAsset"
-        $checksumFallbackUrl = "https://github.com/openai/codex/releases/download/rust-v$version/$checksumAsset"
+        $checksumFallbackUrl = "https://github.com/$GitHubRepository/releases/download/$GitHubTagPrefix$version/$checksumAsset"
     }
 
     $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata -Url $packageUrl -FallbackUrl $packageFallbackUrl
@@ -193,7 +199,7 @@ function Resolve-ReleaseAssetSelection {
     $packageFallbackUrl = $null
     if ($ResolvedRelease.Source -eq "ReleasesOpenAICom") {
         $packageUrl = "$ReleasesBaseUri/releases/$version/$packageAsset"
-        $packageFallbackUrl = "https://github.com/openai/codex/releases/download/rust-v$version/$packageAsset"
+        $packageFallbackUrl = "https://github.com/$GitHubRepository/releases/download/$GitHubTagPrefix$version/$packageAsset"
     }
     $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata -Url $packageUrl -FallbackUrl $packageFallbackUrl
     if ($null -eq $packageMetadata) {
@@ -346,11 +352,11 @@ function Resolve-ReleaseFromGitHub {
 
     if ($NormalizedVersion -eq "latest") {
         $requestedRelease = "latest"
-        $metadataUri = "https://api.github.com/repos/openai/codex/releases/latest"
+        $metadataUri = "https://api.github.com/repos/$GitHubRepository/releases/latest"
     } else {
         $resolvedVersion = $NormalizedVersion
         $requestedRelease = $resolvedVersion
-        $metadataUri = "https://api.github.com/repos/openai/codex/releases/tags/rust-v$resolvedVersion"
+        $metadataUri = "https://api.github.com/repos/$GitHubRepository/releases/tags/$GitHubTagPrefix$resolvedVersion"
     }
 
     try {
@@ -778,6 +784,13 @@ function Test-PackageContentsAreComplete {
         # Older canonical packages do not advertise or contain the executor.
         if ([regex]::IsMatch($metadata, '"execServer"\s*:')) {
             $expectedFiles += "bin\codex-exec-server.exe"
+        }
+        $packageMetadata = ConvertFrom-Json -InputObject $metadata -ErrorAction Stop
+        if ($null -ne $packageMetadata.webBrowser) {
+            if ($packageMetadata.webBrowser -cne "codex-resources/codex-web-browser.exe") {
+                return $false
+            }
+            $expectedFiles += "codex-resources\codex-web-browser.exe"
         }
     } catch {
         return $false

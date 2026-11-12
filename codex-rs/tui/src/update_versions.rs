@@ -1,3 +1,30 @@
+pub(crate) fn github_repository() -> &'static str {
+    option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("openai/codex")
+}
+
+pub(crate) fn github_repository_url() -> String {
+    format!("https://github.com/{}", github_repository())
+}
+
+pub(crate) fn raw_repository_file_url(path: &str) -> String {
+    format!(
+        "https://raw.githubusercontent.com/{}/main/{path}",
+        github_repository()
+    )
+}
+
+pub(crate) fn latest_release_url() -> String {
+    format!("{}/releases/latest", github_repository_url())
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn latest_release_api_url() -> String {
+    format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        github_repository()
+    )
+}
+
 #[cfg(any(not(debug_assertions), test))]
 pub(crate) fn is_newer(latest: &str, current: &str) -> Option<bool> {
     match (parse_version(latest), parse_version(current)) {
@@ -10,6 +37,7 @@ pub(crate) fn is_newer(latest: &str, current: &str) -> Option<bool> {
 pub(crate) fn extract_version_from_latest_tag(latest_tag_name: &str) -> anyhow::Result<String> {
     latest_tag_name
         .strip_prefix("rust-v")
+        .or_else(|| latest_tag_name.strip_prefix("codex-web-v"))
         .map(str::to_owned)
         .ok_or_else(|| anyhow::anyhow!("Failed to parse latest tag name '{latest_tag_name}'"))
 }

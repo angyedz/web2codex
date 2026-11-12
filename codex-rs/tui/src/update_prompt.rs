@@ -39,8 +39,6 @@ use ratatui::widgets::Wrap;
 #[cfg(not(debug_assertions))]
 use tokio_stream::StreamExt;
 
-const RELEASE_NOTES_URL: &str = "https://github.com/openai/codex/releases/latest";
-
 #[cfg(not(debug_assertions))]
 pub(crate) enum UpdatePromptOutcome {
     Continue,
@@ -111,6 +109,7 @@ enum UpdateSelection {
 struct UpdatePromptScreen {
     request_frame: FrameRequester,
     latest_version: String,
+    release_notes_url: String,
     current_version: String,
     update_action: UpdateAction,
     highlighted: UpdateSelection,
@@ -126,6 +125,7 @@ impl UpdatePromptScreen {
         Self {
             request_frame,
             latest_version,
+            release_notes_url: crate::update_versions::latest_release_url(),
             current_version: env!("CARGO_PKG_VERSION").to_string(),
             update_action,
             highlighted: UpdateSelection::UpdateNow,
@@ -227,7 +227,7 @@ impl WidgetRef for &UpdatePromptScreen {
             /*flex*/ 1,
             Paragraph::new(Line::from(vec![
                 "Release notes: ".dim(),
-                RELEASE_NOTES_URL.dim().underlined(),
+                self.release_notes_url.as_str().dim().underlined(),
             ]))
             .wrap(Wrap { trim: false })
             .inset(Insets::vh(/*v*/ 0, /*h*/ 2)),
@@ -266,7 +266,7 @@ impl WidgetRef for &UpdatePromptScreen {
         };
         render_menu_surface(panel, buf);
         column.render(panel, buf);
-        crate::terminal_hyperlinks::mark_underlined_hyperlink(buf, area, RELEASE_NOTES_URL);
+        crate::terminal_hyperlinks::mark_underlined_hyperlink(buf, area, &self.release_notes_url);
     }
 }
 

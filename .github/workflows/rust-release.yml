@@ -16,6 +16,7 @@ on:
 
 env:
   CODEX_REPO_ROOT: ${{ github.workspace }}
+  CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
 
 # The launcher uses this per-tag group as the migration boundary. Keep shared
 # publication jobs on the original queued group below when changing this.
@@ -1761,6 +1762,18 @@ jobs:
         run: |
           cp scripts/install/install.sh dist/install.sh
           mv dist/x86_64-pc-windows-msvc/install.ps1 dist/install.ps1
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          for path in (Path("dist/install.sh"), Path("dist/install.ps1")):
+              content = path.read_text(encoding="utf-8")
+              content = content.replace("openai/codex", repository)
+              content = content.replace('DEFAULT_PREFER_RELEASES_OPENAI_COM="true"', 'DEFAULT_PREFER_RELEASES_OPENAI_COM="false"')
+              content = content.replace("$DefaultPreferReleasesOpenAICom = $true", "$DefaultPreferReleasesOpenAICom = $false")
+              path.write_text(content, encoding="utf-8")
+          PY
 
       - name: Create GitHub Release
         env:

@@ -50,6 +50,7 @@ class PackageInputs:
     bwrap_bin: Path | None
     codex_command_runner_bin: Path | None
     codex_windows_sandbox_setup_bin: Path | None
+    web_browser_bin: Path | None = None
 
 
 PACKAGE_VARIANTS: dict[str, PackageVariant] = {
@@ -158,6 +159,9 @@ def resolve_input_path(
 
 
 def is_executable(path: Path) -> bool:
+    # Windows filesystems do not report POSIX execute bits for PE binaries.
+    if os.name == "nt" and path.suffix.lower() == ".exe":
+        return True
     return bool(path.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
 
 

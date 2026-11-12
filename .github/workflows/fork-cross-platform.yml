@@ -1,0 +1,70 @@
+name: Fork cross-platform build
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-cross-platform-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cli-build:
+    name: CLI build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-15
+          - macos-15-intel
+          - windows-2025
+          - windows-11-arm
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # The standard ARM macOS runner has 7 GB RAM and 14 GB storage.
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          toolchain: 1.95.0
+
+      - name: Configure short Cargo home (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cargoHome = Join-Path $env:SystemDrive "c"
+          New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
+          "CARGO_HOME=$cargoHome" >> $env:GITHUB_ENV
+          git config --global core.longpaths true
+
+      - name: Install Linux WebKitGTK build libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libcap-dev libasound2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev
+
+      - uses: Swatinem/rust-cache@98c8021e33c2fb6d35f2c20c8a6a43b7cfe4a3cc # v2.8.0
+        with:
+          workspaces: codex-rs -> target
+
+      - name: Compile the fork's CLI
+        run: cargo build --locked --release -p codex-cli --bin codex
+
+      - name: Compile the private WebView browser
+        run: cargo build --locked --release -p codex-web-browser --bin codex-web-browser

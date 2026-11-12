@@ -8,6 +8,8 @@ DAEMON_ONLY="${CODEX_INSTALL_DAEMON_ONLY:-0}"
 DEFAULT_PREFER_RELEASES_OPENAI_COM="true"
 PREFER_RELEASES_OPENAI_COM="${CODEX_INSTALLER_USE_RELEASES_OPENAI_COM:-$DEFAULT_PREFER_RELEASES_OPENAI_COM}"
 RELEASES_BASE_URL="https://releases.openai.com/codex"
+GITHUB_REPOSITORY="${CODEX_GITHUB_REPOSITORY:-openai/codex}"
+GITHUB_TAG_PREFIX="${CODEX_GITHUB_TAG_PREFIX:-rust-v}"
 RELEASES_CONNECT_TIMEOUT=10
 RELEASES_METADATA_TIMEOUT=30
 RELEASES_ASSET_TIMEOUT=300
@@ -55,8 +57,11 @@ normalize_version() {
     "" | latest)
       printf 'latest\n'
       ;;
-    rust-v*)
-      printf '%s\n' "${1#rust-v}"
+    rust-v* | codex-web-v*)
+      case "$1" in
+        rust-v*) printf '%s\n' "${1#rust-v}" ;;
+        codex-web-v*) printf '%s\n' "${1#codex-web-v}" ;;
+      esac
       ;;
     v*)
       printf '%s\n' "${1#v}"
@@ -74,8 +79,8 @@ validate_version() {
     return
   fi
 
-  if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+){0,2}|-beta(\.[0-9]+)?)?$'; then
-    echo "Invalid Codex release version: $version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]]." >&2
+  if ! printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+    echo "Invalid Codex release version: $version. Expected latest or a semantic version." >&2
     return 1
   fi
 }
@@ -320,7 +325,7 @@ release_url_for_asset() {
   asset="$1"
   resolved_version="$2"
 
-  printf 'https://github.com/openai/codex/releases/download/rust-v%s/%s\n' "$resolved_version" "$asset"
+  printf 'https://github.com/%s/releases/download/%s%s/%s\n' "$GITHUB_REPOSITORY" "$GITHUB_TAG_PREFIX" "$resolved_version" "$asset"
 }
 
 releases_url_for_asset() {
@@ -333,7 +338,7 @@ releases_url_for_asset() {
 release_metadata_url() {
   resolved_version="$1"
 
-  printf 'https://api.github.com/repos/openai/codex/releases/tags/rust-v%s\n' "$resolved_version"
+  printf 'https://api.github.com/repos/%s/releases/tags/%s%s\n' "$GITHUB_REPOSITORY" "$GITHUB_TAG_PREFIX" "$resolved_version"
 }
 
 parse_downloaded_release_metadata() {
@@ -349,6 +354,7 @@ resolve_metadata_version() {
   release_tag="$(printf '%s\n' "$release_metadata" | awk -F '\t' '$1 == "tag_name" { print $2; exit }')"
   case "$release_tag" in
     rust-v*) metadata_version="${release_tag#rust-v}" ;;
+    codex-web-v*) metadata_version="${release_tag#codex-web-v}" ;;
     *) metadata_version="" ;;
   esac
   if [ -z "$metadata_version" ]; then
@@ -362,7 +368,7 @@ resolve_release_from_github() {
   normalized_version="$1"
   if [ "$normalized_version" = "latest" ]; then
     requested_release="latest"
-    metadata_url="https://api.github.com/repos/openai/codex/releases/latest"
+    metadata_url="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest"
   else
     resolved_version="$normalized_version"
     requested_release="$resolved_version"
@@ -1184,6 +1190,9 @@ release_dir_is_complete() {
       # Older canonical packages do not advertise or contain the executor.
       if grep -Eq '"execServer"[[:space:]]*:' "$release_dir/codex-package.json"; then
         [ -x "$release_dir/bin/codex-exec-server" ] || return 1
+      fi
+      if grep -Eq '"webBrowser"[[:space:]]*:' "$release_dir/codex-package.json"; then
+        [ -x "$release_dir/codex-resources/codex-web-browser" ] || return 1
       fi
       ;;
     legacy-platform-npm)

@@ -6,10 +6,10 @@ use pretty_assertions::assert_eq;
 #[cfg(unix)]
 use tempfile::TempDir;
 
-use super::INSTALL_URL;
 use super::InstallerHttp;
 use super::InstallerResponse;
 use super::fetch_installer_script;
+use super::installer_url;
 #[cfg(unix)]
 use super::manual_update::run as manual_update_once;
 #[cfg(unix)]
@@ -36,7 +36,7 @@ async fn installer_fetch_uses_exact_url_and_preserves_bytes() {
             .expect("installer fetch should succeed"),
         script
     );
-    assert_eq!(http.requested_urls(), vec![INSTALL_URL.to_string()]);
+    assert_eq!(http.requested_urls(), vec![installer_url()]);
 }
 
 #[tokio::test]
@@ -48,7 +48,7 @@ async fn installer_fetch_rejects_non_success_status() {
         .expect_err("non-success response should fail");
 
     assert!(error.to_string().contains("503"));
-    assert_eq!(http.requested_urls(), vec![INSTALL_URL.to_string()]);
+    assert_eq!(http.requested_urls(), vec![installer_url()]);
 }
 
 #[cfg(unix)]
@@ -230,11 +230,7 @@ async fn explicit_update_migrates_running_and_stopped_installations() {
         .unwrap();
         assert_eq!(
             scheduled.requested_urls(),
-            if local {
-                vec![]
-            } else {
-                vec![INSTALL_URL.to_string()]
-            }
+            if local { vec![] } else { vec![installer_url()] }
         );
         assert_eq!(
             crate::managed_install::package_root(home.path()),

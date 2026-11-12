@@ -5,6 +5,7 @@ on:
 
 env:
   WINDOWS_BINARIES: "codex codex-code-mode-host codex-exec-server codex-responses-api-proxy codex-windows-sandbox-setup codex-windows-sandbox-service codex-command-runner codex-app-server"
+  CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
 
 jobs:
   build-windows-binaries:

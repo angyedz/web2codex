@@ -8,6 +8,7 @@ use crate::update_action::UpdateAction;
 use crate::update_versions::extract_version_from_latest_tag;
 use crate::update_versions::is_newer;
 use crate::update_versions::is_source_build_version;
+use crate::update_versions::latest_release_api_url;
 use crate::updates_cache::VersionInfo;
 use crate::updates_cache::read_version_info;
 use crate::updates_cache::version_filepath;
@@ -59,8 +60,6 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
 
 // We use the latest version from the cask if installation is via homebrew - homebrew does not immediately pick up the latest release and can lag behind.
 const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
-
 #[derive(Deserialize, Debug, Clone)]
 struct ReleaseInfo {
     tag_name: String,
@@ -134,10 +133,11 @@ async fn check_for_update(
 async fn fetch_latest_github_release_version(
     client_pool: &RouteAwareClientPool,
 ) -> anyhow::Result<String> {
+    let latest_release_url = latest_release_api_url();
     let ReleaseInfo {
         tag_name: latest_tag_name,
     } = client_pool
-        .get(LATEST_RELEASE_URL)
+        .get(&latest_release_url)
         .headers(default_headers())
         .send()
         .await?

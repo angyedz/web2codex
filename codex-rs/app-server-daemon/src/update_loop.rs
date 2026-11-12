@@ -72,9 +72,20 @@ const RESTART_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const INSTALLER_STDERR_TAIL_BYTES: usize = 2 * 1024;
 const INSTALLER_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(unix)]
-const INSTALL_URL: &str = "https://chatgpt.com/codex/install.sh";
+fn installer_url() -> String {
+    format!(
+        "https://github.com/{}/releases/latest/download/install.sh",
+        option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("openai/codex")
+    )
+}
+
 #[cfg(windows)]
-const INSTALL_URL: &str = "https://chatgpt.com/codex/install.ps1";
+fn installer_url() -> String {
+    format!(
+        "https://github.com/{}/releases/latest/download/install.ps1",
+        option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("openai/codex")
+    )
+}
 
 pub(crate) async fn run(
     http_client_factory: HttpClientFactory,
@@ -747,7 +758,7 @@ async fn cancel_installer(child: &mut tokio::process::Child, package_root: &Path
 }
 
 async fn fetch_installer_script(http: &impl InstallerHttp) -> Result<Vec<u8>> {
-    match http.get(INSTALL_URL).await? {
+    match http.get(&installer_url()).await? {
         InstallerResponse::Success(body) => Ok(body),
         InstallerResponse::Unsuccessful { status } => {
             anyhow::bail!("standalone Codex updater request failed with status {status}")

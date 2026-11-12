@@ -8,16 +8,11 @@ on:
     branches: [main]
 
 jobs:
-  # Keep reusable workflow calls alphabetized. The `required` job below is the
-  # version-controlled list that the main-branch ruleset should require.
-  bazel:
-    name: Bazel
-    uses: ./.github/workflows/bazel.yml
-    secrets: inherit
-
-  blob-size-policy:
-    name: Blob size policy
-    uses: ./.github/workflows/blob-size-policy.yml
+  # Keep reusable workflow calls alphabetized. Fork checks use GitHub-hosted
+  # runners so they work without OpenAI-only runner groups or signing secrets.
+  fork-cross-platform:
+    name: Fork cross-platform build
+    uses: ./.github/workflows/fork-cross-platform.yml
     secrets: inherit
 
   cargo-deny:
@@ -35,30 +30,16 @@ jobs:
     uses: ./.github/workflows/repo-checks.yml
     secrets: inherit
 
-  rust-ci:
-    name: rust-ci
-    uses: ./.github/workflows/rust-ci.yml
-    secrets: inherit
-
-  sdk:
-    name: sdk
-    uses: ./.github/workflows/sdk.yml
-    secrets: inherit
-
   required:
     name: CI required
     # Without `always()`, GitHub skips this job after a failed dependency and a
     # required check can appear successful instead of reporting the failure.
     if: ${{ always() }}
-    # Bazel is advisory while the BuildBuddy key is revoked. Restore its dependency
-    # once the suite can run without BuildBuddy.
     needs:
-      - blob-size-policy
       - cargo-deny
       - codespell
+      - fork-cross-platform
       - repo-checks
-      - rust-ci
-      - sdk
     runs-on: ubuntu-24.04
     steps:
       # Keep the helper on the same combined revision as the child workflows so
