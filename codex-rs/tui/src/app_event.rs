@@ -383,6 +383,7 @@ pub(crate) enum AppEvent {
     },
     /// Create an empty thread from the command center.
     NewAgentsOverviewSession {
+        backend_id: Option<crate::backend_id::BackendId>,
         cwd: Option<AbsolutePathBuf>,
     },
     /// Update the agents overview after a background thread listing finishes.
@@ -396,6 +397,7 @@ pub(crate) enum AppEvent {
     },
     /// Create an empty session in a worktree from the selected project's default branch.
     NewAgentsOverviewWorktree {
+        backend_id: Option<crate::backend_id::BackendId>,
         cwd: Option<AbsolutePathBuf>,
     },
     AgentsOverviewWorktreeCreated(Result<crate::app::PendingWorktree, String>),

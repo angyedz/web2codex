@@ -2295,6 +2295,7 @@ dependencies = [
  "codex-core",
  "codex-exec-server",
  "codex-feedback",
+ "codex-http-client",
  "codex-login",
  "codex-protocol",
  "codex-uds",
@@ -4050,6 +4051,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-http-headers-helper"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "codex-utils-process",
+ "codex-utils-pty",
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "codex-image-generation-extension"
 version = "0.0.0"
 dependencies = [
@@ -4634,8 +4648,10 @@ dependencies = [
  "chrono",
  "codex-api",
  "codex-http-client",
+ "codex-http-headers-helper",
  "codex-protocol",
  "codex-utils-absolute-path",
+ "codex-utils-process",
  "codex-utils-stream-parser",
  "codex-utils-string",
  "eventsource-stream",
@@ -4875,6 +4891,7 @@ dependencies = [
  "codex-config",
  "codex-exec-server",
  "codex-http-client",
+ "codex-http-headers-helper",
  "codex-keyring-store",
  "codex-network-proxy",
  "codex-otel",

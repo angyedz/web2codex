@@ -16,6 +16,7 @@ use crate::app_info::app_info_from_api;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
 use codex_app_server_client::AppServerEvent;
+use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ClientRequest;
@@ -78,11 +79,12 @@ impl App {
                 if let Some(task) = self.agents_overview.refresh_task.take() {
                     task.abort();
                 }
-                self.agents_overview.request_id = None;
+                self.agents_overview.active_refresh = None;
                 self.agents_overview.refresh_show_more = false;
                 self.agents_overview.active_refresh_thread_ids.clear();
                 self.agents_overview.refresh_pending = false;
-                self.agents_overview.initialized = false;
+                self.agents_overview
+                    .invalidate_discovery(app_server_client.backend_id(), /*displayed*/ true);
                 self.agents_overview.refresh_notifications.clear();
                 self.agents_overview.activity.clear();
                 self.agents_overview.last_messages.clear();
@@ -100,6 +102,14 @@ impl App {
                 }
             }
             AppServerEvent::ServerNotification(notification) => {
+                if let ServerNotificationThreadTarget::Thread(thread_id) =
+                    server_notification_thread_target(notification.as_ref())
+                    && !self
+                        .backend_registry
+                        .observe(app_server_client.backend_id(), thread_id)
+                {
+                    return;
+                }
                 let request_resolved = matches!(
                     notification.as_ref(),
                     ServerNotification::ServerRequestResolved(_)
@@ -117,7 +127,42 @@ impl App {
                     .await;
                 self.repaint_agents_overview();
             }
+            AppServerEvent::ThreadStreamReconnected(thread_id) => {
+                if let Ok(id) = ThreadId::from_string(&thread_id)
+                    && self.current_displayed_thread_id() == Some(id)
+                    && self.chat_widget.thread_id() == Some(id)
+                    && self.chat_widget.thread_stream_disconnected
+                    && let Some(channel) = self.thread_event_channels.get_mut(&id)
+                    && channel
+                        .backend_id
+                        .is_none_or(|owner| owner == app_server_client.backend_id())
+                {
+                    channel.history_may_be_incomplete = true;
+                    self.chat_widget.thread_stream_disconnected = false;
+                    if self.active_turn_id_for_thread(id).await.is_none() {
+                        self.chat_widget.maybe_send_next_queued_input();
+                    }
+                }
+            }
             AppServerEvent::ThreadStreamDisconnected(error) => {
+                if let Ok(id) = ThreadId::from_string(&error.thread_id)
+                    && self.current_displayed_thread_id() == Some(id)
+                    && self.chat_widget.thread_id() == Some(id)
+                    && self.thread_event_channels.get(&id).is_some_and(|channel| {
+                        channel
+                            .backend_id
+                            .is_none_or(|owner| owner == app_server_client.backend_id())
+                    })
+                    && let AppServerRequestHandle::Cloud(handle) =
+                        app_server_client.request_handle()
+                {
+                    self.chat_widget.thread_stream_disconnected = true;
+                    if !self.chat_widget.is_user_turn_pending_or_running()
+                        && handle.reconnect_idle_thread(&error.thread_id)
+                    {
+                        return;
+                    }
+                }
                 self.handle_server_notification_event(
                     app_server_client,
                     ServerNotification::Error(*error),
@@ -258,17 +303,14 @@ impl App {
                 .or_default();
         }
         self.track_agents_overview_notification(&notification);
-        // Retained blank sessions stay subscribed after their event channels are cleared.
         if let ServerNotification::ThreadSettingsUpdated(settings) = &notification
             && let Ok(thread_id) = ThreadId::from_string(&settings.thread_id)
-            && self.agents_overview.blank_sessions.contains_key(&thread_id)
-            && !self.thread_event_channels.contains_key(&thread_id)
+            && self
+                .update_retained_blank_settings(thread_id, settings)
+                .await
+            && let Some(input) = self.agents_overview.input_states.get_mut(&thread_id)
         {
-            self.apply_thread_settings_to_cached_session(thread_id, &settings.thread_settings)
-                .await;
-            if let Some(input) = self.agents_overview.input_states.get_mut(&thread_id) {
-                input.pending_thread_settings = Some(settings.clone());
-            }
+            input.pending_thread_settings = Some(settings.clone());
         }
         if matches!(
             &notification,
@@ -359,6 +401,9 @@ impl App {
                 return;
             }
             ServerNotification::AccountUpdated(notification) => {
+                self.agents_overview
+                    .invalidate_discovery(app_server_client.backend_id(), /*displayed*/ true);
+                self.refresh_changed_agents_overview_threads(app_server_client);
                 self.agents_overview.usage.clear();
                 self.agents_overview.pending_usage = None;
                 self.agents_overview.usage_disabled = false;
