@@ -13,13 +13,6 @@ use std::path::Path;
 #[path = "tooltips/keybinding_tests.rs"]
 mod keybinding_tests;
 
-const IS_MACOS: bool = cfg!(target_os = "macos");
-const IS_WINDOWS: bool = cfg!(target_os = "windows");
-
-const WINDOWS_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from https://chatgpt.com/codex?app-landing-page=true and run `codex app`.";
-const MACOS_APP_TOOLTIP: &str =
-    "Use the **desktop app**. Run `codex app` to open it. It installs automatically if needed.";
-const LINUX_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from https://learn.chatgpt.com/docs/linux/linux-app and run `chatgpt`.";
 const WEB_VIEW_TOOLTIP: &str = "Open the **ChatGPT Web window** with `web2codex web`.";
 
 const RAW_TOOLTIPS: &str = include_str!("../assets/tooltips.txt");
@@ -43,7 +36,7 @@ lazy_static! {
     };
 }
 
-/// Pick a random tooltip to show to the user when starting Codex.
+/// Pick a random tooltip to show to the user when starting Web2Codex.
 pub(crate) fn get_tooltip(plan: Option<PlanType>, keymap: &TuiKeymap) -> Option<String> {
     let mut rng = rand::rng();
     preferred_tooltip(&mut rng, plan).or_else(|| pick_tooltip(&mut rng, keymap))
@@ -67,60 +60,8 @@ pub(crate) fn preferred_tooltip<R: Rng + ?Sized>(
     None
 }
 
-struct LinuxDesktopSession {
-    has_display: bool,
-    is_wsl: bool,
-}
-
-impl LinuxDesktopSession {
-    fn current() -> Self {
-        #[cfg(target_os = "linux")]
-        {
-            Self {
-                has_display: std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty())
-                    || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty()),
-                is_wsl: crate::clipboard_paste::is_probably_wsl(),
-            }
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            Self {
-                has_display: false,
-                is_wsl: false,
-            }
-        }
-    }
-}
-
-fn linux_app_tooltip(session: LinuxDesktopSession) -> Option<&'static str> {
-    (session.has_display && !session.is_wsl).then_some(if is_upstream_build() {
-        LINUX_APP_TOOLTIP
-    } else {
-        WEB_VIEW_TOOLTIP
-    })
-}
-
 fn app_tooltip() -> Option<&'static str> {
-    if IS_MACOS {
-        Some(if is_upstream_build() {
-            MACOS_APP_TOOLTIP
-        } else {
-            WEB_VIEW_TOOLTIP
-        })
-    } else if IS_WINDOWS {
-        Some(if is_upstream_build() {
-            WINDOWS_APP_TOOLTIP
-        } else {
-            WEB_VIEW_TOOLTIP
-        })
-    } else {
-        linux_app_tooltip(LinuxDesktopSession::current())
-    }
-}
-
-fn is_upstream_build() -> bool {
-    crate::update_versions::github_repository() == "openai/codex"
+    Some(WEB_VIEW_TOOLTIP)
 }
 
 fn pick_tooltip<R: Rng + ?Sized>(rng: &mut R, keymap: &TuiKeymap) -> Option<String> {
@@ -410,72 +351,12 @@ mod tests {
     }
 
     #[test]
-    fn desktop_app_tips_render_at_narrow_width() {
-        let cwd = std::env::current_dir().unwrap();
-        for (platform, tip) in [
-            ("macos", MACOS_APP_TOOLTIP),
-            ("windows", WINDOWS_APP_TOOLTIP),
-            ("linux", LINUX_APP_TOOLTIP),
-        ] {
-            let rendered = render_tooltip_lines(tip, /*width*/ 40, &cwd)
-                .iter()
-                .map(|line| format!("{:?} {:?}", line.line, line.hyperlinks))
-                .collect::<Vec<_>>()
-                .join("\n");
-            insta::assert_snapshot!(format!("desktop_app_tip_{platform}"), rendered);
-        }
+    fn web_view_tooltip_is_available_on_all_platforms() {
+        assert_eq!(app_tooltip(), Some(WEB_VIEW_TOOLTIP));
     }
 
     #[test]
-    fn desktop_app_tooltip_uses_supported_platform_launcher() {
-        let tooltip = TOOLTIPS
-            .iter()
-            .copied()
-            .find(|tip| tip.contains("desktop app"));
-
-        if linux_app_tooltip(LinuxDesktopSession::current()).is_some() {
-            let tooltip = tooltip.expect("Linux should advertise the desktop app");
-            assert_eq!(app_tooltip(), Some(tooltip));
-        } else if IS_MACOS {
-            let tooltip = tooltip.expect("macOS should advertise the desktop app");
-            assert_eq!(app_tooltip(), Some(tooltip));
-        } else if IS_WINDOWS {
-            let tooltip = tooltip.expect("Windows should advertise the desktop app");
-            assert_eq!(app_tooltip(), Some(tooltip));
-        } else {
-            assert_eq!(tooltip, None);
-            assert_eq!(app_tooltip(), None);
-        }
-    }
-
-    #[test]
-    fn linux_desktop_app_tooltip_requires_graphical_native_session() {
-        assert_eq!(
-            linux_app_tooltip(LinuxDesktopSession {
-                has_display: true,
-                is_wsl: false,
-            }),
-            Some(LINUX_APP_TOOLTIP)
-        );
-
-        assert_eq!(
-            linux_app_tooltip(LinuxDesktopSession {
-                has_display: false,
-                is_wsl: false,
-            }),
-            None
-        );
-        assert_eq!(
-            linux_app_tooltip(LinuxDesktopSession {
-                has_display: true,
-                is_wsl: true,
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn plans_use_platform_app_tip() {
+    fn plans_use_web_view_tip() {
         for plan in [
             Some(PlanType::Free),
             Some(PlanType::Go),
