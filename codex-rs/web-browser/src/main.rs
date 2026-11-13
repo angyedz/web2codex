@@ -1477,13 +1477,27 @@ fn responses_input_to_prompt(input: &serde_json::Value) -> Result<String, Reques
                     sections.push(format!("Agent ({author}):\n{text}"));
                 }
             }
-            "function_call"
-            | "custom_tool_call"
-            | "local_shell_call"
-            | "web_search_call"
-            | "mcp_call"
-            | "function_call_output"
-            | "custom_tool_call_output" => {}
+            "function_call_output" | "custom_tool_call_output" => {
+                // Each user turn opens a new Temporary Chat. Preserve textual
+                // results from earlier tool rounds so the next turn retains
+                // the work already done; schemas still travel only via MCP.
+                if let Some(output) = item.get("output") {
+                    let text = match output {
+                        serde_json::Value::String(text) => text.clone(),
+                        serde_json::Value::Array(parts) => parts
+                            .iter()
+                            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => String::new(),
+                    };
+                    if !text.trim().is_empty() {
+                        sections.push(format!("Earlier tool result:\n{text}"));
+                    }
+                }
+            }
+            "function_call" | "custom_tool_call" | "local_shell_call" | "web_search_call"
+            | "mcp_call" => {}
             kind if kind.ends_with("_output") && kind != "tool_search_output" => {}
             // These entries carry hidden control data or tool declarations rather than
             // conversation text. The visible ChatGPT UI manages its own MCP tools.
