@@ -783,6 +783,12 @@ fn build_webview(
                 .filter(|option| !option.is_empty() && option.len() <= 120)
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
+            // A background turn can probe while ChatGPT is still loading or
+            // temporarily unavailable. Its empty result must not erase the
+            // account's model list while other turns are running.
+            if ipc_response_id.is_some() && picker_options.is_empty() {
+                return;
+            }
             let detected_at_unix_seconds = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
