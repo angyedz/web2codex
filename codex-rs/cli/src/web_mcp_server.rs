@@ -388,7 +388,6 @@ impl WebMcpServer {
         process.args(["/bin/sh", "-c", command]);
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             process.process_group(0);
         }
         let mut child = process.spawn().map_err(|error| error.to_string())?;

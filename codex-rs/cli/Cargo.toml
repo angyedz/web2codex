@@ -128,6 +128,9 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+codex-utils-pty = { workspace = true }
+
 [dev-dependencies]
 app_test_support = { workspace = true }
 assert_cmd = { workspace = true }
