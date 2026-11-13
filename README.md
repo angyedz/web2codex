@@ -43,7 +43,7 @@ web2codex
 
 Web2Codex keeps its settings, sessions, browser profile, and installer releases in its own data directories (`~/.web2codex` and `~/.local/share/web2codex/browser` on Linux; `~/Library/Application Support/Web2Codex/Browser` on macOS; `%USERPROFILE%\.web2codex` and `%LOCALAPPDATA%\Web2Codex\Browser` on Windows). Set `WEB2CODEX_HOME` or `WEB2CODEX_WEB_DATA_DIR` to choose custom directories.
 
-The background controller does not open a window automatically. For first-time sign-in, run `web2codex web`; it opens the Free/Go, Plus, and Pro chooser, then ChatGPT for sign-in. Model requests use this Web session; Web2Codex does not use API keys or OAuth for inference. To update an installed release, run `web2codex update`.
+Starting `web2codex` opens the private ChatGPT window. On first use, choose Free/Go, Plus, or Pro and sign in; the terminal waits up to five minutes for the model picker to load before opening the harness. The browser does not launch at computer startup. Model requests use this Web session; Web2Codex does not use API keys or OAuth for inference. To update an installed release, run `web2codex update`.
 
 ## ChatGPT Web
 
@@ -65,7 +65,7 @@ The chooser records the account type you selected, but does not verify your subs
 
 `/usage [daily|weekly|cumulative]` reports local request counts, input and output character counts, average request time, and model selections. It does not query ChatGPT account analytics or display subscription limits. ChatGPT Web does not expose exact token counts to this harness; the local report stores only aggregate counts and never saves prompts or replies.
 
-The WebView is required for model requests and stays hidden during normal use. Open it to sign in or inspect ChatGPT. `web hide` hides the window while keeping the controller available. `web stop` stops the controller; a later agent launch starts it again when needed. The WebView does not launch at computer startup.
+The WebView is required for model requests. `web hide` hides its window while keeping the controller available. `web stop` stops the controller; the next `web2codex` launch starts it again. The WebView does not launch at computer startup.
 
 ### Browser requirements
 

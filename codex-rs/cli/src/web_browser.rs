@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Args;
@@ -147,6 +147,43 @@ pub(crate) fn interactive_provider_overrides(cwd: Option<&Path>) -> anyhow::Resu
         "features.guardianv2=false".to_string(),
         "features.guardianv2_decisions_comparison=false".to_string(),
     ])
+}
+
+/// Open the private ChatGPT window before the interactive TUI loads its model catalog.
+/// On a first run this shows the account chooser; on later runs it opens a Temporary Chat.
+/// Waiting here lets a user finish sign-in before the TUI asks the local provider for models.
+pub(crate) fn prepare_interactive_launch() -> anyhow::Result<()> {
+    ensure_browser_started()?;
+    send_control(if has_saved_account_choice() {
+        ControlAction::Open
+    } else {
+        ControlAction::Login
+    })?;
+
+    let deadline = Instant::now() + Duration::from_secs(5 * 60);
+    eprintln!(
+        "Waiting for ChatGPT Web models. Sign in in the Web2Codex window; press Ctrl+C to cancel."
+    );
+    while Instant::now() < deadline {
+        let capabilities_path = data_directory()?.join("account-capabilities.json");
+        if let Ok(contents) = fs::read(&capabilities_path)
+            && let Ok(capabilities) = serde_json::from_slice::<AccountCapabilities>(&contents)
+            && capabilities.probe_version == 3
+            && !capabilities.picker_options.is_empty()
+        {
+            return Ok(());
+        }
+        if send_control(ControlAction::Status).is_err() {
+            anyhow::bail!(
+                "Web2Codex browser stopped while waiting for ChatGPT models; run `web2codex web` and try again"
+            );
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    anyhow::bail!(
+        "No ChatGPT Web models were detected after five minutes. Finish signing in and check `web2codex web models`, then run `web2codex` again."
+    );
 }
 
 fn start_configured_tunnel_if_available(workspace: &Path) {

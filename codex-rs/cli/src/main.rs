@@ -2279,6 +2279,7 @@ async fn run_interactive_tui(
             "Web2Codex uses ChatGPT Web models only; local OSS model providers are not supported.",
         ));
     }
+    crate::web_browser::prepare_interactive_launch().map_err(std::io::Error::other)?;
     interactive.config_overrides.raw_overrides.extend(
         crate::web_browser::interactive_provider_overrides(interactive.shared.cwd.as_deref())
             .map_err(std::io::Error::other)?,
