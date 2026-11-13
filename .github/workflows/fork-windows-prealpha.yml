@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: web2codex-prealpha-windows-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   windows-x64:
