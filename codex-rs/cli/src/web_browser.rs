@@ -153,6 +153,9 @@ pub(crate) fn interactive_provider_overrides(cwd: Option<&Path>) -> anyhow::Resu
 /// On a first run this shows the account chooser; on later runs it opens a Temporary Chat.
 /// Waiting here lets a user finish sign-in before the TUI asks the local provider for models.
 pub(crate) fn prepare_interactive_launch() -> anyhow::Result<()> {
+    let capabilities_path = data_directory()?.join("account-capabilities.json");
+    let has_cached_models = read_account_capabilities(&capabilities_path)
+        .is_some_and(|capabilities| !capabilities.picker_options.is_empty());
     ensure_browser_started()?;
     send_control(if has_saved_account_choice() {
         ControlAction::Open
@@ -160,16 +163,20 @@ pub(crate) fn prepare_interactive_launch() -> anyhow::Result<()> {
         ControlAction::Login
     })?;
 
+    // A previously authenticated profile already has a usable model catalog.
+    // Reopening its Temporary Chat must not block startup while the background
+    // probe refreshes the same list.
+    if has_cached_models {
+        return Ok(());
+    }
+
     let deadline = Instant::now() + Duration::from_secs(5 * 60);
     eprintln!(
         "Waiting for ChatGPT Web models. Sign in in the Web2Codex window; press Ctrl+C to cancel."
     );
     while Instant::now() < deadline {
-        let capabilities_path = data_directory()?.join("account-capabilities.json");
-        if let Ok(contents) = fs::read(&capabilities_path)
-            && let Ok(capabilities) = serde_json::from_slice::<AccountCapabilities>(&contents)
-            && capabilities.probe_version == 3
-            && !capabilities.picker_options.is_empty()
+        if read_account_capabilities(&capabilities_path)
+            .is_some_and(|capabilities| !capabilities.picker_options.is_empty())
         {
             return Ok(());
         }
@@ -184,6 +191,12 @@ pub(crate) fn prepare_interactive_launch() -> anyhow::Result<()> {
     anyhow::bail!(
         "No ChatGPT Web models were detected after five minutes. Finish signing in and check `web2codex web models`, then run `web2codex` again."
     );
+}
+
+fn read_account_capabilities(path: &Path) -> Option<AccountCapabilities> {
+    let contents = fs::read(path).ok()?;
+    let capabilities = serde_json::from_slice::<AccountCapabilities>(&contents).ok()?;
+    (capabilities.probe_version == 3).then_some(capabilities)
 }
 
 fn start_configured_tunnel_if_available(workspace: &Path) {
@@ -459,16 +472,52 @@ fn has_saved_account_choice() -> bool {
 
 fn ensure_browser_started() -> anyhow::Result<()> {
     if send_control(ControlAction::Status).is_ok() {
-        if read_state()?.bridge_protocol == 2 {
+        let state = read_state()?;
+        if state.bridge_protocol == 2 {
             return Ok(());
         }
-        send_control(ControlAction::Stop).context("could not stop the previous browser bridge")?;
-        for _ in 0..20 {
-            if send_control(ControlAction::Status).is_err() {
+        // Old browser builds wrote state without a protocol version. Ask the
+        // owner process to stop, but tolerate a legacy server that cannot
+        // complete the current authenticated control handshake.
+        let _ = send_control(ControlAction::Stop);
+        if state.address.ip().is_loopback() {
+            let _ = std::net::TcpStream::connect_timeout(
+                &state.address,
+                Duration::from_millis(300),
+            )
+            .and_then(|mut stream| {
+                stream.set_write_timeout(Some(Duration::from_millis(300)))?;
+                stream.write_all(b"POST /stop HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            });
+        }
+        // The same-user legacy process is our own background WebView. Stop it
+        // by PID if it ignored the protocol-aware request, then wait for its
+        // lock to be released before starting the updated helper.
+        #[cfg(windows)]
+        if state.address.ip().is_loopback() {
+            let lock_path = data_directory()?.join("browser.lock");
+            if let Ok(pid_text) = fs::read_to_string(&lock_path)
+                && let Ok(pid) = pid_text.trim().parse::<u32>()
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+        for _ in 0..50 {
+            if send_control(ControlAction::Status).is_err()
+                && !data_directory()?.join("browser.lock").exists()
+            {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
         }
+        anyhow::ensure!(
+            !data_directory()?.join("browser.lock").exists(),
+            "the previous Web2Codex browser did not stop; close its Web2Codex window and retry"
+        );
     }
 
     let executable = find_browser_executable().context(

@@ -544,7 +544,10 @@ fn run_event_loop(
                 if let Err(error) = prepare_profile_directory(&profile_dir) {
                     let _ = reply.send(Err(error.to_string())); return;
                 }
-                if page == BrowserPage::AccountChooser || page == BrowserPage::TemporaryChat {
+                // The picker snapshot belongs to the signed-in browser profile.
+                // Keep it when reopening a Temporary Chat so the CLI can supply
+                // the known model catalog immediately; the page probe refreshes it.
+                if page == BrowserPage::AccountChooser {
                     let _ = fs::remove_file(&account_capabilities_path);
                 }
                 webview = None;
@@ -1694,7 +1697,14 @@ fn parse_http_request(stream: &mut TcpStream) -> anyhow::Result<ParsedHttpReques
     );
     let mut parts = request_line.split_whitespace();
     let method = parts.next().context("missing request method")?.to_string();
-    let path = parts.next().context("missing request path")?.to_string();
+    // Codex's model client appends `client_version` to model catalog URLs.
+    // Route on the path component so `/models?client_version=...` reaches the
+    // same local catalog handler as `/models`.
+    let request_target = parts.next().context("missing request path")?;
+    let path = request_target
+        .split_once('?')
+        .map_or(request_target, |(path, _)| path)
+        .to_string();
     anyhow::ensure!(
         parts
             .next()

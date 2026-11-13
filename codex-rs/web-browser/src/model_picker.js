@@ -110,14 +110,14 @@
     let options = [];
     try {
       // ChatGPT can render its controls before they are interactive. Retry
-      // during hydration instead of delaying every turn by a fixed 12 seconds.
-      for (let attempt = 0; attempt < 3 && options.length === 0; attempt++) {
+      // for up to a minute while the authenticated Temporary Chat hydrates.
+      for (let attempt = 0; attempt < 30 && options.length === 0; attempt++) {
         try {
           const menu = await open();
           options = [...new Set(menu.options.map(text).filter(value => value.length <= 120))].slice(0, 40);
         } catch (_) {
           close();
-          await sleep(1000);
+          await sleep(2000);
         }
       }
     } catch (_) {
