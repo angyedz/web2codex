@@ -16,14 +16,14 @@ fn schemas_are_kept_in_the_connector_catalog_and_never_added_to_the_prompt() {
 }
 
 #[test]
-fn native_outputs_resume_the_connector_without_becoming_a_new_web_prompt() {
+fn native_outputs_preserve_context_and_resume_the_connector() {
     let parsed = parse_text_only_responses_request(&serde_json::to_vec(&json!({
         "model":"Web picker choice", "input":[
             {"type":"function_call","call_id":"native-call","name":"exec_command","arguments":"{}"},
             {"type":"function_call_output","call_id":"native-call","output":"PRIVATE_TOOL_RESULT"}
         ]
     })).unwrap()).unwrap();
-    assert!(parsed.prompt.is_empty());
+    assert_eq!(parsed.prompt, "Earlier tool result:\nPRIVATE_TOOL_RESULT");
     assert!(parsed.expects_continuation);
     assert_eq!(
         parsed.outputs,
@@ -44,7 +44,10 @@ fn a_new_user_message_after_historical_tools_begins_a_new_temporary_chat() {
     )
     .unwrap();
     assert!(!parsed.expects_continuation);
-    assert_eq!(parsed.prompt, "User:\nNext task");
+    assert_eq!(
+        parsed.prompt,
+        "Earlier tool result:\nold result\n\nUser:\nNext task"
+    );
 }
 
 #[test]
