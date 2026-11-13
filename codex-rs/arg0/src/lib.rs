@@ -268,11 +268,12 @@ fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 }
 
 const ILLEGAL_ENV_VAR_PREFIX: &str = "CODEX_";
+const ILLEGAL_ENV_VAR_NAMES: &[&str] = &["WEB2CODEX_HOME"];
 
 /// Load env vars from ~/.codex/.env.
 ///
-/// Security: Do not allow `.env` files to create or modify any variables
-/// with names starting with `CODEX_`.
+/// Security: Do not allow `.env` files to create or modify Codex/Web2Codex
+/// home variables; these choose where credentials and configuration are read.
 fn load_dotenv() {
     if let Ok(codex_home) = find_codex_home()
         && let dotenv_path = codex_home.join(".env")
@@ -283,7 +284,7 @@ fn load_dotenv() {
     }
 }
 
-/// Helper to set vars from a dotenvy iterator while filtering out `CODEX_` keys.
+/// Helper to set vars from a dotenvy iterator while filtering home overrides.
 fn set_filtered<I>(iter: I)
 where
     I: IntoIterator<Item = Result<(String, String), dotenvy::Error>>,
@@ -295,7 +296,10 @@ where
             Err(dotenvy::Error::Io(err)) if err.kind() != std::io::ErrorKind::InvalidData => break,
             Err(_) => continue,
         };
-        if !key.to_ascii_uppercase().starts_with(ILLEGAL_ENV_VAR_PREFIX) {
+        let normalized_key = key.to_ascii_uppercase();
+        if !normalized_key.starts_with(ILLEGAL_ENV_VAR_PREFIX)
+            && !ILLEGAL_ENV_VAR_NAMES.contains(&normalized_key.as_str())
+        {
             // It is safe to call set_var() because our process is
             // single-threaded at this point in its execution.
             unsafe { std::env::set_var(&key, &value) };

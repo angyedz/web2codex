@@ -131,8 +131,8 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// - user      `${CODEX_HOME}/config.toml`
 /// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected
 /// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
-/// - tree      parent directories up to root looking for `./.codex/config.toml` (loaded but disabled when untrusted)
-/// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (loaded but disabled when untrusted)
+/// - tree      parent directories up to root looking for the app-specific project config
+/// - repo      `$(git rev-parse --show-toplevel)` project config (loaded but disabled when untrusted)
 /// - runtime   e.g., --config flags, model selector in UI
 ///
 /// (*) Only available on macOS via managed device profiles.
@@ -1172,7 +1172,7 @@ impl ProjectTrustContext {
         }
 
         let relative_dir = dir.as_path().strip_prefix(checkout_root.as_path()).ok()?;
-        Some(repo_root.join(relative_dir).join(".codex"))
+        Some(repo_root.join(relative_dir).join(project_config_directory_name()))
     }
 }
 
@@ -1192,6 +1192,17 @@ fn project_layer_entry(
         ConfigLayerEntry::new(source, config)
     };
     entry.with_hooks_config_folder_override(hooks_config_folder_override)
+}
+
+/// Web2Codex sets `WEB2CODEX_HOME` during process startup. Use a distinct
+/// project-local directory as well, so opening a repository does not import
+/// Codex's `.codex/config.toml` into the Web2Codex harness.
+fn project_config_directory_name() -> &'static str {
+    if std::env::var_os("WEB2CODEX_HOME").is_some() {
+        ".web2codex"
+    } else {
+        ".codex"
+    }
 }
 
 // A project strip-only policy can only narrow broker access when no trusted hook gates it.
@@ -1879,7 +1890,7 @@ async fn discover_project_layers(
     let mut layers = Vec::new();
     let mut startup_warnings = Vec::new();
     for dir in dirs {
-        let dot_codex_abs = dir.join(".codex");
+        let dot_codex_abs = dir.join(project_config_directory_name());
         let dot_codex_uri = PathUri::from_abs_path(&dot_codex_abs);
         if !fs
             .get_metadata(&dot_codex_uri, Default::default(), /*sandbox*/ None)

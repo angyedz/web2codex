@@ -486,27 +486,6 @@ impl ChatWidget {
         let in_plan_mode =
             self.collaboration_modes_enabled() && self.active_mode_kind() == ModeKind::Plan;
 
-        let warn_effort = if supported
-            .iter()
-            .any(|option| option.effort == ReasoningEffortConfig::XHigh)
-        {
-            Some(ReasoningEffortConfig::XHigh)
-        } else if supported
-            .iter()
-            .any(|option| option.effort == ReasoningEffortConfig::High)
-        {
-            Some(ReasoningEffortConfig::High)
-        } else {
-            None
-        };
-        let warning_text = warn_effort.as_ref().map(|effort| {
-            let effort_label = Self::reasoning_effort_label(effort);
-            format!("⚠ {effort_label} reasoning effort can quickly consume Plus plan rate limits")
-        });
-        let warn_for_model = preset.model.starts_with("gpt-5.1-codex")
-            || preset.model.starts_with("gpt-5.1-codex-max")
-            || preset.model.starts_with("gpt-5.2");
-
         let mut all_choices: Vec<ReasoningEffortConfig> = supported
             .iter()
             .map(|option| option.effort.clone())
@@ -573,18 +552,6 @@ impl ChatWidget {
                 .map(|option| option.description.to_string())
                 .filter(|text| !text.is_empty());
 
-            let show_warning = warn_for_model && warn_effort.as_ref() == Some(&effort);
-            let selected_description = if show_warning {
-                warning_text.as_ref().map(|warning_message| {
-                    description.as_ref().map_or_else(
-                        || warning_message.clone(),
-                        |d| format!("{d}\n{warning_message}"),
-                    )
-                })
-            } else {
-                None
-            };
-
             let choice_effort = Some(effort);
             let should_prompt_plan_mode_scope = self.should_prompt_plan_mode_reasoning_scope(
                 model_slug.as_str(),
@@ -599,7 +566,6 @@ impl ChatWidget {
             items.push(SelectionItem {
                 name: effort_label,
                 description,
-                selected_description,
                 is_current: is_current_model && Some(choice) == highlight_choice.as_ref(),
                 secondary_action: self
                     .session_model_selection_action(model_slug.clone(), choice_effort),
@@ -615,11 +581,6 @@ impl ChatWidget {
                 .map(Self::reasoning_effort_label)
                 .collect::<Vec<_>>()
                 .join(" and ");
-            let verb = if advanced_choices.len() == 1 {
-                "consumes"
-            } else {
-                "consume"
-            };
             let preset_for_action = preset;
             let scoped = self.scope_model_picker_event();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
@@ -629,7 +590,7 @@ impl ChatWidget {
             })];
             items.push(SelectionItem {
                 name: "More reasoning…".to_string(),
-                description: Some(format!("{advanced_label} {verb} usage limits faster")),
+                description: Some(format!("Choose {advanced_label} reasoning.")),
                 is_current: is_current_model
                     && highlight_choice
                         .as_ref()
@@ -681,10 +642,10 @@ impl ChatWidget {
         for effort in choices {
             let description = match &effort {
                 ReasoningEffortConfig::Max => {
-                    "For difficult problems when quality matters more than speed · higher usage"
+                    "For difficult problems when quality matters more than speed"
                 }
                 ReasoningEffortConfig::Ultra => {
-                    "For demanding work using multiple agents · highest usage"
+                    "For demanding work using multiple agents"
                 }
                 _ => unreachable!("advanced choices are limited to Max and Ultra"),
             };
@@ -708,11 +669,8 @@ impl ChatWidget {
             });
         }
 
-        let header = Paragraph::new(vec![
-            Line::from("Advanced Reasoning".bold()),
-            Line::from("⚠ Consumes usage limits faster".cyan()),
-        ])
-        .wrap(Wrap { trim: false });
+        let header = Paragraph::new(Line::from("Advanced Reasoning".bold()))
+            .wrap(Wrap { trim: false });
         self.bottom_pane.show_selection_view(SelectionViewParams {
             view_id: Some(MODEL_OPTIONS_VIEW_ID),
             header: Box::new(header),

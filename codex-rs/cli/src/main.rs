@@ -954,6 +954,9 @@ fn initialize_web2codex_home() -> anyhow::Result<()> {
     // SAFETY: same single-threaded startup window as above. Child processes
     // inherit the isolated Web2Codex home instead of the parent's Codex home.
     unsafe { std::env::set_var("CODEX_HOME", home.as_path()) };
+    // The config loader uses this product marker to keep project-local
+    // settings in `.web2codex/` instead of reading a repository's `.codex/`.
+    unsafe { std::env::set_var("WEB2CODEX_HOME", home.as_path()) };
     Ok(())
 }
 
