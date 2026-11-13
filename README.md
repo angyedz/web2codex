@@ -41,7 +41,7 @@ web2codex
 
 Web2Codex keeps its settings, sessions, browser profile, and installer releases in its own data directories (`~/.web2codex` and `~/.local/share/web2codex/browser` on Linux; `~/Library/Application Support/Web2Codex/Browser` on macOS; `%USERPROFILE%\.web2codex` and `%LOCALAPPDATA%\Web2Codex\Browser` on Windows). Set `WEB2CODEX_HOME` or `WEB2CODEX_WEB_DATA_DIR` to choose custom directories.
 
-Sign in to ChatGPT inside the private WebView when prompted. Model requests use this Web session; Web2Codex does not use API keys or OAuth for inference. To update an installed release, run `web2codex update`.
+The background controller does not open a window automatically. For first-time sign-in, run `web2codex web`; it opens the Free/Go, Plus, and Pro chooser, then ChatGPT for sign-in. Model requests use this Web session; Web2Codex does not use API keys or OAuth for inference. To update an installed release, run `web2codex update`.
 
 ## ChatGPT Web
 
@@ -69,7 +69,18 @@ The WebView is required for model requests and stays hidden during normal use. O
 
 - **Windows 11:** Microsoft Edge WebView2 Runtime. It is included with Windows 11; other supported Windows installations can use [Microsoft's WebView2 deployment guide](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution).
 - **macOS:** built-in WKWebView.
-- **Linux:** glibc, GTK 3, and WebKitGTK 4.1 runtime libraries. These system libraries are not bundled with the release.
+- **Linux:** glibc, GTK 3, WebKitGTK 4.1, and libxdo runtime libraries. These system libraries are not bundled with the release. The installer checks the browser's shared-library dependencies before activating it. On Debian/Ubuntu, Fedora, and Arch Linux it offers to install the required packages only after you confirm; in non-interactive mode it prints the package command and stops so you can install them yourself. On other distributions, install the packages providing GTK 3, WebKitGTK 4.1, and libxdo, then rerun the installer.
+
+  ```sh
+  # Debian / Ubuntu
+  sudo apt-get install libwebkit2gtk-4.1-0 libxdo3
+
+  # Fedora
+  sudo dnf install webkit2gtk4.1 libxdo
+
+  # Arch Linux
+  sudo pacman -S --needed webkit2gtk-4.1 xdotool
+  ```
 
 ## MCP tunnel
 

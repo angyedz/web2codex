@@ -932,6 +932,133 @@ prompt_yes_no() {
   esac
 }
 
+linux_runtime_distro_ids() {
+  if [ -r /etc/os-release ]; then
+    awk -F= '
+      $1 == "ID" || $1 == "ID_LIKE" {
+        value = $2
+        gsub(/^\047|\047$/, "", value)
+        gsub(/^\"|\"$/, "", value)
+        printf " %s", value
+      }
+    ' /etc/os-release | tr '[:upper:]' '[:lower:]'
+  fi
+}
+
+print_linux_webview_runtime_help() {
+  _web2codex_missing="$1"
+  _web2codex_distro_ids="$(linux_runtime_distro_ids)"
+
+  printf '\nThe WebView needs glibc, GTK 3, WebKitGTK 4.1, and libxdo.\n' >&2
+  if [ -n "$_web2codex_missing" ]; then
+    printf 'Unresolved shared libraries: %s\n' "$_web2codex_missing" >&2
+  fi
+
+  case " $_web2codex_distro_ids " in
+    *" ubuntu "* | *" debian "*)
+      printf 'Install them with: sudo apt-get install libwebkit2gtk-4.1-0 libxdo3\n' >&2
+      ;;
+    *" fedora "* | *" rhel "* | *" centos "*)
+      printf 'Install them with: sudo dnf install webkit2gtk4.1 libxdo\n' >&2
+      ;;
+    *" arch "* | *" manjaro "*)
+      printf 'Install them with: sudo pacman -S --needed webkit2gtk-4.1 xdotool\n' >&2
+      ;;
+    *)
+      printf 'Install the packages that provide GTK 3, WebKitGTK 4.1, and libxdo for your distribution.\n' >&2
+      ;;
+  esac
+  printf 'Then run the installer again. These libraries are supplied by your distribution, not bundled with Web2Codex.\n\n' >&2
+}
+
+install_linux_webview_runtime_packages() {
+  _web2codex_distro_ids="$(linux_runtime_distro_ids)"
+  _web2codex_package_manager=""
+
+  case " $_web2codex_distro_ids " in
+    *" ubuntu "* | *" debian "*)
+      _web2codex_package_manager="apt-get"
+      set -- install -y libwebkit2gtk-4.1-0 libxdo3
+      ;;
+    *" fedora "* | *" rhel "* | *" centos "*)
+      _web2codex_package_manager="dnf"
+      set -- install -y webkit2gtk4.1 libxdo
+      ;;
+    *" arch "* | *" manjaro "*)
+      _web2codex_package_manager="pacman"
+      set -- -S --needed webkit2gtk-4.1 xdotool
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  if ! command -v "$_web2codex_package_manager" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if [ "$(id -u)" -eq 0 ]; then
+    printf 'The installer can run: %s %s\n' "$_web2codex_package_manager" "$*" >&2
+    prompt_yes_no "Install the WebView runtime packages now?" || return 1
+    "$_web2codex_package_manager" "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    printf 'The installer can run: sudo %s %s\n' "$_web2codex_package_manager" "$*" >&2
+    prompt_yes_no "Install the WebView runtime packages now?" || return 1
+    sudo "$_web2codex_package_manager" "$@"
+  else
+    return 1
+  fi
+}
+
+check_linux_webview_runtime() {
+  _web2codex_browser="$1"
+
+  if [ "$os" != "linux" ] || [ "$DAEMON_ONLY" = "1" ]; then
+    return 0
+  fi
+
+  if ! command -v ldd >/dev/null 2>&1; then
+    print_linux_webview_runtime_help "ldd is unavailable; runtime libraries could not be checked"
+    echo "Install glibc's ldd utility and the WebView runtime libraries, then run the installer again." >&2
+    return 1
+  fi
+
+  _web2codex_ldd_status=0
+  if _web2codex_ldd_output="$(ldd "$_web2codex_browser" 2>&1)"; then
+    :
+  else
+    _web2codex_ldd_status=$?
+  fi
+  _web2codex_missing="$(printf '%s\n' "$_web2codex_ldd_output" | awk '/=> not found/ { print $1 }')"
+  if [ -n "$_web2codex_missing" ]; then
+    print_linux_webview_runtime_help "$(printf '%s' "$_web2codex_missing" | tr '\n' ' ')"
+    if install_linux_webview_runtime_packages; then
+      _web2codex_ldd_status=0
+      if _web2codex_ldd_output="$(ldd "$_web2codex_browser" 2>&1)"; then
+        :
+      else
+        _web2codex_ldd_status=$?
+      fi
+      _web2codex_missing="$(printf '%s\n' "$_web2codex_ldd_output" | awk '/=> not found/ { print $1 }')"
+      if [ -z "$_web2codex_missing" ] && [ "$_web2codex_ldd_status" -eq 0 ]; then
+        printf 'WebView runtime dependencies are available.\n'
+        return 0
+      fi
+      print_linux_webview_runtime_help "$(printf '%s\n' "$_web2codex_missing" | tr '\n' ' ')"
+      echo "Some WebView runtime libraries are still missing; installation was stopped." >&2
+      return 1
+    fi
+    echo "Web2Codex was not activated. Install the listed packages and run the installer again." >&2
+    return 1
+  fi
+
+  if [ "$_web2codex_ldd_status" -ne 0 ]; then
+    print_linux_webview_runtime_help "$_web2codex_ldd_output"
+    echo "The packaged WebView could not be checked on this system (it requires glibc). Installation was stopped." >&2
+    return 1
+  fi
+}
+
 print_launch_instructions() {
   case "$path_action" in
     added)
@@ -1315,6 +1442,10 @@ fi
 if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
   echo "Installed Codex command did not report expected version $resolved_version." >&2
   exit 1
+fi
+if [ "$install_layout" = "package" ] &&
+  grep -Eq '"webBrowser"[[:space:]]*:' "$release_dir/codex-package.json"; then
+  check_linux_webview_runtime "$release_dir/codex-resources/codex-web-browser"
 fi
 if [ "$DAEMON_ONLY" = "1" ] && [ "${CODEX_INSTALL_DEFER_SELECTION:-0}" != "1" ]; then
   installed_codex="$release_dir/$COMMAND_NAME"
