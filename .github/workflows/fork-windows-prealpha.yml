@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: web2codex-prealpha-windows-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: false
 
 jobs:
   windows-x64:
@@ -67,14 +67,11 @@ jobs:
         with:
           workspaces: codex-rs -> target
 
-      - name: Compile private WebView browser
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-web-browser --bin codex-web-browser
+      - name: Compile the CLI and private WebView browser
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-cli --bin web2codex -p codex-web-browser --bin codex-web-browser
 
       - name: Verify native MCP bridge
         run: cargo test --locked --release --target x86_64-pc-windows-msvc -p codex-web-browser --bin codex-web-browser
-
-      - name: Compile Web2Codex CLI
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-cli --bin web2codex
 
       - name: Assemble complete Windows harness package
         shell: pwsh

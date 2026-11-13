@@ -27,7 +27,7 @@ permissions:
 
 concurrency:
   group: fork-cross-platform-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: false
 
 jobs:
   cli-build:
@@ -97,11 +97,8 @@ jobs:
         with:
           workspaces: codex-rs -> target
 
-      - name: Compile the fork's CLI
-        run: cargo build --locked --release --target ${{ matrix.target }} -p codex-cli --bin web2codex
-
-      - name: Compile the private WebView browser
-        run: cargo build --locked --release --target ${{ matrix.target }} -p codex-web-browser --bin codex-web-browser
+      - name: Compile the fork's CLI and private WebView browser
+        run: cargo build --locked --release --target ${{ matrix.target }} -p codex-cli --bin web2codex -p codex-web-browser --bin codex-web-browser
 
       - name: Smoke-test the CLI on this runner (Unix)
         if: runner.os != 'Windows'
