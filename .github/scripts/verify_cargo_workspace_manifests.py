@@ -30,6 +30,7 @@ MANIFEST_FEATURE_EXCEPTIONS = {
     # Keep the legacy Bedrock adapter isolated behind its opt-in feature while
     # Web2Codex routes interactive inference exclusively through ChatGPT Web.
     "codex-rs/model-provider/Cargo.toml": {
+        "default": (),
         "amazon-bedrock": ("dep:codex-aws-auth",),
     },
 }
