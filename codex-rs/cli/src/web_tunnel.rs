@@ -136,6 +136,15 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     // Verify the executable against its protected digest sidecar immediately before launch.
     // install_tunnel_client also checks the cache, but later file operations leave a TOCTOU gap.
     verify_cached_tunnel_client(&client)?;
+    let client_dir = client
+        .parent()
+        .context("tunnel-client has no parent directory")?;
+    verify_cached_tunnel_client(&client_dir.join(if cfg!(windows) {
+        "cloudflared.exe"
+    } else {
+        "cloudflared"
+    }))?;
+    verify_cached_tunnel_client(&client_dir.join("cloudflared-manifest.json"))?;
     let mut command = Command::new(&client);
     command
         .arg("run")
@@ -878,6 +887,13 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
     }
     #[cfg(windows)]
     set_private_windows_acl(&install_directory, true)?;
+    let cloudflared_name = if cfg!(windows) {
+        "cloudflared.exe"
+    } else {
+        "cloudflared"
+    };
+    let cloudflared = install_directory.join(cloudflared_name);
+    let manifest = install_directory.join("cloudflared-manifest.json");
     if executable.is_file() {
         #[cfg(windows)]
         {
@@ -891,6 +907,8 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
             .trim()
             .eq_ignore_ascii_case(&sha256_file(&executable).unwrap_or_default())
             && !recorded_digest.trim().is_empty()
+            && verify_cached_tunnel_client(&cloudflared).is_ok()
+            && verify_cached_tunnel_client(&manifest).is_ok()
         {
             return Ok(executable);
         }
@@ -928,19 +946,33 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
 
     let mut archive = ZipArchive::new(Cursor::new(archive_bytes))
         .context("tunnel-client release is not a valid ZIP archive")?;
-    let mut executable_bytes = None;
+    let mut found = std::collections::HashSet::new();
     for index in 0..archive.len() {
         let entry = archive.by_index(index)?;
         let entry_name = entry.name()?;
-        let is_target = Path::new(entry_name.as_ref())
+        let Some(name) = Path::new(entry_name.as_ref())
             .file_name()
-            .is_some_and(|name| name == executable_name);
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let is_target = [
+            executable_name,
+            cloudflared_name,
+            "cloudflared-manifest.json",
+        ]
+        .contains(&name.as_str());
         let is_symlink = entry
             .unix_mode()
             .is_some_and(|mode| mode & 0o170000 == 0o120000);
         if !is_target || entry.is_dir() || is_symlink {
             continue;
         }
+        anyhow::ensure!(
+            found.insert(name.clone()),
+            "duplicate {name} in tunnel-client archive"
+        );
         let size = entry.size();
         anyhow::ensure!(
             size > 0 && size <= MAX_BINARY_BYTES,
@@ -952,26 +984,27 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
             bytes.len() as u64 == size,
             "tunnel-client binary was truncated"
         );
-        executable_bytes = Some(bytes);
-        break;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let destination = install_directory.join(&name);
+        let temporary = install_directory.join(format!("{name}.partial"));
+        write_private_file(&temporary, &bytes)?;
+        remove_file_if_exists(&destination)?;
+        fs::rename(&temporary, &destination)
+            .with_context(|| format!("failed to install {name}"))?;
+        #[cfg(unix)]
+        if name != "cloudflared-manifest.json" {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o700))?;
+        }
+        write_private_file(
+            &install_directory.join(format!("{name}.sha256")),
+            digest.as_bytes(),
+        )?;
     }
-    let executable_bytes =
-        executable_bytes.context("tunnel-client executable was missing from the release ZIP")?;
-    let executable_digest = format!("{:x}", Sha256::digest(&executable_bytes));
-    let temporary = install_directory.join(format!("{executable_name}.partial"));
-    write_private_file(&temporary, &executable_bytes)?;
-    fs::rename(&temporary, &executable).with_context(|| {
-        format!(
-            "failed to install tunnel-client at {}",
-            executable.display()
-        )
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
-    }
-    write_private_file(&digest_path, executable_digest.as_bytes())?;
+    anyhow::ensure!(
+        found.len() == 3,
+        "tunnel-client release is missing the client, cloudflared, or its manifest"
+    );
     Ok(executable)
 }
 
