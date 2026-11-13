@@ -149,10 +149,22 @@ pub(crate) fn interactive_provider_overrides(cwd: Option<&Path>) -> anyhow::Resu
     ])
 }
 
+/// Stop the independent WebView process when its owning interactive harness exits.
+/// The signed-in profile remains on disk, so the next launch can restore the
+/// Temporary Chat without leaving a browser process consuming memory.
+pub(crate) fn stop_after_interactive() -> anyhow::Result<()> {
+    match send_control(ControlAction::Stop) {
+        Ok(()) => Ok(()),
+        Err(error) if error.to_string().contains("state is missing") => Ok(()),
+        Err(error) => Err(error).context("failed to stop the Web2Codex browser"),
+    }
+}
+
 /// Open the private ChatGPT window before the interactive TUI loads its model catalog.
 /// On a first run this shows the account chooser; on later runs it opens a Temporary Chat.
 /// Waiting here lets a user finish sign-in before the TUI asks the local provider for models.
 pub(crate) fn prepare_interactive_launch() -> anyhow::Result<()> {
+    configure_tunnel_on_first_launch()?;
     let capabilities_path = data_directory()?.join("account-capabilities.json");
     let has_cached_models = read_account_capabilities(&capabilities_path)
         .is_some_and(|capabilities| !capabilities.picker_options.is_empty());
@@ -191,6 +203,38 @@ pub(crate) fn prepare_interactive_launch() -> anyhow::Result<()> {
     anyhow::bail!(
         "No ChatGPT Web models were detected after five minutes. Finish signing in and check `web2codex web models`, then run `web2codex` again."
     );
+}
+
+fn configure_tunnel_on_first_launch() -> anyhow::Result<()> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Ok(());
+    }
+    let home = find_codex_home()?;
+    let setup_marker = home.join("first-run-setup-v1");
+    if setup_marker.is_file() {
+        return Ok(());
+    }
+
+    let (manager, scope, api_key_name, tunnel_id_name) = tunnel_secrets()?;
+    let has_api_key = manager.get(&scope, &api_key_name)?.is_some();
+    let has_tunnel_id = manager.get(&scope, &tunnel_id_name)?.is_some();
+    if has_api_key && has_tunnel_id {
+        fs::write(setup_marker, b"completed\n")?;
+        return Ok(());
+    }
+
+    println!("First run setup: connect the ChatGPT MCP tools through OpenAI Tunnel.");
+    println!("ChatGPT connector name: Web2Codex");
+    let choice = prompt_line("Configure the tunnel now? [Y/n]: ")?;
+    if matches!(choice.trim().to_ascii_lowercase().as_str(), "n" | "no") {
+        fs::write(setup_marker, b"skipped\n")?;
+        println!("Tunnel setup skipped. Configure it later with `/mcp tunnel` in Web2Codex.");
+        return Ok(());
+    }
+
+    configure_tunnel_credentials()?;
+    fs::write(setup_marker, b"completed\n")?;
+    Ok(())
 }
 
 fn read_account_capabilities(path: &Path) -> Option<AccountCapabilities> {

@@ -1048,8 +1048,6 @@ switch ($architecture) {
 
 $codexHome = if (-not [string]::IsNullOrWhiteSpace($env:WEB2CODEX_HOME)) {
     $env:WEB2CODEX_HOME
-} elseif (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-    $env:CODEX_HOME
 } else {
     Join-Path $env:USERPROFILE ".web2codex"
 }

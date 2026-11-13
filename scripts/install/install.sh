@@ -18,7 +18,7 @@ esac
 BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_PATH="$BIN_DIR/$COMMAND_NAME"
 CODE_MODE_HOST_BIN_PATH="$BIN_DIR/codex-code-mode-host"
-CODEX_HOME_DIR="${WEB2CODEX_HOME:-${CODEX_HOME:-$HOME/.web2codex}}"
+CODEX_HOME_DIR="${WEB2CODEX_HOME:-$HOME/.web2codex}"
 STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
 if [ "$DAEMON_ONLY" = "1" ]; then
   STANDALONE_ROOT="$CODEX_HOME_DIR/packages/app-server-daemon"

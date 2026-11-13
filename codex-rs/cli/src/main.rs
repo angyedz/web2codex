@@ -918,14 +918,43 @@ fn stage_str(stage: Stage) -> &'static str {
 }
 
 fn main() -> anyhow::Result<()> {
+    initialize_web2codex_home()?;
     codex_build_info::initialize!();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         // Finish polling the large subcommand dispatcher before polling interactive TUI events.
         if let Some(tui) = Box::pin(dispatch_cli(arg0_paths)).await? {
-            tui.await?;
+            let result = tui.await;
+            if let Err(error) = web_browser::stop_after_interactive() {
+                eprintln!("Could not stop the Web2Codex browser after the chat ended: {error:#}");
+            }
+            result?;
         }
         Ok(())
     })
+}
+
+/// Keep Web2Codex configuration and state out of a parent Codex installation.
+/// Codex Desktop exports CODEX_HOME to child processes, so the standalone
+/// binary must replace it before any config or secret store is loaded.
+fn initialize_web2codex_home() -> anyhow::Result<()> {
+    let configured_home = std::env::var_os("WEB2CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if let Some(home) = configured_home.as_ref() {
+        std::fs::create_dir_all(home)?;
+    } else {
+        // SAFETY: this runs at the beginning of main, before async runtimes or
+        // worker threads are started. Removing the inherited value makes the
+        // shared home resolver choose its Web2Codex default (~/.web2codex).
+        unsafe { std::env::remove_var("CODEX_HOME") };
+    }
+
+    let home = find_codex_home()?;
+    std::fs::create_dir_all(home.as_path())?;
+    // SAFETY: same single-threaded startup window as above. Child processes
+    // inherit the isolated Web2Codex home instead of the parent's Codex home.
+    unsafe { std::env::set_var("CODEX_HOME", home.as_path()) };
+    Ok(())
 }
 
 async fn dispatch_cli(

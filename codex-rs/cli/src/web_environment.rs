@@ -15,6 +15,9 @@ pub(crate) fn safe_subprocess_environment() -> impl Iterator<Item = (OsString, O
         "TERM",
         "COLORTERM",
         "WEB2CODEX_WEB_DATA_DIR",
+        // The main Web2Codex process replaces inherited CODEX_HOME with its
+        // isolated home before launching MCP and tunnel subprocesses.
+        "CODEX_HOME",
         "XDG_DATA_HOME",
         #[cfg(windows)]
         "USERPROFILE",
