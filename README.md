@@ -67,7 +67,7 @@ The WebView is required for model requests and stays hidden during normal use. O
 
 ### Browser requirements
 
-- **Windows 11:** Microsoft Edge WebView2 Runtime. It is included with Windows 11; other supported Windows installations can use [Microsoft's WebView2 deployment guide](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution).
+- **Windows:** Microsoft Edge WebView2 Runtime. It is included with Windows 11. If a supported Windows installation does not have it, the installer offers to download the small Microsoft bootstrapper and install the matching runtime after you confirm; installation works per-user and does not require bundling the 250+ MB fixed runtime with Web2Codex. In non-interactive mode, install the runtime from [Microsoft's WebView2 download page](https://developer.microsoft.com/microsoft-edge/webview2/) and rerun the installer.
 - **macOS:** built-in WKWebView.
 - **Linux:** glibc, GTK 3, WebKitGTK 4.1, and libxdo runtime libraries. These system libraries are not bundled with the release. The installer checks the browser's shared-library dependencies before activating it. On Debian/Ubuntu, Fedora, and Arch Linux it offers to install the required packages only after you confirm; in non-interactive mode it prints the package command and stops so you can install them yourself. On other distributions, install the packages providing GTK 3, WebKitGTK 4.1, and libxdo, then rerun the installer.
 

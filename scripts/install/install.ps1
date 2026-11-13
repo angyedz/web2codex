@@ -50,6 +50,62 @@ function Prompt-YesNo {
     return $choice -match "^(?i:y(?:es)?)$"
 }
 
+function Test-WebView2RuntimeInstalled {
+    $runtimeClientId = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$runtimeClientId",
+        "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$runtimeClientId",
+        "HKCU:\Software\Microsoft\EdgeUpdate\Clients\$runtimeClientId"
+    )
+
+    foreach ($path in $registryPaths) {
+        $versionText = Get-ItemPropertyValue -LiteralPath $path -Name "pv" -ErrorAction SilentlyContinue
+        if ($null -eq $versionText) { continue }
+        $version = $null
+        if ([version]::TryParse([string]$versionText, [ref]$version) -and $version -gt [version]"0.0.0.0") {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Install-WebView2RuntimeIfNeeded {
+    param(
+        [string]$DownloadDirectory
+    )
+
+    if (Test-WebView2RuntimeInstalled) {
+        return
+    }
+
+    $bootstrapperUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+    Write-WarningStep "The Microsoft Edge WebView2 Runtime is required for ChatGPT Web, but is not installed."
+    if (-not (Prompt-YesNo "Download and install the Microsoft WebView2 Runtime now?")) {
+        throw "Web2Codex was not activated. Install the WebView2 Runtime from https://developer.microsoft.com/microsoft-edge/webview2/ and run the installer again."
+    }
+
+    $bootstrapperPath = Join-Path $DownloadDirectory "MicrosoftEdgeWebview2Setup.exe"
+    Write-Step "Downloading the Microsoft WebView2 Runtime bootstrapper"
+    Invoke-WebRequest -UseBasicParsing -Uri $bootstrapperUrl -OutFile $bootstrapperPath
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapperPath
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+        $null -eq $signature.SignerCertificate -or
+        $signature.SignerCertificate.Subject -notmatch "(?i)(^|,\s*)CN=Microsoft Corporation(?:,|$)") {
+        throw "The downloaded WebView2 bootstrapper did not have a valid Microsoft signature. It was not run."
+    }
+
+    Write-Step "Installing the Microsoft WebView2 Runtime"
+    $process = Start-Process -FilePath $bootstrapperPath -ArgumentList "/silent /install" -Wait -PassThru
+    if ($process.ExitCode -notin @(0, 3010)) {
+        throw "The WebView2 Runtime installer failed with exit code $($process.ExitCode). The current Web2Codex release was not activated."
+    }
+    if (-not (Test-WebView2RuntimeInstalled)) {
+        throw "The WebView2 Runtime installer finished, but Windows does not report the Runtime as installed. The current Web2Codex release was not activated."
+    }
+}
+
 function Normalize-Version {
     param(
         [string]$RawVersion
@@ -1165,6 +1221,14 @@ try {
 
         if (-not (Test-ReleaseIsComplete -ReleaseDir $releaseDir -ExpectedVersion $resolvedVersion -ExpectedTarget $target -Layout $installLayout)) {
             throw "Installed Codex command did not report expected version $resolvedVersion."
+        }
+
+        if (-not $daemonOnly -and $installLayout -eq "Package") {
+            $manifestPath = Join-Path $releaseDir "codex-package.json"
+            $installedPackageMetadata = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
+            if (-not [string]::IsNullOrWhiteSpace([string]$installedPackageMetadata.webBrowser)) {
+                Install-WebView2RuntimeIfNeeded -DownloadDirectory $tempDir
+            }
         }
 
         New-Item -ItemType Directory -Force -Path $standaloneRoot | Out-Null
