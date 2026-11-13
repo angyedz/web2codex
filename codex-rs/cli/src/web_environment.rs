@@ -14,6 +14,8 @@ pub(crate) fn safe_subprocess_environment() -> impl Iterator<Item = (OsString, O
         "LC_CTYPE",
         "TERM",
         "COLORTERM",
+        "WEB2CODEX_WEB_DATA_DIR",
+        "XDG_DATA_HOME",
         #[cfg(windows)]
         "USERPROFILE",
         #[cfg(windows)]

@@ -36,7 +36,7 @@ enum WebSubcommand {
     Login,
     /// Open ChatGPT in the private window.
     Setup,
-    /// Hide the browser window and keep only its lightweight controller running.
+    /// Hide the browser window; active agent turns continue in the background.
     Hide,
     /// Show whether the background browser process is running.
     Status,
@@ -47,7 +47,7 @@ enum WebSubcommand {
     /// Internal MCP server process used by OpenAI Secure MCP Tunnel.
     #[command(name = "mcp-server", hide = true)]
     McpServer {
-        /// Restrict file tools and command working directory to this workspace.
+        /// Workspace associated with the launcher; execution uses the active Codex turn.
         #[arg(long)]
         workspace: PathBuf,
     },
@@ -77,6 +77,8 @@ enum TunnelSubcommand {
 struct BrowserState {
     address: SocketAddr,
     token: String,
+    #[serde(default)]
+    bridge_protocol: u32,
 }
 
 /// Returns transient provider overrides that force the local TUI through ChatGPT Web.
@@ -87,8 +89,8 @@ pub(crate) fn interactive_provider_overrides(cwd: Option<&Path>) -> anyhow::Resu
         Some(cwd) => std::env::current_dir()?.join(cwd),
         None => std::env::current_dir()?,
     };
-    start_configured_tunnel_if_available(&workspace);
     ensure_browser_started()?;
+    start_configured_tunnel_if_available(&workspace);
     let state = read_state()?;
     anyhow::ensure!(
         state.address.ip().is_loopback(),
@@ -102,16 +104,8 @@ pub(crate) fn interactive_provider_overrides(cwd: Option<&Path>) -> anyhow::Resu
     let origin = format!("http://{}", state.address);
     let base_url = format!("{origin}/v1");
     let model_catalog_url = format!("{origin}/models");
-    let executable =
-        std::env::current_exe().context("failed to locate the Web2Codex executable")?;
     let quote =
         |value: &str| serde_json::to_string(value).expect("string serialization cannot fail");
-    let mcp_args = serde_json::to_string(&[
-        "web".to_string(),
-        "mcp-server".to_string(),
-        "--workspace".to_string(),
-        workspace.to_string_lossy().into_owned(),
-    ])?;
 
     Ok(vec![
         "model_provider=\"web2codex\"".to_string(),
@@ -129,19 +123,10 @@ pub(crate) fn interactive_provider_overrides(cwd: Option<&Path>) -> anyhow::Resu
         "model_providers.web2codex.requires_openai_auth=false".to_string(),
         "model_providers.web2codex.supports_websockets=false".to_string(),
         "model_providers.web2codex.supports_standalone_web_search=false".to_string(),
+        // Retrying an inference request could submit the same prompt twice.
+        "model_providers.web2codex.request_max_retries=0".to_string(),
+        "model_providers.web2codex.stream_max_retries=0".to_string(),
         "web_search_mode=\"disabled\"".to_string(),
-        format!(
-            "mcp_servers.web2codex_native.command={}",
-            quote(&executable.to_string_lossy())
-        ),
-        format!("mcp_servers.web2codex_native.args={mcp_args}"),
-        format!(
-            "mcp_servers.web2codex_native.cwd={}",
-            quote(&workspace.to_string_lossy())
-        ),
-        "mcp_servers.web2codex_native.enabled=true".to_string(),
-        "mcp_servers.web2codex_native.required=true".to_string(),
-        "mcp_servers.web2codex_native.default_tools_approval_mode=\"prompt\"".to_string(),
         "analytics.enabled=false".to_string(),
         "feedback.enabled=false".to_string(),
         "cloud.skills.enabled=false".to_string(),
@@ -324,6 +309,7 @@ fn configure_tunnel_credentials() -> anyhow::Result<()> {
 }
 
 fn start_tunnel_runtime() -> anyhow::Result<()> {
+    ensure_browser_started()?;
     let (manager, scope, api_key_name, tunnel_id_name) = tunnel_secrets()?;
     let api_key = manager.get(&scope, &api_key_name)?.context(
         "OpenAI tunnel API key is not configured; open the chat and enter `/mcp tunnel`",
@@ -436,7 +422,16 @@ fn has_saved_account_choice() -> bool {
 
 fn ensure_browser_started() -> anyhow::Result<()> {
     if send_control(ControlAction::Status).is_ok() {
-        return Ok(());
+        if read_state()?.bridge_protocol == 2 {
+            return Ok(());
+        }
+        send_control(ControlAction::Stop).context("could not stop the previous browser bridge")?;
+        for _ in 0..20 {
+            if send_control(ControlAction::Status).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     let executable = find_browser_executable().context(
@@ -491,11 +486,13 @@ fn send_control(action: ControlAction) -> anyhow::Result<()> {
     let mut stream =
         std::net::TcpStream::connect_timeout(&state.address, Duration::from_millis(400))
             .with_context(|| format!("browser process is not reachable at {}", state.address))?;
-    stream.set_read_timeout(Some(if matches!(action, ControlAction::Open) {
-        Duration::from_secs(16)
-    } else {
-        Duration::from_millis(700)
-    }))?;
+    stream.set_read_timeout(Some(
+        if matches!(action, ControlAction::Open | ControlAction::Login) {
+            Duration::from_secs(16)
+        } else {
+            Duration::from_millis(700)
+        },
+    ))?;
     write!(
         stream,
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -519,6 +516,15 @@ fn read_state() -> anyhow::Result<BrowserState> {
         )
     })?;
     serde_json::from_str(&contents).context("Web2Codex browser state is invalid")
+}
+
+pub(crate) fn bridge_credentials() -> anyhow::Result<(SocketAddr, String)> {
+    let state = read_state()?;
+    anyhow::ensure!(
+        state.address.ip().is_loopback() && !state.token.is_empty() && state.bridge_protocol == 2,
+        "Invalid local Web2Codex bridge state"
+    );
+    Ok((state.address, state.token))
 }
 
 fn find_browser_executable() -> Option<PathBuf> {

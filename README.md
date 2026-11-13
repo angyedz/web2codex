@@ -4,7 +4,7 @@ Web2Codex is a local coding-agent harness fork. It keeps the terminal UI, permis
 
 The WebView has a separate sign-in profile and uses Temporary Chats. Web2Codex starts its controller when an agent session needs it and keeps the window hidden during normal use. It does not launch at computer startup. Closing or stopping it prevents new model requests until it is started again.
 
-**Status: prototype.** The WebView supplies the TUI model list from labels visible in the signed-in ChatGPT picker, and the bridge selects and verifies the exact requested label before sending. ChatGPT does not expose stable model IDs or detailed capabilities through that UI, so reasoning, image, and tool support are not inferred from the labels. Text conversation history is sent as a role-labelled transcript in a Temporary Chat, and generated text is streamed back to the TUI. Tool requests use a bounded control block that the bridge converts into a standard Responses function call; the core tool router then applies its usual routing, approvals, and sandboxing. The harness's direct Realtime voice API and OpenAI Apps file-upload path are disabled. Images, audio, stable model IDs, and exact token counts are not available through this bridge. A complete signed-in run has not yet been verified. There is no usable release yet.
+**Status: prototype; signed-in integration is still awaiting verification.** The WebView supplies the TUI model list from labels visible in the signed-in ChatGPT picker and verifies the requested choice before sending. Each prompt selects the custom **@Web2Codex** connector in a Temporary Chat. ChatGPT calls that connector through OpenAI Tunnel; the bridge turns each MCP request into the matching native Codex tool call and returns its result to the same ChatGPT response. The chat stays alive through all tool rounds. Tool schemas travel through MCP, and user-facing answers remain ordinary prose. Responses events return tools and completed text to the terminal. The harness's direct Realtime voice API and OpenAI Apps file-upload path are disabled. User image/audio uploads, stable model IDs, and exact token counts remain unsupported; inline media returned by native tools is preserved through MCP. There is no published release yet.
 
 ## Features
 
@@ -14,7 +14,9 @@ The WebView has a separate sign-in profile and uses Temporary Chats. Web2Codex s
 - Temporary Chat as the browser's default new-chat mode.
 - Model discovery from the signed-in ChatGPT Web picker, with exact-label selection before a request.
 - Local usage statistics, without displaying ChatGPT account quota limits.
-- OpenAI Secure MCP Tunnel setup for workspace files and commands.
+- OpenAI Secure MCP Tunnel linking the ChatGPT connector to the complete native Codex tool registry.
+- Native function calls, freeform patches, tool discovery, configured MCP tools, approvals, and sandboxing through the existing Codex router.
+- Independent hidden Temporary Chats for concurrent agent turns, sharing the same sign-in profile.
 - GitHub Releases installers, SHA-256 verification, and the `web2codex update` command.
 
 ## Install
@@ -86,9 +88,11 @@ The WebView is required for model requests and stays hidden during normal use. O
 
 Configure the tunnel from the running terminal app by entering `/mcp tunnel` in the chat. The setup asks for the tunnel ID and runtime API key, stores them in Web2Codex's encrypted secret store, downloads and verifies the OpenAI Secure MCP Tunnel client, then starts it in the background. On later launches, Web2Codex starts the configured tunnel automatically for the current workspace.
 
-After setup, Web2Codex prints the connector name and tunnel ID. Add that connector in ChatGPT and select **Connection: Tunnel**. You only need to do that once in ChatGPT. The same workspace MCP server is also registered locally in the harness with tool approval prompts. During Web2Codex model requests, the bridge asks ChatGPT Web to use the harness tool declarations; it converts a complete, allowlisted control block into a Responses tool call, which the native router handles. The bridge does not ask ChatGPT to call account connectors directly.
+After setup, Web2Codex prints the connector name **Web2Codex** and your tunnel ID. In ChatGPT, add a custom MCP connector with exactly that name, select **Connection: Tunnel**, and enable the connector in Developer Mode. Temporary Chats must use **Personalized** mode for the connector to appear. The browser selects the actual connector pill from the `@` menu and checks it before sending each new prompt.
 
-The tunnel key is not put in the tunnel client's environment. A short-lived private file is used during startup and removed after the tunnel is ready. File tools are scoped to the workspace selected when the tunnel starts; command tools run through Web2Codex's platform sandbox.
+The connector exposes `codex_tool_inventory` and `codex_tool_call`. The first discovers the tools available to the active Codex turn; the second invokes their exact names and arguments. Every call carries a temporary turn token. The local bridge returns a standard native function, custom, or tool-search call to Codex, waits for its matching result, and completes the original MCP request. Codex controls execution, working directories, permissions, sandboxing, and approval prompts. The connector process has no independent shell or filesystem executor.
+
+The tunnel key is not put in the tunnel client's environment. A short-lived private file is used during startup and removed after the tunnel is ready. Concurrent turns are isolated by separate hidden WebViews and turn tokens. The tunnel can serve multiple workspaces because each tool executes in its own native Codex context. See [the bridge architecture](docs/web2codex-bridge.md) for the protocol and local checks.
 
 ## Build from source
 

@@ -107,7 +107,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     {
         remove_file_if_exists(&paths.api_key)
             .context("failed to remove a stale temporary tunnel API key file")?;
-        println!("OpenAI Secure MCP Tunnel is already running for this workspace.");
+        println!("OpenAI Secure MCP Tunnel is already running for this harness.");
         print_connector_instructions(tunnel_id);
         print_mcp_observation(&paths.health_url);
         return Ok(());
@@ -580,13 +580,29 @@ fn runtime_paths() -> anyhow::Result<RuntimePaths> {
     })
 }
 
-fn runtime_signature(tunnel_id: &str, api_key: &str, workspace: &Path) -> String {
-    let workspace = workspace.to_string_lossy();
+fn runtime_signature(tunnel_id: &str, api_key: &str, _workspace: &Path) -> String {
+    let browser_directory = std::env::var_os("WEB2CODEX_WEB_DATA_DIR").unwrap_or_default();
+    let browser_directory = browser_directory.to_string_lossy();
+    let executable = std::env::current_exe().ok();
+    let executable_identity = executable
+        .as_ref()
+        .map(|path| {
+            let metadata = fs::metadata(path).ok();
+            format!(
+                "{}:{:?}:{:?}",
+                path.display(),
+                metadata.as_ref().map(|meta| meta.len()),
+                metadata.and_then(|meta| meta.modified().ok())
+            )
+        })
+        .unwrap_or_default();
     let mut hasher = Sha256::new();
     for value in [
+        b"native-turn-broker-v2".as_slice(),
         tunnel_id.as_bytes(),
         api_key.as_bytes(),
-        workspace.as_bytes(),
+        browser_directory.as_bytes(),
+        executable_identity.as_bytes(),
     ] {
         hasher.update((value.len() as u64).to_be_bytes());
         hasher.update(value);

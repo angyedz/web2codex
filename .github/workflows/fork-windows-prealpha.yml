@@ -10,6 +10,7 @@ on:
       - ".github/actions/setup-rusty-v8/**"
       - "codex-rs/**"
       - "scripts/build_codex_package.py"
+      - "scripts/codex_package/**"
       - "scripts/install/install.ps1"
 
 permissions:
@@ -28,6 +29,7 @@ jobs:
       run:
         working-directory: codex-rs
     env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
       CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
       TARGET: x86_64-pc-windows-msvc
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -65,18 +67,35 @@ jobs:
         with:
           workspaces: codex-rs -> target
 
-      - name: Compile Web2Codex CLI
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-cli --bin web2codex
-
       - name: Compile private WebView browser
         run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-web-browser --bin codex-web-browser
 
-      - name: Upload Windows x64 pre-alpha binaries
+      - name: Verify native MCP bridge
+        run: cargo test --locked --release --target x86_64-pc-windows-msvc -p codex-web-browser --bin codex-web-browser
+
+      - name: Compile Web2Codex CLI
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-cli --bin web2codex
+
+      - name: Assemble complete Windows harness package
+        shell: pwsh
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP "codex-package-$env:TARGET"
+          python ..\scripts\build_codex_package.py `
+            --target $env:TARGET `
+            --variant web2codex `
+            --package-version "0.1.0-prealpha.$env:GITHUB_RUN_NUMBER" `
+            --cargo-profile release `
+            --package-dir $package `
+            --entrypoint-bin "target/$env:TARGET/release/web2codex.exe" `
+            --web-browser-bin "target/$env:TARGET/release/codex-web-browser.exe" `
+            --force
+          if ($LASTEXITCODE -ne 0) { throw "Failed to assemble the complete Windows harness package" }
+
+      - name: Upload complete Windows x64 pre-alpha package
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: web2codex-prealpha-windows-x64
           path: |
-            codex-rs/target/x86_64-pc-windows-msvc/release/web2codex.exe
-            codex-rs/target/x86_64-pc-windows-msvc/release/codex-web-browser.exe
+            ${{ runner.temp }}/codex-package-${{ env.TARGET }}/
           if-no-files-found: error
           retention-days: 3

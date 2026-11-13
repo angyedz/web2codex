@@ -58,6 +58,7 @@ def build_source_binaries(
         cmd = [
             cargo,
             "build",
+            "--locked",
             "--target",
             spec.target,
             "--profile",
