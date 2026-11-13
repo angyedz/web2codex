@@ -5,7 +5,6 @@ use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -44,7 +43,6 @@ const RELEASE_API: &str = "https://api.github.com/repos/openai/tunnel-client/rel
 const MAX_RELEASE_JSON: usize = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
 const CONNECTOR_NAME: &str = "Web2Codex";
 
@@ -65,16 +63,10 @@ struct RuntimePaths {
     directory: PathBuf,
     profile: PathBuf,
     api_key: PathBuf,
-    log: PathBuf,
     pid: PathBuf,
     process_start: PathBuf,
     signature: PathBuf,
     health_url: PathBuf,
-}
-
-struct BoundedLog {
-    file: File,
-    bytes_written: u64,
 }
 
 struct RemoveFileOnDrop(PathBuf);
@@ -141,12 +133,6 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     }
     write_profile(&paths, tunnel_id, &paths.api_key, &codex, &workspace)?;
 
-    let log = File::create(&paths.log)
-        .with_context(|| format!("failed to open tunnel log {}", paths.log.display()))?;
-    let log = Arc::new(Mutex::new(BoundedLog {
-        file: log,
-        bytes_written: 0,
-    }));
     // Verify the executable against its protected digest sidecar immediately before launch.
     // install_tunnel_client also checks the cache, but later file operations leave a TOCTOU gap.
     verify_cached_tunnel_client(&client)?;
@@ -159,8 +145,11 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
         .env_clear()
         .envs(safe_subprocess_environment())
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // The setup command exits after readiness. Pipes owned by that command
+        // would then close underneath the long-lived tunnel process. Discard
+        // output so the tunnel survives and logs cannot fill the disk.
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -184,12 +173,6 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
             });
         }
     };
-    if let Some(stdout) = child.stdout.take() {
-        capture_bounded_log(stdout, Arc::clone(&log));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        capture_bounded_log(stderr, Arc::clone(&log));
-    }
     let pid = child.id();
     let Some(process_start) = process_start_token(pid) else {
         let _ = force_terminate_tunnel_process(pid);
@@ -237,8 +220,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
                 remove_runtime_state(&paths)
                     .context("failed to clean runtime state after tunnel-client exited")?;
                 bail!(
-                    "tunnel-client exited during startup with {status}; see {}",
-                    paths.log.display()
+                    "tunnel-client exited during startup with {status}; check the tunnel ID, runtime key, and network connection"
                 );
             }
             Ok(None) => {}
@@ -256,8 +238,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     let _ = child.wait();
     remove_runtime_state(&paths).context("failed to clean runtime state after startup timeout")?;
     bail!(
-        "tunnel-client did not become ready within 30 seconds; see {}",
-        paths.log.display()
+        "tunnel-client did not become ready within 30 seconds; check the tunnel ID, runtime key, and network connection"
     );
 }
 
@@ -269,10 +250,6 @@ pub(crate) fn status() -> anyhow::Result<()> {
         print_mcp_observation(&paths.health_url);
     } else {
         println!("OpenAI Secure MCP Tunnel is stopped or not ready yet.");
-        let paths = runtime_paths()?;
-        if paths.log.is_file() {
-            println!("Log: {}", paths.log.display());
-        }
     }
     Ok(())
 }
@@ -571,7 +548,6 @@ fn runtime_paths() -> anyhow::Result<RuntimePaths> {
     Ok(RuntimePaths {
         profile: directory.join("profile.yaml"),
         api_key: directory.join("runtime-api-key.tmp"),
-        log: directory.join("tunnel-client.log"),
         pid: directory.join("tunnel-client.pid"),
         process_start: directory.join("tunnel-client.start"),
         signature: directory.join("runtime.signature"),
@@ -608,33 +584,6 @@ fn runtime_signature(tunnel_id: &str, api_key: &str, _workspace: &Path) -> Strin
         hasher.update(value);
     }
     format!("{:x}", hasher.finalize())
-}
-
-fn capture_bounded_log<R>(mut reader: R, log: Arc<Mutex<BoundedLog>>)
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut buffer = [0u8; 8192];
-        loop {
-            let count = match reader.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                Ok(count) => count,
-            };
-            let Ok(mut log) = log.lock() else {
-                break;
-            };
-            let remaining = MAX_LOG_BYTES.saturating_sub(log.bytes_written) as usize;
-            let count = count.min(remaining);
-            if count == 0 {
-                continue;
-            }
-            if log.file.write_all(&buffer[..count]).is_err() {
-                break;
-            }
-            log.bytes_written += count as u64;
-        }
-    });
 }
 
 fn write_profile(
