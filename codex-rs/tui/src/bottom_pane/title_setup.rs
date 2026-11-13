@@ -277,6 +277,7 @@ impl TerminalTitleSetupView {
             .into_iter()
             .flatten()
             .filter_map(|id| id.parse::<TerminalTitleItem>().ok())
+            .filter(|item| !is_account_quota_item(*item))
             .unique()
             .collect_vec();
         let selected_set = selected_items
@@ -285,13 +286,12 @@ impl TerminalTitleSetupView {
             .collect::<std::collections::HashSet<_>>();
         let items = selected_items
             .into_iter()
-            .map(|item| Self::title_select_item(item, /*enabled*/ true, &preview_data))
+            .map(|item| Self::title_select_item(item, /*enabled*/ true))
             .chain(
                 TerminalTitleItem::iter()
+                    .filter(|item| !is_account_quota_item(*item))
                     .filter(|item| !selected_set.contains(item))
-                    .map(|item| {
-                        Self::title_select_item(item, /*enabled*/ false, &preview_data)
-                    }),
+                    .map(|item| Self::title_select_item(item, /*enabled*/ false)),
             )
             .collect();
 
@@ -340,20 +340,9 @@ impl TerminalTitleSetupView {
     fn title_select_item(
         item: TerminalTitleItem,
         enabled: bool,
-        preview_data: &StatusSurfacePreviewData,
     ) -> MultiSelectItem {
-        let default_name = item.to_string();
-        let default_description = item.description();
-        let (name, description) = match item.preview_item() {
-            Some(
-                preview_item @ (StatusSurfacePreviewItem::FiveHourLimit
-                | StatusSurfacePreviewItem::WeeklyLimit),
-            ) => (
-                preview_data.rate_limit_item_name(preview_item, &default_name),
-                preview_data.rate_limit_item_description(preview_item, default_description),
-            ),
-            _ => (default_name, default_description.to_string()),
-        };
+        let name = item.to_string();
+        let description = item.description().to_string();
 
         MultiSelectItem {
             id: item.to_string(),
@@ -364,6 +353,10 @@ impl TerminalTitleSetupView {
             section_break_after: false,
         }
     }
+}
+
+fn is_account_quota_item(item: TerminalTitleItem) -> bool {
+    matches!(item, TerminalTitleItem::FiveHourLimit | TerminalTitleItem::WeeklyLimit)
 }
 
 impl BottomPaneView for TerminalTitleSetupView {

@@ -44,7 +44,6 @@ pub(crate) enum StatusSurfacePreviewItem {
     Provider,
     TaskProgress,
 }
-
 impl StatusSurfacePreviewItem {
     fn placeholder(self) -> &'static str {
         match self {
@@ -63,8 +62,7 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::ApprovalMode => "on-request",
             StatusSurfacePreviewItem::ContextRemaining => "Context 0% left",
             StatusSurfacePreviewItem::ContextUsed => "Context 0% used",
-            StatusSurfacePreviewItem::FiveHourLimit => "primary 0%",
-            StatusSurfacePreviewItem::WeeklyLimit => "secondary 0%",
+            StatusSurfacePreviewItem::FiveHourLimit | StatusSurfacePreviewItem::WeeklyLimit => "",
             StatusSurfacePreviewItem::CodexVersion => "0.0.0",
             StatusSurfacePreviewItem::ContextWindowSize => "0 window",
             StatusSurfacePreviewItem::UsedTokens => "0 used",
@@ -103,8 +101,6 @@ impl StatusSurfacePreviewItem {
             Self::ApprovalMode,
             Self::ContextRemaining,
             Self::ContextUsed,
-            Self::FiveHourLimit,
-            Self::WeeklyLimit,
             Self::CodexVersion,
             Self::ContextWindowSize,
             Self::UsedTokens,
@@ -211,28 +207,6 @@ impl StatusSurfacePreviewData {
         }
     }
 
-    pub(crate) fn rate_limit_item_name(
-        &self,
-        item: StatusSurfacePreviewItem,
-        fallback: &str,
-    ) -> String {
-        self.live_value_for(item)
-            .and_then(rate_limit_preview_copy)
-            .map(|copy| copy.name.to_string())
-            .unwrap_or_else(|| fallback.to_string())
-    }
-
-    pub(crate) fn rate_limit_item_description(
-        &self,
-        item: StatusSurfacePreviewItem,
-        fallback: &str,
-    ) -> String {
-        self.live_value_for(item)
-            .and_then(rate_limit_preview_copy)
-            .map(|copy| copy.description.to_string())
-            .unwrap_or_else(|| fallback.to_string())
-    }
-
     pub(crate) fn value_for(&self, item: StatusSurfacePreviewItem) -> Option<&str> {
         self.values.get(&item).map(|value| value.text.as_str())
     }
@@ -264,52 +238,5 @@ impl StatusSurfacePreviewData {
                 .and(self.pull_request_url.as_deref()),
         )
         .map(FooterContent::HyperlinkLine)
-    }
-}
-
-struct RateLimitPreviewCopy {
-    name: &'static str,
-    description: &'static str,
-}
-
-fn rate_limit_preview_copy(value: &str) -> Option<RateLimitPreviewCopy> {
-    let value = value.trim_start();
-    if value.starts_with("secondary usage ") {
-        Some(RateLimitPreviewCopy {
-            name: "secondary-usage-limit",
-            description: "Remaining usage on the secondary usage limit (omitted when unavailable)",
-        })
-    } else if value.starts_with("usage ") {
-        Some(RateLimitPreviewCopy {
-            name: "usage-limit",
-            description: "Remaining usage on the primary usage limit (omitted when unavailable)",
-        })
-    } else if value.starts_with("5h ") {
-        Some(RateLimitPreviewCopy {
-            name: "five-hour-limit",
-            description: "Remaining usage on the 5-hour usage limit (omitted when unavailable)",
-        })
-    } else if value.starts_with("daily ") {
-        Some(RateLimitPreviewCopy {
-            name: "daily-limit",
-            description: "Remaining usage on the daily usage limit (omitted when unavailable)",
-        })
-    } else if value.starts_with("weekly ") {
-        Some(RateLimitPreviewCopy {
-            name: "weekly-limit",
-            description: "Remaining usage on the weekly usage limit (omitted when unavailable)",
-        })
-    } else if value.starts_with("monthly ") {
-        Some(RateLimitPreviewCopy {
-            name: "monthly-limit",
-            description: "Remaining usage on the monthly usage limit (omitted when unavailable)",
-        })
-    } else if value.starts_with("annual ") {
-        Some(RateLimitPreviewCopy {
-            name: "annual-limit",
-            description: "Remaining usage on the annual usage limit (omitted when unavailable)",
-        })
-    } else {
-        None
     }
 }

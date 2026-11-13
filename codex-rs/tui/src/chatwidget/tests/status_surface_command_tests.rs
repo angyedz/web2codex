@@ -26,63 +26,48 @@ fn rendered_history(events: Vec<AppEvent>) -> String {
 }
 
 #[tokio::test]
-async fn inline_status_surface_commands_are_session_only_and_atomic() {
+async fn inline_status_surface_commands_hide_account_quota_items() {
     let (mut chat, mut events, _ops) = make_chatwidget_manual(Some("gpt-5.5")).await;
     let saved_tui = chat.config_panel_tui.clone();
-    super::status_surface_previews::cache_rate_limit_snapshot(&mut chat);
+    let initial_title = chat.local_settings.tui.terminal_title.clone();
+    let initial_status_line = chat.local_settings.tui.status_line.clone();
+    let initial_status_line_colors = chat.local_settings.tui.status_line_use_colors;
 
     let title_events = dispatch_inline(
         &mut chat,
         &mut events,
         SlashCommand::Title,
-        "model-name monthly-limit",
+        "five-hour-limit",
     );
     assert_eq!(
         chat.local_settings.tui.terminal_title,
-        Some(vec!["model".into(), "five-hour-limit".into()])
+        initial_title
     );
-    assert!(matches!(
-        title_events.as_slice(),
-        [AppEvent::SettingsSelectionClosed]
-    ));
+    assert!(title_events
+        .iter()
+        .any(|event| matches!(event, AppEvent::SettingsSelectionClosed)));
+    assert!(
+        rendered_history(title_events).contains("Unknown terminal-title item 'five-hour-limit'")
+    );
 
     let status_events = dispatch_inline(
         &mut chat,
         &mut events,
         SlashCommand::Statusline,
-        "monthly-limit weekly-limit --no-colors",
+        "weekly-limit --no-colors",
     );
     assert_eq!(
         (
             chat.local_settings.tui.status_line.clone(),
             chat.local_settings.tui.status_line_use_colors,
         ),
-        (
-            Some(vec!["five-hour-limit".into(), "weekly-limit".into()]),
-            false,
-        )
+        (initial_status_line, initial_status_line_colors)
     );
-    assert!(matches!(
-        status_events.as_slice(),
-        [AppEvent::SettingsSelectionClosed]
-    ));
+    assert!(status_events
+        .iter()
+        .any(|event| matches!(event, AppEvent::SettingsSelectionClosed)));
+    assert!(rendered_history(status_events).contains("Unknown status-line item 'weekly-limit'"));
     assert_eq!(chat.config_panel_tui, saved_tui);
-
-    chat.rate_limit_snapshots_by_limit_id
-        .get_mut("codex")
-        .and_then(|snapshot| snapshot.secondary.as_mut())
-        .expect("secondary usage limit")
-        .window_minutes = Some(30 * 24 * 60);
-    let before_ambiguous = chat.status_surface_overrides.clone();
-    let ambiguous_events = dispatch_inline(
-        &mut chat,
-        &mut events,
-        SlashCommand::Statusline,
-        "monthly-limit",
-    );
-    assert_eq!(chat.status_surface_overrides, before_ambiguous);
-    let rendered = rendered_history(ambiguous_events);
-    insta::assert_snapshot!(rendered, @"■ Ambiguous status-line item 'monthly-limit'. Use 'five-hour-limit' or 'weekly-limit'.\n");
 
     dispatch_inline(
         &mut chat,

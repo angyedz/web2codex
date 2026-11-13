@@ -271,20 +271,26 @@ async fn status_surface_preview_lines_mixed_snapshot() {
 }
 
 #[tokio::test]
-async fn status_surface_preview_lines_rate_limits_snapshot() {
+async fn status_surface_preview_lines_hide_account_quotas() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     cache_rate_limit_snapshot(&mut chat);
 
-    let snapshot = combined_preview_snapshot(
-        &mut chat,
-        &[StatusLineItem::FiveHourLimit, StatusLineItem::WeeklyLimit],
+    assert_eq!(
+        status_preview_line_option(
+            &mut chat,
+            &[StatusLineItem::FiveHourLimit, StatusLineItem::WeeklyLimit],
+        ),
+        None
+    );
+    let preview_data = chat.terminal_title_preview_data();
+    assert!(preview_line_for_title_items(
         &[
             TerminalTitleItem::FiveHourLimit,
             TerminalTitleItem::WeeklyLimit,
         ],
-    );
-
-    assert_chatwidget_snapshot!("status_surface_previews_rate_limits", snapshot);
+        &preview_data,
+    )
+    .is_none());
 }
 
 #[tokio::test]
@@ -416,26 +422,25 @@ async fn status_surface_preview_omits_unavailable_rate_limit_items() {
         None
     );
     assert_eq!(
-        status_preview_line(
+        status_preview_line_option(
             &mut chat,
             &[StatusLineItem::FiveHourLimit, StatusLineItem::WeeklyLimit]
         ),
-        "weekly 91% left"
+        None
     );
-    assert_eq!(
-        title_preview_line(
-            &mut chat,
-            &[
-                TerminalTitleItem::FiveHourLimit,
-                TerminalTitleItem::WeeklyLimit
-            ],
-        ),
-        "weekly 91% left"
-    );
+    let preview_data = chat.terminal_title_preview_data();
+    assert!(preview_line_for_title_items(
+        &[
+            TerminalTitleItem::FiveHourLimit,
+            TerminalTitleItem::WeeklyLimit,
+        ],
+        &preview_data,
+    )
+    .is_none());
 }
 
 #[tokio::test]
-async fn status_line_setup_popup_rate_limits_snapshot() {
+async fn status_line_setup_popup_hides_saved_account_quotas() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     cache_rate_limit_snapshot(&mut chat);
     chat.local_settings.tui.status_line = Some(vec![
@@ -443,10 +448,10 @@ async fn status_line_setup_popup_rate_limits_snapshot() {
         "weekly-limit".to_string(),
     ]);
 
-    assert_chatwidget_snapshot!(
-        "status_line_setup_popup_rate_limits",
-        status_line_popup_snapshot(&mut chat)
-    );
+    let popup = status_line_popup_snapshot(&mut chat);
+    assert!(!popup.contains("five-hour-limit"));
+    assert!(!popup.contains("weekly-limit"));
+    assert!(!popup.contains("monthly-limit"));
 }
 
 #[tokio::test]
@@ -526,7 +531,7 @@ async fn terminal_title_setup_popup_mixed_snapshot() {
 }
 
 #[tokio::test]
-async fn terminal_title_setup_popup_rate_limits_snapshot() {
+async fn terminal_title_setup_popup_hides_saved_account_quotas() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     cache_rate_limit_snapshot(&mut chat);
     chat.local_settings.tui.terminal_title = Some(vec![
@@ -534,10 +539,10 @@ async fn terminal_title_setup_popup_rate_limits_snapshot() {
         "weekly-limit".to_string(),
     ]);
 
-    assert_chatwidget_snapshot!(
-        "terminal_title_setup_popup_rate_limits",
-        terminal_title_popup_snapshot(&mut chat)
-    );
+    let popup = terminal_title_popup_snapshot(&mut chat);
+    assert!(!popup.contains("five-hour-limit"));
+    assert!(!popup.contains("weekly-limit"));
+    assert!(!popup.contains("monthly-limit"));
 }
 
 #[tokio::test]

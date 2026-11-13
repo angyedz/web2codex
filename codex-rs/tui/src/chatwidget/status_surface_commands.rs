@@ -22,8 +22,7 @@ struct StatusLineCommand {
 
 impl ChatWidget {
     pub(super) fn handle_terminal_title_command_args(&mut self, args: &str) {
-        let preview_data = self.terminal_title_preview_data();
-        match parse_terminal_title_command(args, &preview_data) {
+        match parse_terminal_title_command(args) {
             Ok(items) => {
                 let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
                 self.status_surface_overrides.terminal_title = Some(ids.clone());
@@ -36,8 +35,7 @@ impl ChatWidget {
     }
 
     pub(super) fn handle_status_line_command_args(&mut self, args: &str) {
-        let preview_data = self.status_surface_preview_data();
-        match parse_status_line_command(args, &preview_data) {
+        match parse_status_line_command(args) {
             Ok(command) => {
                 if let Some(items) = command.items {
                     let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
@@ -70,15 +68,12 @@ impl ChatWidget {
     }
 }
 
-fn parse_terminal_title_command(
-    args: &str,
-    preview_data: &StatusSurfacePreviewData,
-) -> Result<Vec<TerminalTitleItem>, String> {
+fn parse_terminal_title_command(args: &str) -> Result<Vec<TerminalTitleItem>, String> {
     let args = slash_command_args::parse(args, &[], &["--clear"], &[])?;
     let items = args
         .positionals
         .iter()
-        .map(|item| parse_item(item, "terminal-title", "/title", preview_data))
+        .map(|item| parse_item(item, "terminal-title", "/title"))
         .collect::<Result<Vec<_>, _>>()?;
     let clear = args.has_switch("--clear");
     if clear && !items.is_empty() {
@@ -87,15 +82,12 @@ fn parse_terminal_title_command(
     Ok(if clear { Vec::new() } else { items })
 }
 
-fn parse_status_line_command(
-    args: &str,
-    preview_data: &StatusSurfacePreviewData,
-) -> Result<StatusLineCommand, String> {
+fn parse_status_line_command(args: &str) -> Result<StatusLineCommand, String> {
     let args = slash_command_args::parse(args, &[], &["--clear"], &["colors"])?;
     let items = args
         .positionals
         .iter()
-        .map(|item| parse_item(item, "status-line", "/statusline", preview_data))
+        .map(|item| parse_item(item, "status-line", "/statusline"))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(StatusLineCommand {
         items: status_line_items(items, args.has_switch("--clear"))?,
@@ -123,38 +115,18 @@ fn parse_item<T>(
     token: &str,
     surface: &str,
     command: &str,
-    preview_data: &StatusSurfacePreviewData,
 ) -> Result<T, String>
 where
-    T: std::str::FromStr,
+    T: std::str::FromStr + ToString,
 {
-    if let Ok(item) = token.parse() {
-        return Ok(item);
-    }
-
-    let five_hour_id = "five-hour-limit";
-    let weekly_id = "weekly-limit";
-    let five_hour_matches = preview_data
-        .rate_limit_item_name(StatusSurfacePreviewItem::FiveHourLimit, five_hour_id)
-        == token;
-    let weekly_matches = preview_data
-        .rate_limit_item_name(StatusSurfacePreviewItem::WeeklyLimit, weekly_id)
-        == token;
-    let id = match (five_hour_matches, weekly_matches) {
-        (true, false) => five_hour_id,
-        (false, true) => weekly_id,
-        (true, true) => {
-            return Err(format!(
-                "Ambiguous {surface} item '{token}'. Use '{five_hour_id}' or '{weekly_id}'."
-            ));
-        }
-        (false, false) => {
-            return Err(format!(
-                "Unknown {surface} item '{token}'. Use {command} to see available items."
-            ));
-        }
-    };
-    id.parse().map_err(|_| {
+    let item = token.parse::<T>().map_err(|_| {
         format!("Unknown {surface} item '{token}'. Use {command} to see available items.")
-    })
+    })?;
+    let id = item.to_string();
+    if matches!(id.as_str(), "five-hour-limit" | "weekly-limit") {
+        return Err(format!(
+            "Unknown {surface} item '{token}'. Use {command} to see available items."
+        ));
+    }
+    Ok(item)
 }

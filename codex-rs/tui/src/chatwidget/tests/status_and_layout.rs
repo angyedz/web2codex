@@ -954,7 +954,7 @@ async fn test_rate_limit_warnings_use_secondary_fallback_for_unsupported_window(
 }
 
 #[tokio::test]
-async fn status_line_uses_secondary_fallback_for_unsupported_window() {
+async fn status_line_hides_unsupported_account_quota_item() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
@@ -976,12 +976,12 @@ async fn status_line_uses_secondary_fallback_for_unsupported_window() {
 
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WeeklyLimit),
-        Some("secondary usage 50% left".to_string())
+        None
     );
 }
 
 #[tokio::test]
-async fn status_line_legacy_limit_items_prefer_matching_windows() {
+async fn status_line_hides_legacy_account_quota_items() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
@@ -1007,16 +1007,16 @@ async fn status_line_legacy_limit_items_prefer_matching_windows() {
 
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::FiveHourLimit),
-        Some("5h 60% left".to_string())
+        None
     );
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WeeklyLimit),
-        Some("weekly 6% left".to_string())
+        None
     );
 }
 
 #[tokio::test]
-async fn status_line_shows_secondary_non_weekly_when_primary_is_weekly() {
+async fn status_line_hides_secondary_non_weekly_account_quota() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
@@ -1042,16 +1042,16 @@ async fn status_line_shows_secondary_non_weekly_when_primary_is_weekly() {
 
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::FiveHourLimit),
-        Some("monthly 65% left".to_string())
+        None
     );
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WeeklyLimit),
-        Some("weekly 6% left".to_string())
+        None
     );
 }
 
 #[tokio::test]
-async fn status_line_five_hour_item_omits_weekly_only_limit() {
+async fn status_line_hides_weekly_only_account_quota() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
@@ -1077,12 +1077,12 @@ async fn status_line_five_hour_item_omits_weekly_only_limit() {
     );
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WeeklyLimit),
-        Some("weekly 91% left".to_string())
+        None
     );
 }
 
 #[tokio::test]
-async fn status_line_single_monthly_primary_omits_weekly_limit_item() {
+async fn status_line_hides_monthly_account_quota() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
@@ -1104,7 +1104,7 @@ async fn status_line_single_monthly_primary_omits_weekly_limit_item() {
 
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::FiveHourLimit),
-        Some("monthly 65% left".to_string())
+        None
     );
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WeeklyLimit),
@@ -1113,7 +1113,7 @@ async fn status_line_single_monthly_primary_omits_weekly_limit_item() {
 }
 
 #[tokio::test]
-async fn status_line_secondary_only_non_weekly_limit_omits_primary_limit_item() {
+async fn status_line_hides_secondary_only_account_quota() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
@@ -1139,7 +1139,7 @@ async fn status_line_secondary_only_non_weekly_limit_omits_primary_limit_item() 
     );
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WeeklyLimit),
-        Some("monthly 65% left".to_string())
+        None
     );
 }
 

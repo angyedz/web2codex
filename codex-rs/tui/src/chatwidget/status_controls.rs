@@ -232,11 +232,6 @@ impl ChatWidget {
                 .or_else(|| self.config.model_reasoning_effort.clone())
                 .or(model_default_reasoning_effort),
         );
-        let rate_limit_snapshots: Vec<RateLimitSnapshotDisplay> = self
-            .rate_limit_snapshots_by_limit_id
-            .values()
-            .cloned()
-            .collect();
         let agents_summary =
             crate::status::compose_agents_summary(&self.config, &self.instruction_source_paths);
         let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
@@ -251,7 +246,7 @@ impl ChatWidget {
             &self.thread_id,
             self.thread_name.clone(),
             self.forked_from,
-            rate_limit_snapshots.as_slice(),
+            &[],
             self.plan_type,
             Local::now(),
             self.model_display_name(),
@@ -323,17 +318,6 @@ impl ChatWidget {
         preview_data.thread_id = self.thread_id;
         preview_data.pull_request_url = self.status_line_pull_request_url().map(str::to_owned);
 
-        if self.rate_limit_snapshots_by_limit_id.contains_key("codex") {
-            for item in [
-                StatusSurfacePreviewItem::FiveHourLimit,
-                StatusSurfacePreviewItem::WeeklyLimit,
-            ] {
-                if self.status_surface_preview_value_for_item(item).is_none() {
-                    preview_data.suppress_placeholder(item);
-                }
-            }
-        }
-
         if self
             .estimated_thread_usage()
             .is_some_and(|usage| thread_cost_micros(usage, self.plan_type).is_none())
@@ -396,16 +380,6 @@ impl ChatWidget {
             .as_ref()
             .map(|info| info.total_token_usage.clone())
             .unwrap_or_default()
-    }
-
-    pub(super) fn status_line_limit_display(
-        &self,
-        window: Option<&RateLimitWindowDisplay>,
-        label: &str,
-    ) -> Option<String> {
-        let window = window?;
-        let remaining = (100.0f64 - window.used_percent).clamp(0.0f64, 100.0f64);
-        Some(format!("{label} {remaining:.0}% left"))
     }
 
     pub(super) fn status_line_reasoning_effort_label(

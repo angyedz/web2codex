@@ -17,7 +17,6 @@
 //! - Permissions profile
 //! - Approval mode
 //! - Context usage (remaining %, used %, window size)
-//! - Usage limits (primary, secondary)
 //! - Session info (thread title, thread ID, tokens used)
 //! - Application version
 
@@ -320,6 +319,9 @@ impl StatusLineSetupView {
                 let Ok(item) = id.parse::<StatusLineItem>() else {
                     continue;
                 };
+                if is_account_quota_item(item) {
+                    continue;
+                }
                 let item_id = item.to_string();
                 if !used_ids.insert(item_id.clone()) {
                     continue;
@@ -327,12 +329,11 @@ impl StatusLineSetupView {
                 items.push(Self::status_line_select_item(
                     item,
                     /*enabled*/ true,
-                    &preview_data,
                 ));
             }
         }
 
-        for item in StatusLineItem::iter() {
+        for item in StatusLineItem::iter().filter(|item| !is_account_quota_item(*item)) {
             let item_id = item.to_string();
             if used_ids.contains(&item_id) {
                 continue;
@@ -340,7 +341,6 @@ impl StatusLineSetupView {
             items.push(Self::status_line_select_item(
                 item,
                 /*enabled*/ false,
-                &preview_data,
             ));
         }
 
@@ -389,17 +389,9 @@ impl StatusLineSetupView {
     fn status_line_select_item(
         item: StatusLineItem,
         enabled: bool,
-        preview_data: &StatusSurfacePreviewData,
     ) -> MultiSelectItem {
-        let default_name = item.to_string();
-        let default_description = item.description();
-        let (name, description) = match item {
-            StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => (
-                preview_data.rate_limit_item_name(item.preview_item(), &default_name),
-                preview_data.rate_limit_item_description(item.preview_item(), default_description),
-            ),
-            _ => (default_name, default_description.to_string()),
-        };
+        let name = item.to_string();
+        let description = item.description().to_string();
 
         MultiSelectItem {
             id: item.to_string(),
@@ -410,6 +402,10 @@ impl StatusLineSetupView {
             section_break_after: false,
         }
     }
+}
+
+fn is_account_quota_item(item: StatusLineItem) -> bool {
+    matches!(item, StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit)
 }
 
 impl BottomPaneView for StatusLineSetupView {
