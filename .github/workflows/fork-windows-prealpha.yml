@@ -1,0 +1,82 @@
+name: Web2Codex Windows pre-alpha
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/fork-windows-prealpha.yml"
+      - ".github/workflows/fork-cross-platform.yml"
+      - ".github/actions/setup-rusty-v8/**"
+      - "codex-rs/**"
+      - "scripts/build_codex_package.py"
+      - "scripts/install/install.ps1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web2codex-prealpha-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-x64:
+    name: Build Windows x64 pre-alpha
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
+      TARGET: x86_64-pc-windows-msvc
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Configure short Cargo home
+        shell: pwsh
+        run: |
+          $cargoHome = Join-Path $env:SystemDrive "c"
+          New-Item -ItemType Directory -Force -Path $cargoHome | Out-Null
+          "CARGO_HOME=$cargoHome" >> $env:GITHUB_ENV
+          git config --global core.longpaths true
+
+      - name: Configure verified Rusty V8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+        with:
+          workspaces: codex-rs -> target
+
+      - name: Compile Web2Codex CLI
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-cli --bin web2codex
+
+      - name: Compile private WebView browser
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-web-browser --bin codex-web-browser
+
+      - name: Upload Windows x64 pre-alpha binaries
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: web2codex-prealpha-windows-x64
+          path: |
+            codex-rs/target/x86_64-pc-windows-msvc/release/web2codex.exe
+            codex-rs/target/x86_64-pc-windows-msvc/release/codex-web-browser.exe
+          if-no-files-found: error
+          retention-days: 3
