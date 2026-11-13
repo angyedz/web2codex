@@ -27,8 +27,15 @@ UTILITY_NAME_EXCEPTIONS = {
 }
 MANIFEST_FEATURE_EXCEPTIONS = {
     "codex-rs/v8-poc/Cargo.toml": {"sandbox": ("v8/v8_enable_sandbox",)},
+    # Keep the legacy Bedrock adapter isolated behind its opt-in feature while
+    # Web2Codex routes interactive inference exclusively through ChatGPT Web.
+    "codex-rs/model-provider/Cargo.toml": {
+        "amazon-bedrock": ("dep:codex-aws-auth",),
+    },
 }
-OPTIONAL_DEPENDENCY_EXCEPTIONS = set()
+OPTIONAL_DEPENDENCY_EXCEPTIONS = {
+    ("codex-rs/model-provider/Cargo.toml", "dependencies", "codex-aws-auth"),
+}
 INTERNAL_DEPENDENCY_FEATURE_EXCEPTIONS = {}
 
 
