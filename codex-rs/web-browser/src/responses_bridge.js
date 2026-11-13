@@ -158,7 +158,7 @@
   (async () => {
     await waitFor(findComposer, 60000, "ChatGPT did not expose a signed-in composer");
     const probe = window.__web2codexCapabilityProbeComplete;
-    if (probe?.then) await Promise.race([probe, sleep(20000)]);
+    if (probe?.then) await Promise.race([probe, sleep(45000)]);
     sendNative({ type: "responses-bridge-ready" });
   })().catch(error => sendNative({ type: "responses-result", error: String(error?.message || error) }));
 })();

@@ -78,10 +78,18 @@
   window.__web2codexModelPicker = { select };
   window.__web2codexCapabilityProbeComplete = (async () => {
     let options = [];
-    await sleep(12000);
     try {
-      const menu = await open();
-      options = [...new Set(menu.options.map(text).filter(value => value.length <= 120))].slice(0, 40);
+      // ChatGPT can render its controls before they are interactive. Retry
+      // during hydration instead of delaying every turn by a fixed 12 seconds.
+      for (let attempt = 0; attempt < 3 && options.length === 0; attempt++) {
+        try {
+          const menu = await open();
+          options = [...new Set(menu.options.map(text).filter(value => value.length <= 120))].slice(0, 40);
+        } catch (_) {
+          close();
+          await sleep(1000);
+        }
+      }
     } catch (_) {
       // An empty snapshot indicates that the live picker could not be read.
     } finally {
