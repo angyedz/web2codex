@@ -59,6 +59,36 @@
   const close = () => { for (let i = 0; i < 4; i++) document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true })); };
   const selected = option => [option, ...option.querySelectorAll('[aria-checked], [aria-selected], [aria-pressed], [data-state]')]
     .some(node => node.getAttribute("aria-checked") === "true" || node.getAttribute("aria-selected") === "true" || node.getAttribute("aria-pressed") === "true" || node.getAttribute("data-state") === "checked");
+  const effortValue = row => {
+    const match = text(row).match(/^(low|medium|high|низкий|средний|высокий)(?:\s|[›→>]|$)/i);
+    if (match) return match[1].toLowerCase();
+    const slider = row.querySelector('[role="slider"], input[type="range"]');
+    const value = slider?.getAttribute("aria-valuetext");
+    return value && /^(low|medium|high|низкий|средний|высокий)$/i.test(value) ? value.toLowerCase() : null;
+  };
+  const setEffort = async requested => {
+    const target = normalize(requested);
+    if (!["low", "medium", "high"].includes(target)) throw new Error(`Unsupported ChatGPT reasoning effort: ${requested}`);
+    const control = await waitFor(findControl, 10000);
+    if (!control) throw new Error("ChatGPT reasoning effort picker is unavailable");
+    control.click();
+    const row = await waitFor(() => effortRow(control), 3000);
+    if (!row) { close(); throw new Error("ChatGPT did not expose its reasoning effort control"); }
+    for (let attempt = 0; attempt < 3 && effortValue(row) !== target; attempt++) {
+      const slider = row.querySelector('[role="slider"], input[type="range"], [tabindex]') || row;
+      slider.focus();
+      const current = effortValue(row);
+      if (!current) { close(); throw new Error("ChatGPT did not expose its current reasoning effort"); }
+      const levels = ["low", "medium", "high"];
+      const direction = levels.indexOf(target) > levels.indexOf(current) ? "ArrowRight" : "ArrowLeft";
+      slider.dispatchEvent(new KeyboardEvent("keydown", { key: direction, code: direction, bubbles: true, cancelable: true }));
+      slider.dispatchEvent(new KeyboardEvent("keyup", { key: direction, code: direction, bubbles: true, cancelable: true }));
+      await sleep(200);
+    }
+    const applied = effortValue(effortRow(control) || row);
+    close();
+    if (applied !== target) throw new Error(`ChatGPT did not apply ${requested} reasoning effort`);
+  };
   const select = async requested => {
     const target = normalize(requested);
     let menu = await open();
@@ -75,7 +105,7 @@
     close();
     if (!confirmed) throw new Error(`ChatGPT did not confirm model ${requested}`);
   };
-  window.__web2codexModelPicker = { select };
+  window.__web2codexModelPicker = { select, setEffort };
   window.__web2codexCapabilityProbeComplete = (async () => {
     let options = [];
     try {

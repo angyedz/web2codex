@@ -88,6 +88,11 @@
     if (!window.__web2codexModelPicker) throw new Error("ChatGPT model picker is unavailable");
     await window.__web2codexModelPicker.select(requested);
   };
+  const ensureRequestedEffort = async requested => {
+    if (!requested) return;
+    if (!window.__web2codexModelPicker) throw new Error("ChatGPT reasoning effort picker is unavailable");
+    await window.__web2codexModelPicker.setEffort(requested);
+  };
 
   // ChatGPT's connector consent only forwards calls to this local harness.
   // Execution still passes through Codex's own approvals and sandbox.
@@ -118,6 +123,7 @@
       let composer = await waitFor(findComposer, 30000, "Sign in to ChatGPT before sending a Web2Codex request");
       await ensurePersonalizedTemporaryChat();
       await ensureRequestedModel(request.model);
+      await ensureRequestedEffort(request.reasoning_effort);
       composer = await attachConnector(composer);
       const baseline = assistantMessages().length;
       replaceText(composer, request.prompt, true);

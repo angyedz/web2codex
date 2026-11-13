@@ -188,6 +188,7 @@ pub(super) fn handle(
             .send_event(BrowserEvent::ResponsesRequest {
                 request_id: observer.request_id.clone(),
                 model: parsed.model.clone(),
+                reasoning_effort: parsed.reasoning_effort.clone(),
                 prompt,
             })
             .is_err()

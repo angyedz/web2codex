@@ -347,7 +347,12 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
                 // The Codex catalog parser requires an instruction template.
                 // Native tool descriptions and schemas are supplied via MCP.
                 "base_instructions": "You are a coding agent. Follow the user's instructions and report your work clearly.",
-                "supported_reasoning_levels": [],
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low reasoning effort in ChatGPT Web."},
+                    {"effort": "medium", "description": "Medium reasoning effort in ChatGPT Web."},
+                    {"effort": "high", "description": "High reasoning effort in ChatGPT Web."}
+                ],
                 "shell_type": "unified_exec",
                 "tool_mode": "direct",
                 "visibility": "list",
@@ -402,6 +407,7 @@ enum BrowserEvent {
     ResponsesRequest {
         request_id: String,
         model: String,
+        reasoning_effort: Option<String>,
         prompt: String,
     },
     ResponsesToolState(String),
@@ -417,6 +423,7 @@ enum BrowserEvent {
 
 struct PendingResponsesRequest {
     model: String,
+    reasoning_effort: Option<String>,
     prompt: String,
     started_at: std::time::Instant,
 }
@@ -572,13 +579,13 @@ fn run_event_loop(
             }
             Event::UserEvent(BrowserEvent::ResponsesBridgeReady(request_id)) => {
                 if let (Some(view), Some(pending)) = (response_views.get(&request_id), pending_responses.get(&request_id)) {
-                    let payload = serde_json::json!({"request_id": request_id, "model": pending.model, "prompt": pending.prompt});
+                    let payload = serde_json::json!({"request_id": request_id, "model": pending.model, "reasoning_effort": pending.reasoning_effort, "prompt": pending.prompt});
                     if let Err(error) = view.evaluate_script(&format!("window.__web2codexSend({payload});")) {
                         broker.complete(&request_id, None, Err(format!("Could not send prompt to ChatGPT Web: {error}")));
                     }
                 }
             }
-            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, model, prompt }) => {
+            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, model, reasoning_effort, prompt }) => {
                 if let Err(error) = prepare_profile_directory(&profile_dir) {
                     broker.complete(&request_id, None, Err(error.to_string())); return;
                 }
@@ -587,7 +594,7 @@ fn run_event_loop(
                     Ok(view) => { response_views.insert(request_id.clone(), view); }
                     Err(error) => { broker.complete(&request_id, None, Err(error.to_string())); return; }
                 }
-                pending_responses.insert(request_id, PendingResponsesRequest { model, prompt, started_at: std::time::Instant::now() });
+                pending_responses.insert(request_id, PendingResponsesRequest { model, reasoning_effort, prompt, started_at: std::time::Instant::now() });
             }
             Event::UserEvent(BrowserEvent::ResponsesToolState(request_id)) => {
                 let state = broker.snapshot(&request_id);
@@ -1082,6 +1089,7 @@ fn client_connection_closed(stream: &TcpStream) -> bool {
 
 struct TextOnlyResponsesRequest {
     model: String,
+    reasoning_effort: Option<String>,
     prompt: String,
     stream: bool,
     tools: Vec<CallableTool>,
@@ -1580,6 +1588,20 @@ fn parse_text_only_responses_request(
         })
         .transpose()?
         .unwrap_or(false);
+    let reasoning_effort = match object
+        .get("reasoning")
+        .and_then(|reasoning| reasoning.get("effort"))
+        .and_then(serde_json::Value::as_str)
+    {
+        None | Some("none") => None,
+        Some(effort @ ("low" | "medium" | "high")) => Some(effort.to_owned()),
+        Some(_) => {
+            return Err(unsupported(
+                "reasoning_effort_unsupported",
+                "ChatGPT Web currently exposes low, medium, and high reasoning effort",
+            ));
+        }
+    };
     let input = object.get("input").ok_or(unsupported(
         "input_format_unsupported",
         "request is missing input",
@@ -1634,6 +1656,7 @@ fn parse_text_only_responses_request(
     }
     Ok(TextOnlyResponsesRequest {
         model,
+        reasoning_effort,
         prompt,
         stream,
         tools,
