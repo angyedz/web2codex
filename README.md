@@ -1,16 +1,19 @@
 # Web2Codex
 
-Web2Codex is a cross-platform fork of the [OpenAI Codex CLI](https://github.com/openai/codex). It keeps Codex's terminal agent, model catalog, authentication, and native subagents, and adds an optional private ChatGPT Web window and an OpenAI Secure MCP Tunnel helper.
+Web2Codex is a local coding-agent harness fork. It keeps the terminal UI, permissions, sandbox, native tools, and subagents. **The private ChatGPT WebView is required for every model request**: it is the only inference path. API and OAuth model login, Codex Cloud, the ChatGPT Desktop launcher, and the standalone cloud executor have been removed.
 
-The terminal agent and browser are separate: they use separate conversations and the browser has its own sign-in profile. The browser controller stays hidden until you explicitly open it; it does not start with the computer.
+The WebView has a separate sign-in profile and uses Temporary Chats. Web2Codex starts its controller when an agent session needs it and keeps the window hidden during normal use. It does not launch at computer startup. Closing or stopping it prevents new model requests until it is started again.
+
+**Status: prototype.** The WebView supplies the TUI model list from labels visible in the signed-in ChatGPT picker, and the bridge selects and verifies the exact requested label before sending. ChatGPT does not expose stable model IDs or detailed capabilities through that UI, so reasoning, image, and tool support are not inferred from the labels. Text conversation history is sent as a role-labelled transcript in a Temporary Chat, and generated text is streamed back to the TUI. Tool requests use a bounded control block that the bridge converts into a standard Responses function call; the core tool router then applies its usual routing, approvals, and sandboxing. The harness's direct Realtime voice API and OpenAI Apps file-upload path are disabled. Images, audio, stable model IDs, and exact token counts are not available through this bridge. A complete signed-in run has not yet been verified. There is no usable release yet.
 
 ## Features
 
 - Native CLI builds for Windows, Linux, and macOS on x64 and ARM64.
 - `web2codex` as the installed command on every platform.
-- A private native WebView for ChatGPT with account-choice buttons for Free/Go, Plus, and Pro. The choice is only a reminder; ChatGPT decides the account's actual access.
+- A private native WebView for ChatGPT. The account chooser offers Free/Go, Plus, and Pro; this records your choice but does not verify the account tier.
 - Temporary Chat as the browser's default new-chat mode.
-- `/usage` session and token statistics, without ChatGPT account quota limits.
+- Model discovery from the signed-in ChatGPT Web picker, with exact-label selection before a request.
+- Local usage statistics, without displaying ChatGPT account quota limits.
 - OpenAI Secure MCP Tunnel setup for workspace files and commands.
 - GitHub Releases installers, SHA-256 verification, and the `web2codex update` command.
 
@@ -36,7 +39,9 @@ Open a new terminal after installation, then start the agent:
 web2codex
 ```
 
-Sign in with a ChatGPT account or configure an API key when prompted. To update an installed release, run `web2codex update`.
+Web2Codex keeps its settings, sessions, browser profile, and installer releases in its own data directories (`~/.web2codex` and `~/.local/share/web2codex/browser` on Linux; `~/Library/Application Support/Web2Codex/Browser` on macOS; `%USERPROFILE%\.web2codex` and `%LOCALAPPDATA%\Web2Codex\Browser` on Windows). Set `WEB2CODEX_HOME` or `WEB2CODEX_WEB_DATA_DIR` to choose custom directories.
+
+Sign in to ChatGPT inside the private WebView when prompted. Model requests use this Web session; Web2Codex does not use API keys or OAuth for inference. To update an installed release, run `web2codex update`.
 
 ## ChatGPT Web
 
@@ -46,17 +51,19 @@ The WebView uses the operating system's native browser component. Its account se
 web2codex web                 # Choose an account on first use; then open ChatGPT
 web2codex web login           # Show the Free/Go, Plus, and Pro account choices
 web2codex web open            # Open ChatGPT in the private window
-web2codex web models          # Show the CLI catalog and last observed Web model picker
+web2codex web models          # Show the last observed ChatGPT Web model picker
 web2codex web status          # Check the background controller
-web2codex web hide            # Hide the window and release WebView memory
+web2codex web hide            # Hide the window; keep the controller available
 web2codex web stop            # Stop the controller
 ```
 
 The first `web2codex web` opens the account chooser. Later runs start ChatGPT in Temporary Chat mode. The private WebView returns to the Temporary Chat entry if ChatGPT tries to open a saved-chat route, preserves the mode during new-chat navigation, and blocks the recognized mode switch. ChatGPT controls the actual server-side conversation behavior.
 
-The chooser records the account type you selected, but does not verify your subscription. `web2codex web models` lists the model catalog bundled with the CLI and the last model-picker text observed in ChatGPT Web. The browser snapshot is informational; ChatGPT decides which models the signed-in account can use.
+The chooser records the account type you selected, but does not verify your subscription. `web2codex web models` reports visible model-picker labels from ChatGPT Web. Web2Codex uses those labels as temporary model keys in the TUI and verifies the matching picker choice before sending; the labels are not stable model IDs or proof of account entitlement. ChatGPT decides which models the signed-in account can use.
 
-The browser is optional. Closing or hiding it does not stop terminal sessions. It is not opened automatically at sign-in or startup.
+`/usage [daily|weekly|cumulative]` reports local request counts, input and output character counts, average request time, and model selections. It does not query ChatGPT account analytics or display subscription limits. ChatGPT Web does not expose exact token counts to this harness; the local report stores only aggregate counts and never saves prompts or replies.
+
+The WebView is required for model requests and stays hidden during normal use. Open it to sign in or inspect ChatGPT. `web hide` hides the window while keeping the controller available. `web stop` stops the controller; a later agent launch starts it again when needed. The WebView does not launch at computer startup.
 
 ### Browser requirements
 
@@ -64,24 +71,13 @@ The browser is optional. Closing or hiding it does not stop terminal sessions. I
 - **macOS:** built-in WKWebView.
 - **Linux:** glibc, GTK 3, and WebKitGTK 4.1 runtime libraries. These system libraries are not bundled with the release.
 
-## OpenAI Secure MCP Tunnel
+## MCP tunnel
 
-Run setup from the workspace you want ChatGPT to access. The prompts accept the tunnel ID and API key, save them in Codex's encrypted secret store, install the official OpenAI tunnel client, verify its release digest, and start it in the background.
+Configure the tunnel from the running terminal app by entering `/mcp tunnel` in the chat. The setup asks for the tunnel ID and runtime API key, stores them in Web2Codex's encrypted secret store, downloads and verifies the OpenAI Secure MCP Tunnel client, then starts it in the background. On later launches, Web2Codex starts the configured tunnel automatically for the current workspace.
 
-```sh
-web2codex web tunnel configure
-```
+After setup, Web2Codex prints the connector name and tunnel ID. Add that connector in ChatGPT and select **Connection: Tunnel**. You only need to do that once in ChatGPT. The same workspace MCP server is also registered locally in the harness with tool approval prompts. During Web2Codex model requests, the bridge asks ChatGPT Web to use the harness tool declarations; it converts a complete, allowlisted control block into a Responses tool call, which the native router handles. The bridge does not ask ChatGPT to call account connectors directly.
 
-When setup completes, the CLI prints the connector name and tunnel ID. In ChatGPT, add an MCP connector with that name, select **Connection: Tunnel**, and enter the printed tunnel ID. The connector exposes workspace file read, write, search, and command tools.
-
-```sh
-web2codex web tunnel status
-web2codex web tunnel start
-web2codex web tunnel stop
-web2codex web tunnel remove
-```
-
-The API key is not put in the tunnel client's environment. A short-lived private file is used during startup and removed after the tunnel is ready. File tools are scoped to the workspace selected when the tunnel is configured; command tools are launched through Codex's platform sandbox. ChatGPT reports MCP tool discovery after its first connector request.
+The tunnel key is not put in the tunnel client's environment. A short-lived private file is used during startup and removed after the tunnel is ready. File tools are scoped to the workspace selected when the tunnel starts; command tools run through Web2Codex's platform sandbox.
 
 ## Build from source
 
@@ -98,4 +94,4 @@ To publish a release, push a `codex-web-vX.Y.Z` tag. GitHub Actions packages Lin
 
 ## Project background
 
-Web2Codex is based on the Apache-2.0-licensed [OpenAI Codex repository](https://github.com/openai/codex). See the [Codex documentation](https://developers.openai.com/codex) for standard terminal-agent usage. The private ChatGPT Web window is an independent feature and does not share conversations with the terminal agent.
+Web2Codex is based on the Apache-2.0-licensed [Codex repository](https://github.com/openai/codex). The fork retains its local agent loop, terminal interaction, sandboxing, approvals, tools, and subagents, while replacing hosted/API inference with the private ChatGPT Web session.

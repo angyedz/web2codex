@@ -3,8 +3,6 @@
 //! This module contains the exhaustive `AppEvent` dispatcher and exit-mode handling. Large domain
 //! actions are delegated to focused app submodules so the central match remains the routing layer.
 
-use super::rate_limit_refresh::RateLimitReadStatus;
-use super::rate_limit_refresh::RateLimitRefreshOutcome;
 use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
@@ -12,7 +10,6 @@ use crate::app_event::CapturedSideStream;
 use crate::app_event::RecapTrigger;
 use crate::app_event::ThreadTitleDestination;
 use crate::app_server_session::ForkGoalContinuation;
-use crate::app_server_session::ThreadSettingsOwner;
 use crate::app_server_session::UnsupportedLegacyPermissionProfile;
 use crate::app_server_session::turn_permissions_overrides;
 use crate::config_update::format_config_error;
@@ -247,8 +244,7 @@ impl App {
             }
             AppEvent::CloseMisalignmentReview => self.chat_widget.show_misalignment_policy_precaution(),
             AppEvent::SkillsListLoaded { ref cwd, .. }
-                if app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud
-                    || cwds_differ(cwd, self.config.cwd.as_path()) =>
+                if cwds_differ(cwd, self.config.cwd.as_path()) =>
             {
                 self.skill_load_warnings.startup_complete = true;
             }
@@ -1110,7 +1106,6 @@ impl App {
                     deferred_history_cell,
                 )?;
                 self.chat_widget.note_stream_consolidation_completed();
-                self.insert_pending_usage_output_after_stream_shutdown(tui);
             }
             AppEvent::CorrectFlushedAgentMessage { item, cell } => {
                 let belongs_to_item = |cell: &Arc<dyn HistoryCell>| {
@@ -1167,7 +1162,6 @@ impl App {
                     self.maybe_finish_stream_reflow(tui)?;
                 }
                 self.chat_widget.note_stream_consolidation_completed();
-                self.insert_pending_usage_output_after_stream_shutdown(tui);
             }
             AppEvent::StartCommitAnimation => {
                 self.commit_animation.get_or_insert_with(|| {
@@ -1292,9 +1286,6 @@ impl App {
             AppEvent::ImagesPrepared(id) => {
                 self.chat_widget.on_images_prepared(id);
             }
-            // The Cloud preview does not have a skills catalog.
-            AppEvent::CodexOp(AppCommand::ListSkills { .. })
-                if app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud => {}
             AppEvent::CodexOp(AppCommand::ListSkills { cwds, force_reload: true })
                 if self.awaiting_side_replay(tui)
                     && let Some(thread_id) = self.active_thread_id
@@ -1340,15 +1331,6 @@ impl App {
                     && self.reject_pending_permission_change()
                 {
                     return Ok(AppRunControl::Continue);
-                }
-                if self.active_thread_id == self.chat_widget.thread_id() {
-                    if matches!(&op, AppCommand::UserTurn { .. })
-                        && self.chat_widget.defer_pending_turn_for_luna_reserve()
-                    {
-                        return Ok(AppRunControl::Continue);
-                    }
-                    self.chat_widget
-                        .apply_reserve_fallback_to_pending_turn(&mut op);
                 }
                 let is_user_turn = matches!(&op, AppCommand::UserTurn { .. });
                 let is_realtime_stop = matches!(&op, AppCommand::RealtimeConversationStop { .. });
@@ -1586,18 +1568,6 @@ impl App {
                         suggestion_type: None,
                         elicitation_target: None,
                     });
-            }
-            AppEvent::AccountEmailLoaded { request_id, email, workspace } => {
-                if self.account_email_request_id == Some(request_id) {
-                    self.account_email_request_id = None;
-                    self.chat_widget.on_account_email_loaded(email, workspace);
-                }
-            }
-            AppEvent::SecuritySetupLoaded { request_id, identity, notice } => {
-                tracing::debug!(current = request_id == self.chat_widget.security_setup_request_id, "handling security setup notice");
-                if request_id == self.chat_widget.security_setup_request_id {
-                    self.chat_widget.show_security_setup(identity, notice);
-                }
             }
             AppEvent::OpenUrlInBrowser { url } => {
                 self.open_url_in_browser(url);
@@ -2043,20 +2013,6 @@ impl App {
                     self.chat_widget.on_task_search_result(&query, matches);
                 }
             }
-            AppEvent::RefreshRateLimits { origin } => {
-                self.refresh_rate_limits(app_server, origin);
-            }
-            AppEvent::ApplyBackendBannerFallback { thread_id } => {
-                if self.active_thread_id == Some(thread_id)
-                    && self.chat_widget.thread_id() == Some(thread_id)
-                {
-                    self.apply_backend_banner_fallback(app_server).await;
-                    if !self.rate_limit_refresh_state.has_pending_recovery() {
-                        self.chat_widget.finish_rate_limit_recovery();
-                    }
-                    self.refresh_rate_limits(app_server, RateLimitRefreshOrigin::Periodic);
-                }
-            }
             AppEvent::RestoreBackgroundTerminals(thread_id) => {
                 if self.chat_widget.thread_id() == Some(thread_id) {
                     let request_id = self.chat_widget.begin_background_terminal_restore();
@@ -2101,251 +2057,10 @@ impl App {
             AppEvent::ClearThreadGoal { thread_id } => {
                 self.clear_thread_goal(app_server, thread_id).await;
             }
-            AppEvent::SendAddCreditsNudgeEmail { credit_type } => {
-                if let Some(request_id) = self
-                    .chat_widget
-                    .start_add_credits_nudge_email_request(credit_type)
-                {
-                    self.send_add_credits_nudge_email(app_server, request_id, credit_type);
-                }
-            }
-            AppEvent::AddCreditsNudgeEmailFinished { request_id, result } => {
-                self.chat_widget
-                    .finish_add_credits_nudge_email_request(request_id, result);
-            }
-            AppEvent::RateLimitsLoaded {
-                request_id,
-                origin,
-                hard_stop_generation,
-                result,
-            } => {
-                let accepted = match self.rate_limit_refresh_state.finish(
-                    request_id,
-                    hard_stop_generation,
-                    self.rate_limit_hard_stop_generation,
-                    if result.is_ok() {
-                        RateLimitReadStatus::Succeeded
-                    } else {
-                        RateLimitReadStatus::Failed
-                    },
-                ) {
-                    RateLimitRefreshOutcome::Apply => true,
-                    RateLimitRefreshOutcome::Ignore => false,
-                    RateLimitRefreshOutcome::RefreshRecovery => {
-                        // Start in this account's event turn; a queued refresh could cross an account change.
-                        self.refresh_rate_limits(app_server, RateLimitRefreshOrigin::Recovery);
-                        false
-                    }
-                };
-                match result {
-                Ok(response) => {
-                    let rate_limit_reset_credits = response.rate_limit_reset_credits.clone();
-                    let snapshots = if accepted
-                    {
-                        self.chat_widget.apply_usage_notice_read(request_id);
-                        self.chat_widget.update_backend_banner(&response);
-                        self.apply_backend_banner_fallback(app_server).await;
-                        app_server_rate_limit_snapshots(response)
-                    } else {
-                        Vec::new()
-                    };
-                    match origin {
-                        RateLimitRefreshOrigin::Recovery | RateLimitRefreshOrigin::Periodic => {
-                            for snapshot in snapshots {
-                                self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
-                            }
-                        }
-                        RateLimitRefreshOrigin::StartupPrefetch {
-                            reset_hint_request_id,
-                        } => {
-                            if self.chat_widget.finish_rate_limit_reset_hint_refresh(
-                                reset_hint_request_id,
-                                snapshots,
-                                rate_limit_reset_credits.ok_or_else(|| {
-                                    "account/rateLimits/read response did not include rateLimitResetCredits"
-                                        .to_string()
-                                }),
-                            ) {
-                                self.insert_pending_usage_output_if_ready(tui);
-                            }
-                            tui.frame_requester().schedule_frame();
-                        }
-                        RateLimitRefreshOrigin::ResetConsume { request_id } => {
-                            self.chat_widget.finish_post_consume_reset_credits_refresh(
-                                request_id,
-                                snapshots,
-                                rate_limit_reset_credits.ok_or_else(|| {
-                                    "account/rateLimits/read response did not include rateLimitResetCredits"
-                                        .to_string()
-                                }),
-                            );
-                            tui.frame_requester().schedule_frame();
-                        }
-                        RateLimitRefreshOrigin::StatusCommand { request_id } => {
-                            self.chat_widget
-                                .finish_status_rate_limit_refresh(request_id, snapshots);
-                        }
-                        RateLimitRefreshOrigin::ResetPicker { request_id } => {
-                            self.chat_widget.finish_rate_limit_reset_credits_refresh(
-                                request_id,
-                                snapshots,
-                                rate_limit_reset_credits.ok_or_else(|| {
-                                    "account/rateLimits/read response did not include rateLimitResetCredits"
-                                        .to_string()
-                                }),
-                            );
-                        }
-                    }
-                }
-                Err(err) => {
-                    // A failed read is not authoritative recovery. Keep the last valid banner.
-                    tracing::warn!("account/rateLimits/read failed during TUI refresh: {err}");
-                    match origin {
-                        RateLimitRefreshOrigin::Recovery | RateLimitRefreshOrigin::Periodic => {
-                            // Re-evaluate snapshot age even when the backend cannot refresh it.
-                            // This updates display freshness without authorizing model recovery.
-                            self.chat_widget.refresh_status_surfaces();
-                        },
-                        RateLimitRefreshOrigin::StartupPrefetch {
-                            reset_hint_request_id,
-                        } => {
-                            self.chat_widget.finish_rate_limit_reset_hint_refresh(
-                                reset_hint_request_id,
-                                Vec::new(),
-                                Err(err),
-                            );
-                        }
-                        RateLimitRefreshOrigin::ResetConsume { request_id } => {
-                            self.chat_widget.finish_post_consume_reset_credits_refresh(
-                                request_id,
-                                Vec::new(),
-                                Err(err),
-                            );
-                        }
-                        RateLimitRefreshOrigin::StatusCommand { request_id } => {
-                            self.chat_widget
-                                .finish_status_rate_limit_refresh(request_id, Vec::new());
-                        }
-                        RateLimitRefreshOrigin::ResetPicker { request_id } => {
-                            self.chat_widget.finish_rate_limit_reset_credits_refresh(
-                                request_id,
-                                Vec::new(),
-                                Err(err),
-                            );
-                        }
-                    }
-                }
-                }
-                if (accepted || matches!(
-                    origin,
-                    RateLimitRefreshOrigin::Recovery | RateLimitRefreshOrigin::ResetConsume { .. }
-                )) && !self.rate_limit_refresh_state.has_pending_recovery()
-                {
-                    self.chat_widget.finish_rate_limit_recovery();
-                }
-            },
-            AppEvent::OpenAnalytics { view: summary_view } => {
-                tui.enter_alt_screen()?;
-                let mut view = self.retained_analytics.take().unwrap_or_else(|| {
-                    Box::new(crate::analytics::AnalyticsView::new(self.keymap.list.clone()))
-                });
-                view.show_full_dashboard();
-                view.keymap = self.keymap.list.clone();
-                if summary_view.is_some() {
-                    view.select_summary(summary_view);
-                }
-                view.open(
-                    app_server.request_handle(),
-                    tui.frame_requester(),
-                    self.model_catalog.try_list_models()?,
-                    std::sync::Arc::new(self.config.clone()),
-                );
-                self.overlay = Some(Overlay::Analytics(view));
-                tui.frame_requester().schedule_frame();
-            }
             AppEvent::OpenUsageStatistics { view: summary_view } => {
-                tui.enter_alt_screen()?;
-                let mut view = self.retained_analytics.take().unwrap_or_else(|| {
-                    Box::new(crate::analytics::AnalyticsView::new(self.keymap.list.clone()))
-                });
-                view.keymap = self.keymap.list.clone();
-                view.select_usage_summary(summary_view);
-                view.open(
-                    app_server.request_handle(),
-                    tui.frame_requester(),
-                    self.model_catalog.try_list_models()?,
-                    std::sync::Arc::new(self.config.clone()),
+                self.chat_widget.show_local_usage(
+                    summary_view.unwrap_or(crate::chatwidget::local_usage::UsagePeriod::Daily),
                 );
-                self.overlay = Some(Overlay::Analytics(view));
-                tui.frame_requester().schedule_frame();
-            }
-            AppEvent::OpenRateLimitResetCredits => {
-                let request_id = self.chat_widget.show_rate_limit_reset_loading_popup();
-                self.refresh_rate_limits(
-                    app_server,
-                    RateLimitRefreshOrigin::ResetPicker { request_id },
-                );
-            }
-            AppEvent::OpenRateLimitResetConfirmation {
-                picker_request_id,
-                confirmation_gate,
-                credit_id,
-                reset_title,
-                reset_detail,
-                reset_description,
-            } => {
-                self.chat_widget.show_rate_limit_reset_confirmation(
-                    picker_request_id,
-                    confirmation_gate,
-                    credit_id,
-                    reset_title,
-                    reset_detail,
-                    reset_description,
-                );
-            }
-            AppEvent::ConsumeRateLimitResetCredit {
-                idempotency_key,
-                credit_id,
-            } => {
-                if let Some(request_id) = self
-                    .chat_widget
-                    .start_rate_limit_reset_consumption(&idempotency_key)
-                {
-                    self.consume_rate_limit_reset_credit(
-                        app_server,
-                        request_id,
-                        idempotency_key,
-                        credit_id,
-                    );
-                }
-            }
-            AppEvent::RateLimitResetCreditConsumed {
-                request_id,
-                idempotency_key,
-                credit_id,
-                result,
-            } => {
-                if let Err(err) = &result {
-                    tracing::warn!(
-                        "account/rateLimitResetCredit/consume failed during TUI request: {err}"
-                    );
-                }
-                if self.chat_widget.finish_rate_limit_reset_consume(
-                    request_id,
-                    idempotency_key,
-                    credit_id,
-                    result,
-                ) {
-                    // Reads started before redemption must not restore the pre-reset banner.
-                    self.rate_limit_hard_stop_generation =
-                        self.rate_limit_hard_stop_generation.wrapping_add(1);
-                    self.rate_limit_refresh_state.invalidate_recovery();
-                    self.chat_widget.clear_backend_banner();
-                    self.refresh_rate_limits(
-                        app_server,
-                        RateLimitRefreshOrigin::ResetConsume { request_id },
-                    );
-                }
             }
             AppEvent::ThreadUsageLoaded {
                 thread_id,
@@ -2356,12 +2071,6 @@ impl App {
             }
             AppEvent::AgentsOverviewUsageLoaded { thread_id, request_id, result } => {
                 self.finish_agents_overview_usage(thread_id, request_id, result);
-            }
-            AppEvent::CommitPendingUsageOutput => {
-                self.insert_pending_usage_output_if_ready(tui);
-            }
-            AppEvent::CommitPendingUsageOutputAfterStreamShutdown => {
-                self.insert_pending_usage_output_after_stream_shutdown(tui);
             }
             AppEvent::ConnectorsLoaded {
                 thread_id,
@@ -2396,10 +2105,6 @@ impl App {
                 self.sync_active_thread_reasoning_setting(app_server, effort)
                     .await;
             }
-            AppEvent::UpdateLunaReserveReasoning { thread_id, effort } => {
-                self.update_luna_reserve_reasoning(app_server, thread_id, effort)
-                    .await;
-            }
             AppEvent::UpdateModel(model) => {
                 if self
                     .active_thread_model_setting_update_params(model.clone())
@@ -2419,20 +2124,8 @@ impl App {
                 }
             }
             AppEvent::ApplyModelSelection { model, effort } => {
-                if app_server.thread_params_mode().settings_owner()
-                    == ThreadSettingsOwner::Server
-                {
-                    self.select_session_model(
-                        app_server,
-                        model,
-                        effort,
-                        /*service_tier*/ None,
-                    )
+                self.apply_default_model_selection(app_server, model, effort)
                     .await;
-                } else {
-                    self.apply_default_model_selection(app_server, model, effort)
-                        .await;
-                }
             }
             AppEvent::ScopedModelPicker { .. } | AppEvent::AstraSelectedFromModelPicker { .. } => unreachable!("picker event unwrapped"),
             AppEvent::BackgroundVoiceError { thread_id, message } => {
@@ -2579,29 +2272,7 @@ impl App {
                     app_server.fetch_models(request_id, self.app_event_tx.clone());
                 }
             }
-            AppEvent::ModelsLoaded { request_id, result: Ok(models) }
-                if self.chat_widget.model_popup_request_is_current(request_id)
-                    && self.chat_widget.status_account_display() == Some(&StatusAccountDisplay::ApiKey) =>
-            {
-                let checked = app_server.constrain_api_key_models(
-                    self.chat_widget.config_ref(),
-                    self.chat_widget.thread_id(),
-                    /*requirements*/ None,
-                    models,
-                );
-                let tx = self.app_event_tx.clone();
-                tokio::spawn(async move {
-                    tx.send(AppEvent::ApiKeyCompatModelsLoaded { request_id, result: Ok(checked.await) });
-                });
-            }
-            AppEvent::ModelsLoaded { request_id, result }
-            | AppEvent::ApiKeyCompatModelsLoaded { request_id, result } => {
-                let result = match app_server.request_handle() {
-                    AppServerRequestHandle::Cloud(handle) if !handle.model_catalog_is_current() => {
-                        Err("Cloud model catalog account changed.".into())
-                    }
-                    _ => result,
-                };
+            AppEvent::ModelsLoaded { request_id, result } => {
                 self.chat_widget.on_models_loaded(request_id, result);
                 let catalog = self.chat_widget.model_catalog();
                 if !Arc::ptr_eq(&self.model_catalog, &catalog) {
@@ -2618,22 +2289,6 @@ impl App {
             }
             AppEvent::ApplyAdvancedReasoning { model, effort } => {
                 self.app_event_tx.send(AppEvent::FollowTranscript);
-                if app_server.thread_params_mode().settings_owner()
-                    == ThreadSettingsOwner::Server
-                {
-                    self.select_session_model(
-                        app_server,
-                        model,
-                        Some(effort),
-                        /*service_tier*/ None,
-                    )
-                    .await;
-                    if let Some(model) = sparkle_model.as_ref() {
-                        self.chat_widget
-                            .on_sparkle_model_selected_from_picker(model);
-                    }
-                    return Ok(AppRunControl::Continue);
-                }
                 if self
                     .active_thread_model_setting_update_params(model.clone())
                     .is_some_and(|params| params.permissions.is_some())
@@ -2685,13 +2340,8 @@ impl App {
                 }
             }
             AppEvent::OpenPlanReasoningScopePrompt { model, effort } => {
-                if app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud {
-                    self.select_session_model(app_server, model, effort, /*service_tier*/ None)
-                        .await;
-                } else {
-                    self.chat_widget
-                        .open_plan_reasoning_scope_prompt(model, effort);
-                }
+                self.chat_widget
+                    .open_plan_reasoning_scope_prompt(model, effort);
             }
             AppEvent::OpenAllModelsPopup => {
                 self.chat_widget.open_all_models_popup();
@@ -2748,6 +2398,7 @@ impl App {
                     self.launch_external_editor(tui).await;
                 }
             }
+            AppEvent::OpenMcpTunnelSetup => self.launch_mcp_tunnel_setup(tui).await,
             AppEvent::RefreshWindowsSandbox { thread_id } => {
                 #[cfg(any(target_os = "windows", test))]
                 self.refresh_windows_sandbox_for_thread(app_server, thread_id).await;

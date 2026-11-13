@@ -418,14 +418,6 @@ impl AppServerSession {
                     page.next_cursor,
                     &mut state.seen_item_cursors,
                 );
-                if self.thread_params_mode() == super::ThreadParamsMode::Cloud
-                    && state.next_item_cursor.is_some()
-                {
-                    // Unknown native items may fill a page; preserve its continuation
-                    // and charge the requested page against the existing scan budget.
-                    scanned_items = scanned_items.saturating_add(limit as usize);
-                    continue;
-                }
                 state.next_item_cursor = None;
                 break;
             }
@@ -461,22 +453,6 @@ impl AppServerSession {
                 );
             } else {
                 rendered_rows = rendered_rows.saturating_add(items.len());
-            }
-        }
-        // A failed Cloud turn may have only an error and no items.
-        if self.thread_params_mode() == super::ThreadParamsMode::Cloud
-            && scope == HistoryHydrationScope::FullTranscript
-        {
-            while let Some(cursor) = state.next_turn_cursor.take() {
-                let page = self
-                    .thread_turns_page(thread_id, Some(cursor.clone()), HISTORY_TURN_PAGE_LIMIT)
-                    .await?;
-                state.next_turn_cursor = advancing_cursor(
-                    Some(&cursor),
-                    page.next_cursor,
-                    &mut state.seen_turn_cursors,
-                );
-                prepend_older_turns(&mut thread.turns, page.data);
             }
         }
         mark_loaded_interruptions(&mut thread.turns, state.next_item_cursor.as_deref());

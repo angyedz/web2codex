@@ -20,17 +20,9 @@
 //! runtime remain bounded; the local consumer event queue is unbounded so
 //! unread notifications cannot prevent request responses from being delivered.
 
-mod cloud;
-pub mod cloud_backend;
-pub use codex_cloud_client::ProjectEnvironment;
 mod path;
 mod remote;
 mod remote_websocket;
-pub use cloud::CloudClient;
-pub use cloud::CloudCommand;
-pub use cloud::CloudOperation;
-pub use cloud::CloudRequestHandle;
-pub use cloud::CloudUserMessageReceipt;
 mod server_request;
 pub use server_request::AppServerReplyHandle;
 
@@ -117,10 +109,6 @@ pub enum AppServerEvent {
     },
     ServerNotification(Box<ServerNotification>),
     ServerRequest(Box<ServerRequest>),
-    /// A native Cloud reply stream ended. The underlying thread can still be running.
-    ThreadStreamDisconnected(Box<codex_app_server_protocol::ErrorNotification>),
-    /// The Cloud worker is listening again on the same conversation.
-    ThreadStreamReconnected(String),
     Disconnected {
         message: String,
     },
@@ -246,8 +234,6 @@ pub struct InProcessClientStartArgs {
     pub config_warnings: Vec<ConfigWarningNotification>,
     /// Session source recorded in app-server thread metadata.
     pub session_source: SessionSource,
-    /// Whether auth loading should honor the `CODEX_API_KEY` environment variable.
-    pub enable_codex_api_key_env: bool,
     /// Client name reported during initialize.
     pub client_name: String,
     /// Client version reported during initialize.
@@ -306,7 +292,6 @@ impl InProcessClientStartArgs {
             environment_manager: self.environment_manager,
             config_warnings: self.config_warnings,
             session_source: self.session_source,
-            enable_codex_api_key_env: self.enable_codex_api_key_env,
             initialize,
             channel_capacity: self.channel_capacity,
         }
@@ -365,13 +350,11 @@ pub struct InProcessAppServerRequestHandle {
 
 #[derive(Clone)]
 pub enum AppServerRequestHandle {
-    Cloud(CloudRequestHandle),
     InProcess(InProcessAppServerRequestHandle),
     Remote(crate::remote::RemoteAppServerRequestHandle),
 }
 
 pub enum AppServerClient {
-    Cloud(CloudClient),
     InProcess(InProcessAppServerClient),
     Remote(RemoteAppServerClient),
 }
@@ -722,27 +705,6 @@ impl InProcessAppServerRequestHandle {
 }
 
 impl AppServerRequestHandle {
-    /// Starts a native cloud thread with host project metadata without adding wire fields.
-    pub async fn start_cloud_project_thread(
-        &self,
-        request_id: RequestId,
-        params: codex_app_server_protocol::ThreadStartParams,
-        project: codex_cloud_client::ProjectEnvironment,
-    ) -> Result<codex_app_server_protocol::ThreadStartResponse, TypedRequestError> {
-        let response = match self {
-            Self::Cloud(handle) => {
-                handle
-                    .start_project_thread(request_id, params, project)
-                    .await
-            }
-            Self::InProcess(_) | Self::Remote(_) => Err(IoError::new(
-                std::io::ErrorKind::Unsupported,
-                "Project checkout requires the native cloud transport.",
-            )),
-        };
-        decode_typed_response("thread/start", response)
-    }
-
     pub(crate) async fn resolve_server_request(
         &self,
         request_id: RequestId,
@@ -751,7 +713,6 @@ impl AppServerRequestHandle {
         match self {
             Self::InProcess(handle) => handle.resolve_server_request(request_id, result).await,
             Self::Remote(handle) => handle.resolve_server_request(request_id, result).await,
-            Self::Cloud(handle) => handle.resolve_server_request(request_id, result).await,
         }
     }
 
@@ -763,7 +724,6 @@ impl AppServerRequestHandle {
         match self {
             Self::InProcess(handle) => handle.reject_server_request(request_id, error).await,
             Self::Remote(handle) => handle.reject_server_request(request_id, error).await,
-            Self::Cloud(handle) => handle.reject_server_request(request_id, error).await,
         }
     }
 
@@ -771,7 +731,6 @@ impl AppServerRequestHandle {
         match self {
             Self::InProcess(handle) => handle.request(request).await,
             Self::Remote(handle) => handle.request(request).await,
-            Self::Cloud(handle) => handle.request(request).await,
         }
     }
 
@@ -792,7 +751,6 @@ impl AppServerClient {
         match self {
             Self::InProcess(_) => Some(std::env::consts::FAMILY),
             Self::Remote(client) => client.platform_family(),
-            Self::Cloud(_) => None,
         }
     }
 
@@ -801,7 +759,6 @@ impl AppServerClient {
         match self {
             Self::InProcess(_) => Some(std::env::consts::OS),
             Self::Remote(client) => client.platform_os(),
-            Self::Cloud(_) => None,
         }
     }
 
@@ -811,7 +768,6 @@ impl AppServerClient {
                 local_codex_home.display().to_string(),
             )),
             Self::Remote(client) => client.codex_home().map(AppServerPath::from_app_server),
-            Self::Cloud(_) => None,
         }
     }
 
@@ -819,7 +775,6 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.request(request).await,
             Self::Remote(client) => client.request(request).await,
-            Self::Cloud(client) => client.request(request).await,
         }
     }
 
@@ -836,7 +791,6 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.notify(notification).await,
             Self::Remote(client) => client.notify(notification).await,
-            Self::Cloud(client) => client.notify(notification).await,
         }
     }
 
@@ -848,7 +802,6 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.resolve_server_request(request_id, result).await,
             Self::Remote(client) => client.resolve_server_request(request_id, result).await,
-            Self::Cloud(client) => client.resolve_server_request(request_id, result).await,
         }
     }
 
@@ -860,7 +813,6 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.reject_server_request(request_id, error).await,
             Self::Remote(client) => client.reject_server_request(request_id, error).await,
-            Self::Cloud(client) => client.reject_server_request(request_id, error).await,
         }
     }
 
@@ -868,7 +820,6 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.next_event().await.map(Into::into),
             Self::Remote(client) => client.next_event().await,
-            Self::Cloud(client) => client.next_event().await,
         }
     }
 
@@ -876,7 +827,6 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => client.shutdown().await,
             Self::Remote(client) => client.shutdown().await,
-            Self::Cloud(client) => client.shutdown().await,
         }
     }
 
@@ -884,7 +834,6 @@ impl AppServerClient {
         match self {
             Self::InProcess(client) => AppServerRequestHandle::InProcess(client.request_handle()),
             Self::Remote(client) => AppServerRequestHandle::Remote(client.request_handle()),
-            Self::Cloud(client) => AppServerRequestHandle::Cloud(client.request_handle()),
         }
     }
 }
@@ -998,7 +947,6 @@ mod tests {
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
             config_warnings: Vec::new(),
             session_source,
-            enable_codex_api_key_env: false,
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
@@ -2238,7 +2186,6 @@ mod tests {
             environment_manager: environment_manager.clone(),
             config_warnings: Vec::new(),
             session_source: SessionSource::Exec,
-            enable_codex_api_key_env: false,
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,

@@ -127,10 +127,12 @@ impl BottomPane {
         !self.delayed_approval_requests.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn composer_paste_deadline(&self) -> Option<Instant> {
         self.composer.paste_handoff_deadline()
     }
 
+    #[cfg(test)]
     pub(crate) fn flush_handoff_paste_if_due(&mut self) -> bool {
         self.composer
             .flush_handoff_paste(tokio::time::Instant::now().into_std())

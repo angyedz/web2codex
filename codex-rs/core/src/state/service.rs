@@ -31,7 +31,6 @@ use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
 use codex_hooks::Hooks;
-use codex_http_client::RouteAwareClientPool;
 use codex_login::AuthManager;
 use codex_mcp::McpRuntime;
 use codex_models_manager::manager::SharedModelsManager;
@@ -64,8 +63,6 @@ pub(crate) struct SessionServices {
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) runtime_auth: RuntimeAuthSlot,
-    /// Upload-only clients shared across turns without logging signed blob URLs.
-    pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
     pub(crate) models_manager: SharedModelsManager,
     pub(crate) git_root_discovery: Arc<GitRootDiscovery>,
     pub(crate) session_telemetry: SessionTelemetry,

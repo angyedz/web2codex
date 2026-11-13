@@ -8,7 +8,6 @@ use codex_app_server_protocol::PluginInstallPolicy;
 use codex_core::config::Config;
 use codex_core::config::find_codex_home;
 use codex_core::plugins_manager_for_config;
-use codex_core::plugins_manager_for_config_with_runtime;
 use codex_core_plugins::ConfiguredMarketplace;
 use codex_core_plugins::OPENAI_BUNDLED_MARKETPLACE_NAME;
 use codex_core_plugins::PluginInstallOutcome;
@@ -262,11 +261,7 @@ pub async fn run_plugin_list(
         ..
     } = context;
     let outcome = manager
-        .list_marketplaces_for_config(
-            &plugins_input,
-            &[],
-            /*include_openai_curated*/ !remote_listing.uses_global_catalog,
-        )
+        .list_marketplaces_for_config(&plugins_input, &[], /*include_openai_curated*/ false)
         .context("failed to list marketplace plugins")?;
     ensure_configured_marketplace_snapshots_loaded(
         codex_home.as_path(),
@@ -767,23 +762,24 @@ struct PluginCommandContext {
 
 async fn load_plugin_command_context(
     overrides: Vec<(String, toml::Value)>,
-    marketplace_name: Option<&str>,
+    _marketplace_name: Option<&str>,
 ) -> Result<PluginCommandContext> {
     let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-    let config = Config::load_with_cli_overrides(overrides)
+    let mut config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
-    let plugins_input = config.plugins_config_input();
+    config.model_provider_id = "web2codex".to_string();
+    let mut plugins_input = config.plugins_config_input();
+    // This fork keeps local marketplace and MCP plugin support, but does not
+    // query ChatGPT account-backed plugin catalogs or synchronize OpenAI's catalog.
+    plugins_input.model_provider_id = "web2codex".to_string();
+    plugins_input.remote_plugin_enabled = false;
     let auth_manager = load_cli_auth_manager(&config).await?;
-    let auth = auth_manager.auth().await;
-    let uses_remote_catalog = plugins_input.plugins_enabled
-        && auth.as_ref().is_some_and(CodexAuth::uses_codex_backend)
-        && marketplace_name.is_none_or(|name| name == REMOTE_GLOBAL_MARKETPLACE_NAME);
-    let manager = Arc::new(if uses_remote_catalog {
-        plugins_manager_for_config_with_runtime(&config, Arc::clone(&auth_manager)).await?
-    } else {
-        plugins_manager_for_config(&config, Arc::clone(&auth_manager))
-    });
+    let auth: Option<CodexAuth> = None;
+    let manager = Arc::new(plugins_manager_for_config(
+        &config,
+        Arc::clone(&auth_manager),
+    ));
     Ok(PluginCommandContext {
         codex_home: codex_home.to_path_buf(),
         plugins_input,
@@ -793,7 +789,12 @@ async fn load_plugin_command_context(
 }
 
 pub(crate) async fn load_cli_auth_manager(config: &Config) -> Result<Arc<AuthManager>> {
-    Ok(AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await?)
+    Ok(AuthManager::unauthenticated(
+        codex_login::AuthRuntimeConfig {
+            codex_home: config.codex_home.to_path_buf(),
+            auth_route_config: config.auth_route_config(),
+        },
+    ))
 }
 
 struct PluginSelection {
@@ -843,8 +844,6 @@ fn parse_plugin_selection(
 #[derive(Default)]
 struct RemoteMarketplaceListing {
     marketplaces: Vec<RemoteMarketplace>,
-    // A successful global catalog replaces the local curated catalog even when it is empty.
-    uses_global_catalog: bool,
     catalog_cache_used: bool,
 }
 
@@ -882,7 +881,6 @@ async fn fetch_remote_marketplaces(
         .await
         .map(|outcome| RemoteMarketplaceListing {
             marketplaces: outcome.marketplaces,
-            uses_global_catalog: true,
             catalog_cache_used: outcome.catalog_cache_used,
         })
     } else {
@@ -895,7 +893,6 @@ async fn fetch_remote_marketplaces(
         .await
         .map(|outcome| RemoteMarketplaceListing {
             marketplaces: outcome.marketplace.into_iter().collect(),
-            uses_global_catalog: false,
             catalog_cache_used: outcome.catalog_cache_used,
         })
     };
@@ -940,7 +937,7 @@ fn find_marketplace_for_plugin(
     plugin_name: &str,
 ) -> Result<ConfiguredMarketplace> {
     let outcome = manager
-        .list_marketplaces_for_config(plugins_input, &[], /*include_openai_curated*/ true)
+        .list_marketplaces_for_config(plugins_input, &[], /*include_openai_curated*/ false)
         .context("failed to list marketplace plugins")?;
     ensure_configured_marketplace_snapshots_loaded(
         codex_home,

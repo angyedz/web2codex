@@ -26,11 +26,8 @@ use crate::shell_snapshot::ShellSnapshot;
 use crate::shell_snapshot::SnapshotCredentialBrokerState;
 use crate::state::ActiveTurn;
 use crate::turn_metadata::ExecutionMetadata;
-use codex_analytics::ThreadProductUpdate;
 use codex_attachment_store::AttachmentStore;
 use codex_extension_api::ExtensionDataInit;
-use codex_http_client::ClientRouteClass;
-use codex_http_client::RouteAwareClientPool;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::SharedModelProvider;
 use codex_prompts::render_model_instructions;
@@ -928,7 +925,7 @@ impl Session {
         reserved_thread_id: Option<ThreadId>,
         environment_manager: Arc<EnvironmentManager>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
-        analytics_events_client: Option<AnalyticsEventsClient>,
+        _analytics_events_client: Option<AnalyticsEventsClient>,
         image_store: Arc<dyn AttachmentStore>,
         thread_store: Arc<dyn ThreadStore>,
         resume_preparation: Option<ThreadStoreResumePreparation>,
@@ -1821,45 +1818,7 @@ impl Session {
                 });
             }
 
-            let analytics_events_client = if config.analytics_enabled == Some(false) {
-                if let Some(client) = &analytics_events_client {
-                    client.update_thread_product_sku(thread_id, ThreadProductUpdate::Clear);
-                }
-                AnalyticsEventsClient::disabled()
-            } else {
-                analytics_events_client.unwrap_or_else(|| {
-                    let api_key_headers = if codex_model_provider::provider_uses_first_party_auth_path(
-                        &config.model_provider,
-                    ) {
-                        match config.model_provider.build_header_map() {
-                            Ok(headers) => headers,
-                            Err(error) => {
-                                tracing::warn!(%error, "failed to resolve analytics resource selectors");
-                                return AnalyticsEventsClient::disabled();
-                            }
-                        }
-                    } else {
-                        Default::default()
-                    };
-                    AnalyticsEventsClient::new_with_runtime(
-                        Arc::clone(&auth_manager),
-                        config.chatgpt_backend_url(),
-                        config.analytics_enabled,
-                        config
-                            .features
-                            .enabled(Feature::RuntimeAgentInstances)
-                            .then(|| (Arc::clone(&runtime_auth), config.runtime_auth_mode)),
-                        api_key_headers,
-                    )
-                })
-            };
-            analytics_events_client.update_thread_product_sku(
-                thread_id,
-                match &config.apps_mcp_product_sku {
-                    Some(product) => ThreadProductUpdate::Set(product.clone()),
-                    None => ThreadProductUpdate::Clear,
-                },
-            );
+            let analytics_events_client = AnalyticsEventsClient::disabled();
             for item in initial_history.get_rollout_items() {
                 match item {
                     RolloutItem::Compacted(compacted) => {
@@ -2020,24 +1979,6 @@ impl Session {
                 exec_policy,
                 auth_manager: Arc::clone(&auth_manager),
                 runtime_auth,
-                openai_file_upload_client_pool: if config
-                    .features
-                    .enabled(Feature::RuntimeAgentInstances)
-                    && codex_runtime_agent_instance::is_openai_api_url(&config.chatgpt_base_url)
-                {
-                    RouteAwareClientPool::new_without_request_logging(
-                        config
-                            .http_client_factory()
-                            .with_sensitive_header_protection(),
-                        ClientRouteClass::Api,
-                    )
-                } else {
-                    RouteAwareClientPool::new_without_request_logging(
-                        config.http_client_factory(),
-                        ClientRouteClass::Api,
-                    )
-                    .with_legacy_custom_ca_fallback()
-                },
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
                 git_root_discovery,

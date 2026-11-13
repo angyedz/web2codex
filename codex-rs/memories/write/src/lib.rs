@@ -6,7 +6,6 @@
 
 mod control;
 mod extensions;
-mod guard;
 mod metrics;
 mod phase1;
 mod phase1_output;
@@ -45,10 +44,6 @@ mod artifacts {
 mod extension_resources {
     pub(super) const FILENAME_TS_FORMAT: &str = "%Y-%m-%dT%H-%M-%S";
     pub(super) const RETENTION_DAYS: i64 = 14;
-}
-
-mod guard_limits {
-    pub(super) const CODEX_LIMIT_ID: &str = "codex";
 }
 
 mod prompt_blocks {

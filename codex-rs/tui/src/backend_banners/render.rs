@@ -43,21 +43,11 @@ impl BackendBanner {
                 {
                     return None;
                 }
-                let action = self.resolve_action(&cta.action)?;
+                let BannerAction::OpenUrl(url) = self.resolve_action(&cta.action)?;
                 Some(SelectionItem {
                     name: cta.label.clone(),
                     actions: vec![Box::new(move |tx| {
-                        tx.send(match &action {
-                            BannerAction::OpenUrl(url) => {
-                                AppEvent::OpenUrlInBrowser { url: url.clone() }
-                            }
-                            BannerAction::NotifyOwner(credit_type) => {
-                                AppEvent::SendAddCreditsNudgeEmail {
-                                    credit_type: *credit_type,
-                                }
-                            }
-                            BannerAction::ResetUsage => AppEvent::OpenRateLimitResetCredits,
-                        })
+                        tx.send(AppEvent::OpenUrlInBrowser { url: url.clone() })
                     })],
                     dismiss_on_select: false,
                     ..Default::default()

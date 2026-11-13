@@ -431,8 +431,6 @@ impl ChatWidget {
         });
         self.backend_banner_state.presented = banner.cloned();
         if content.is_some() {
-            self.bottom_pane
-                .dismiss_view_by_id(super::rate_limits::WORKSPACE_NUDGE_VIEW_ID);
             if self
                 .bottom_pane
                 .dismiss_view_by_id(super::rate_limits::RATE_LIMIT_SWITCH_PROMPT_VIEW_ID)
@@ -447,7 +445,6 @@ impl ChatWidget {
         }
         self.bottom_pane
             .dismiss_view_by_id(LUNA_RESERVE_RECOVERY_VIEW_ID);
-        self.clear_security_setup_banner();
         match (is_reserve, content) {
             (true, Some(content)) => {
                 self.bottom_pane.set_inline_banner(/*banner*/ None);
@@ -517,7 +514,6 @@ impl ChatWidget {
     }
 
     pub(crate) fn clear_backend_banner(&mut self) {
-        self.clear_security_setup_banner();
         self.backend_banner_state = BackendBannerState::default();
         self.backend_banner_notice_model = None;
         self.bottom_pane

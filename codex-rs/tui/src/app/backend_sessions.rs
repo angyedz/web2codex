@@ -174,7 +174,6 @@ impl BackendSessions {
     pub(super) fn displayed_name(&self, target: &AppServerTarget) -> Option<String> {
         let slot = self.displayed.0;
         self.entries[slot].listening.then(|| match (target, slot) {
-            (AppServerTarget::Cloud, _) => "Cloud".to_string(),
             (_, 0) => "Local".to_string(),
             (_, index) => format!("Connection {}", index + 1),
         })

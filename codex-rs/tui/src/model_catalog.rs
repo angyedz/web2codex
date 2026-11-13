@@ -12,15 +12,12 @@ use tokio::sync::Mutex;
 /// unsafe to apply for the rest of this TUI session, including after reconnecting.
 pub(crate) type ProviderWrite = Arc<Mutex<bool>>;
 
+// Legacy quota-recovery display identifiers. The WebView model catalog never adds them.
 pub(crate) const LUNA_RESERVE_MODEL: &str = "gpt-reserve";
 pub(crate) const LUNA_MODEL: &str = "gpt-6-luna";
 
 pub(crate) fn model_display_name(model: &str) -> &str {
-    if model.eq_ignore_ascii_case(LUNA_RESERVE_MODEL) {
-        "Luna Reserve"
-    } else {
-        model
-    }
+    model
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +68,6 @@ impl ModelCatalog {
             .iter()
             .find(|preset| preset.model == model)
             .map(|preset| preset.display_name.as_str())
-            .unwrap_or_else(|| model_display_name(model))
+            .unwrap_or(model)
     }
 }

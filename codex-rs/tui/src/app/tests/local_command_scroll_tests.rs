@@ -510,46 +510,6 @@ async fn dynamic_service_tier_command_returns_to_latest() -> Result<()> {
 }
 
 #[tokio::test]
-async fn usage_command_opens_analytics_without_moving_the_background_transcript() -> Result<()> {
-    let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
-    set_chatgpt_auth(&mut app.chat_widget);
-    let mut tui = crate::tui::test_support::make_test_tui()?;
-    let mut server = start_config_write_test_app_server(&app).await?;
-    tui.set_owned_screen(/*owned*/ true)?;
-    hold_older_history(&mut app, &mut tui);
-    while events.try_recv().is_ok() {}
-
-    submit_local_command(&mut app, "/usage");
-    let mut opened = None;
-    while let Ok(event) = events.try_recv() {
-        if let AppEvent::OpenUsageStatistics { view } = event {
-            opened = Some(view);
-            break;
-        }
-        app.handle_event(&mut tui, &mut server, event).await?;
-    }
-    let view = opened.expect("usage command opens token statistics");
-    assert_eq!(view, None);
-    let held = transcript_buffer(&mut app);
-    app.transcript_view
-        .jump_to_entry(&app.transcript_cells, /*index*/ 0);
-
-    app.handle_event(
-        &mut tui,
-        &mut server,
-        AppEvent::OpenUsageStatistics { view },
-    )
-    .await?;
-    assert!(matches!(app.overlay.as_ref(), Some(Overlay::Analytics(_))));
-    assert_eq!(transcript_buffer(&mut app), held);
-    assert!(!app.transcript_view.is_following());
-
-    tui.set_owned_screen(/*owned*/ false)?;
-    server.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn background_history_insertion_keeps_the_visible_reading_rows() -> Result<()> {
     let (mut app, _events, _op_rx) = make_test_app_with_channels().await;
     let mut tui = crate::tui::test_support::make_test_tui()?;

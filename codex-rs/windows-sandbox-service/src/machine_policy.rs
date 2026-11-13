@@ -1,14 +1,12 @@
-//! Validates sandbox provisioning against managed policy; registration-only refresh
+//! Validates sandbox provisioning against local configuration; registration-only refresh
 //! retains the existing sandbox and is admitted by the registered-runtime transaction.
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
-use codex_cloud_config::chatgpt_config_bundle_loader_for_storage_without_cache;
 use codex_config::ConfigLoadOptions;
 use codex_config::ConfigRequirements;
 use codex_config::types::WindowsSandboxModeToml;
-use codex_core::config::bootstrap_auth_config;
 use codex_core::config::load_config_toml_with_layer_stack;
 use codex_windows_sandbox::WindowsSandboxProvisioningSettings;
 use codex_windows_sandbox::WindowsSandboxProxyListeners;
@@ -36,8 +34,7 @@ pub(crate) fn validate_provisioning_request(
     if request.registered_core && request.refresh_only {
         // The caller is already authenticated. registered::run checks the existing
         // owner, accounts and unchanged settings under the setup lock; it cannot
-        // provision or repair a sandbox. Backend use still obeys managed config.
-        // Package maintenance must not require another cloud-policy fetch.
+        // provision or repair a sandbox. Existing local requirements remain in force.
         return Ok(());
     }
     let impersonation_failure = Arc::new(Notify::new());
@@ -57,7 +54,7 @@ pub(crate) fn validate_provisioning_request(
             }
         })
         .build()
-        .context("start managed configuration runtime")?;
+        .context("start configuration runtime")?;
     let requirements = runtime.block_on(async {
         tokio::select! {
             biased;
@@ -73,34 +70,15 @@ pub(crate) fn validate_provisioning_request(
                 )
                 .await
                 .context("load bootstrap configuration")?;
-                // Use the default cloud-policy endpoint unless managed requirements override it.
-                bootstrap_config.config_toml.chatgpt_base_url = None;
-                let cloud_config_bundle = chatgpt_config_bundle_loader_for_storage_without_cache(
-                    bootstrap_auth_config(codex_home, &bootstrap_config)
-                        .context("resolve cloud configuration authentication")?,
-                    /*enable_codex_api_key_env*/ false,
+                Ok::<_, anyhow::Error>(
+                    bootstrap_config.config_layer_stack.requirements().clone(),
                 )
-                .await
-                .context("initialize cloud configuration authentication")?;
-                let config = load_config_toml_with_layer_stack(
-                    codex_home,
-                    /*cwd*/ None,
-                    Vec::new(),
-                    ConfigLoadOptions {
-                        cloud_config_bundle,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .context("load managed configuration")?;
-
-                Ok::<_, anyhow::Error>(config.config_layer_stack.requirements().clone())
             } => result,
         }
     })?;
 
     validate_requirements(&request.settings, &request.listeners, &requirements)
-        .context("enforce managed provisioning requirements")
+        .context("enforce configured provisioning requirements")
 }
 
 fn validate_requirements(
@@ -113,7 +91,7 @@ fn validate_requirements(
         .can_set(&Some(WindowsSandboxModeToml::Elevated))
         .is_err()
     {
-        bail!("managed policy does not permit the elevated Windows sandbox");
+        bail!("configured requirements do not permit the elevated Windows sandbox");
     }
 
     let Some(network) = requirements.network.as_ref().map(|network| &network.value) else {
@@ -122,15 +100,15 @@ fn validate_requirements(
     if network.enabled == Some(false)
         && (settings.allow_local_binding || !settings.proxy_ports.is_empty())
     {
-        bail!("managed policy disables sandbox network access");
+        bail!("configured requirements disable sandbox network access");
     }
     if settings.allow_local_binding && network.allow_local_binding == Some(false) {
-        bail!("managed policy does not permit local network binding");
+        bail!("configured requirements do not permit local network binding");
     }
     if let Some(required) = network.http_port
         && let Some(actual) = listeners.http_ports.iter().find(|port| **port != required)
     {
-        bail!("managed policy does not permit HTTP proxy port {actual}");
+        bail!("configured requirements do not permit HTTP proxy port {actual}");
     }
     if let Some(required) = network.socks_port
         && let Some(actual) = listeners.socks_ports.iter().find(|port| **port != required)

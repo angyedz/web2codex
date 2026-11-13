@@ -55,9 +55,10 @@ jobs:
         working-directory: codex-rs
     env:
       CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
+      TARGET: ${{ matrix.target }}
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      # Keep the small ARM macOS runner serial; use two Cargo jobs elsewhere to shorten builds.
-      CARGO_BUILD_JOBS: ${{ matrix.os == 'macos-15' && '1' || '2' }}
+      # The ARM macOS runner has three CPUs; the other matrix runners have four.
+      CARGO_BUILD_JOBS: ${{ matrix.os == 'macos-15' && '2' || '4' }}
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       CARGO_PROFILE_RELEASE_LTO: "false"
@@ -68,7 +69,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          toolchain: 1.95.0
+          target: ${{ matrix.target }}
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -97,26 +98,28 @@ jobs:
           workspaces: codex-rs -> target
 
       - name: Compile the fork's CLI
-        run: cargo build --locked --release -p codex-cli --bin web2codex
+        run: cargo build --locked --release --target ${{ matrix.target }} -p codex-cli --bin web2codex
 
       - name: Compile the private WebView browser
-        run: cargo build --locked --release -p codex-web-browser --bin codex-web-browser
+        run: cargo build --locked --release --target ${{ matrix.target }} -p codex-web-browser --bin codex-web-browser
 
       - name: Smoke-test the CLI on this runner (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          test -x target/release/codex-web-browser
-          target/release/web2codex --version
-          target/release/web2codex web --help >/dev/null
+          bin_dir="target/$TARGET/release"
+          test -x "$bin_dir/codex-web-browser"
+          "$bin_dir/web2codex" --version
+          "$bin_dir/web2codex" web --help >/dev/null
 
       - name: Smoke-test the CLI on this runner (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $cli = Join-Path $PWD "target/release/web2codex.exe"
-          $browser = Join-Path $PWD "target/release/codex-web-browser.exe"
+          $binDir = Join-Path $PWD "target/$env:TARGET/release"
+          $cli = Join-Path $binDir "web2codex.exe"
+          $browser = Join-Path $binDir "codex-web-browser.exe"
           if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw "Missing packaged CLI: $cli" }
           if (-not (Test-Path -LiteralPath $browser -PathType Leaf)) { throw "Missing WebView browser: $browser" }
           & $cli --version

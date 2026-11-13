@@ -13,7 +13,7 @@ use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn cloud_admission_keeps_tab_input_queued_until_the_admitted_turn_finishes() {
-    use crate::app_command::CloudSubmissionIntent;
+    use crate::app_command::UserSubmissionIntent;
     use crate::app_server_session::user_message_submission::UserMessageAdmission;
 
     for receipt in [
@@ -67,7 +67,7 @@ async fn cloud_admission_keeps_tab_input_queued_until_the_admitted_turn_finishes
         );
         assert!(matches!(
             turns.next(),
-            Some(Op::UserTurn { cloud_submission: CloudSubmissionIntent::StartIfIdle, items, .. })
+            Some(Op::UserTurn { submission_intent: UserSubmissionIntent::StartIfIdle, items, .. })
                 if matches!(items.as_slice(), [UserInput::Text { text, .. }] if text == "queued draft")
         ));
         assert_eq!(chat.queued_user_message_texts(), ["another draft"]);

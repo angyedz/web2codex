@@ -92,7 +92,6 @@ pub(crate) struct TurnRequestProcessor {
     thread_state_manager: ThreadStateManager,
     thread_watch_manager: ThreadWatchManager,
     skills_watcher: Arc<SkillsWatcher>,
-    turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
 }
 
 fn map_additional_context(
@@ -150,7 +149,6 @@ impl TurnRequestProcessor {
         thread_state_manager: ThreadStateManager,
         thread_watch_manager: ThreadWatchManager,
         skills_watcher: Arc<SkillsWatcher>,
-        turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
     ) -> Self {
         Self {
             thread_manager,
@@ -162,7 +160,6 @@ impl TurnRequestProcessor {
             thread_state_manager,
             thread_watch_manager,
             skills_watcher,
-            turn_cost_worker,
         }
     }
 
@@ -1322,6 +1319,11 @@ impl TurnRequestProcessor {
         else {
             return Ok(None);
         };
+        if thread.config().await.model_provider_id == "web2codex" {
+            return Err(invalid_request(
+                "Realtime voice is unavailable with the ChatGPT Web provider. Use a temporary ChatGPT Web chat for model conversations.",
+            ));
+        }
         self.submit_core_op(
             request_id,
             thread.as_ref(),
@@ -1574,7 +1576,6 @@ impl TurnRequestProcessor {
             thread_watch_manager: self.thread_watch_manager.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
-            turn_cost_worker: self.turn_cost_worker.clone(),
         }
     }
 

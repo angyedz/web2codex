@@ -75,7 +75,7 @@ const INSTALLER_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 fn installer_url() -> String {
     format!(
         "https://github.com/{}/releases/latest/download/install.sh",
-        option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("openai/codex")
+        option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("angyedz/web2codex")
     )
 }
 
@@ -83,7 +83,7 @@ fn installer_url() -> String {
 fn installer_url() -> String {
     format!(
         "https://github.com/{}/releases/latest/download/install.ps1",
-        option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("openai/codex")
+        option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("angyedz/web2codex")
     )
 }
 

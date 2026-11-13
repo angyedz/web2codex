@@ -8,7 +8,6 @@ mod agent_message_board;
 mod analytics;
 mod app_installed;
 mod app_list;
-mod app_read;
 mod application_network;
 #[path = "attached_thread_tests.rs"]
 mod attached_thread;
@@ -78,7 +77,6 @@ mod fs;
 mod gateway_oauth;
 #[path = "gcp_setup_tests.rs"]
 mod gcp_setup;
-mod git_attribution;
 mod guardian_v2;
 mod history_notes_extension;
 mod hooks_list;

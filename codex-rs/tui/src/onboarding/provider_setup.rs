@@ -1,16 +1,12 @@
 //! Single-line fields shared by provider settings and the cloud setup wizards.
 
-use super::auth::AuthModeWidget;
-use super::auth::SignInState;
 use crate::bottom_pane::TextArea;
-use codex_app_server_protocol::RequestId;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -124,40 +120,4 @@ pub(crate) fn move_provider_field(key: KeyEvent, selected: &mut usize, count: us
         _ => return false,
     };
     true
-}
-
-impl AuthModeWidget {
-    pub(super) fn spawn_provider_setup(
-        &self,
-        request_id: RequestId,
-        retry: SignInState,
-        request: impl Future<Output = Result<(), String>> + Send + 'static,
-    ) {
-        let sign_in_state = self.sign_in_state.clone();
-        let error = self.error.clone();
-        let request_frame = self.request_frame.clone();
-        tokio::spawn(async move {
-            let result = request.await;
-            let mut state = sign_in_state
-                .write()
-                .unwrap_or_else(PoisonError::into_inner);
-            let configured = match &*state {
-                SignInState::Bedrock(bedrock) if bedrock.is_configuring(&request_id) => {
-                    SignInState::BedrockConfigured
-                }
-                SignInState::Gcp(gcp) if gcp.is_configuring(&request_id) => {
-                    SignInState::GcpConfigured
-                }
-                _ => return,
-            };
-            let (next, message) = match result {
-                Ok(()) => (configured, None),
-                Err(err) => (retry, Some(err)),
-            };
-            *state = next;
-            *error.write().unwrap_or_else(PoisonError::into_inner) = message;
-            drop(state);
-            request_frame.schedule_frame();
-        });
-    }
 }

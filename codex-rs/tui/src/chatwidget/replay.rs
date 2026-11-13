@@ -96,10 +96,7 @@ impl ChatWidget {
         &mut self,
         turns: Vec<Turn>,
         replay_kind: ReplayKind,
-        target: &crate::AppServerTarget,
     ) {
-        self.transcript.replayed_cloud_text =
-            matches!(target, crate::AppServerTarget::Cloud).then(std::collections::HashMap::new);
         self.replay_thread_turns(turns, replay_kind);
     }
 
@@ -202,10 +199,7 @@ impl ChatWidget {
                         Some((summary, content)),
                     );
                 } else {
-                    self.transcript.recording_finished_cloud_text =
-                        status != TurnStatus::InProgress || entry.completed_at_ms.is_some();
                     self.replay_thread_item(item, turn_id.clone(), replay_kind);
-                    self.transcript.recording_finished_cloud_text = false;
                 }
             }
             let status = if hidden_nested_review_turn {

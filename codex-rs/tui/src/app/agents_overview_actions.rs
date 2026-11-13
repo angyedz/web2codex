@@ -208,15 +208,6 @@ impl App {
             .filter(|name| !name.is_empty())
             .unwrap_or("Untitled task");
         let (title, description, label) = match action {
-            AgentsOverviewAction::Archive
-                if self.app_server_target == crate::AppServerTarget::Cloud =>
-            {
-                (
-                    format!("Archive “{name}”?"),
-                    "This stops any running work in this task and archives it. Child agents stay unchanged. Its history can be restored from the resume picker.",
-                    "Archive task",
-                )
-            }
             AgentsOverviewAction::Archive => (
                 format!("Archive “{name}”?"),
                 "This stops any running work in this task and its child agents, then archives them. Their history can be restored from the resume picker.",
@@ -293,10 +284,7 @@ impl App {
         if self.windows_sandbox_blocks_thread_switch() {
             return Ok(());
         }
-        // Cloud archives only the selected thread; Local lifecycle actions include descendants.
-        let removes_subtree = action != AgentsOverviewAction::Archive
-            || app_server.thread_params_mode()
-                != crate::app_server_session::ThreadParamsMode::Cloud;
+        let removes_subtree = action != AgentsOverviewAction::Archive;
         // The overview may lack intermediate ancestors, or even the primary's metadata.
         let mut removes_primary = self.primary_thread_id == Some(thread_id);
         let mut attempted = false;

@@ -1,7 +1,6 @@
 //! Map backend CTA names to existing CLI actions and desktop-equivalent browser destinations.
 
 use super::BackendBanner;
-use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_protocol::account::PlanType;
 
 const USAGE_URL: &str = "https://chatgpt.com/settings/usage";
@@ -9,23 +8,15 @@ const WORKSPACE_USAGE_URL: &str = "https://chatgpt.com/admin/usage-limits/worksp
 
 pub(super) enum BannerAction {
     OpenUrl(String),
-    NotifyOwner(AddCreditsNudgeCreditType),
-    ResetUsage,
 }
 
 impl BackendBanner {
     pub(super) fn resolve_action(&self, action: &str) -> Option<BannerAction> {
         match action {
-            "notify_owner" | "contact_owner" => {
-                return Some(BannerAction::NotifyOwner(
-                    AddCreditsNudgeCreditType::Credits,
-                ));
-            }
+            "notify_owner" | "contact_owner" => return None,
             "request_increase" => {
                 let Some(destination) = self.request_url.as_deref() else {
-                    return Some(BannerAction::NotifyOwner(
-                        AddCreditsNudgeCreditType::UsageLimit,
-                    ));
+                    return None;
                 };
                 let url = url::Url::parse(destination).ok()?;
                 if !matches!(url.scheme(), "https" | "http")
@@ -37,8 +28,7 @@ impl BackendBanner {
                 }
                 return Some(BannerAction::OpenUrl(url.to_string()));
             }
-            // Keep the existing picker and explicit confirmation before consuming a reset.
-            "reset_usage" => return Some(BannerAction::ResetUsage),
+            "reset_usage" => return None,
             _ => {}
         }
         let destination = match action {

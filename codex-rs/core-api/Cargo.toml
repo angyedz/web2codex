@@ -22,7 +22,6 @@ codex-core = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-home = { workspace = true }
 codex-history = { workspace = true }
-codex-image-generation-extension = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-features = { workspace = true }
 codex-login = { workspace = true }

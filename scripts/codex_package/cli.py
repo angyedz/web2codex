@@ -174,7 +174,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--web-browser-bin",
         type=Path,
-        help="Optional prebuilt native Codex Web browser executable to include.",
+        help="Optional prebuilt Web2Codex browser executable to include.",
     )
     parser.add_argument(
         "--rg-bin",
@@ -251,7 +251,7 @@ def assemble_package(args: argparse.Namespace) -> Path:
         codex_windows_sandbox_setup_bin=source_outputs.codex_windows_sandbox_setup_bin,
         web_browser_bin=resolve_optional_input_path(
             args.web_browser_bin,
-            "prebuilt Codex Web browser executable",
+            "prebuilt Web2Codex browser executable",
             "--web-browser-bin",
         ),
     )

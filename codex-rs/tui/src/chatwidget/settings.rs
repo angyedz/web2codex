@@ -219,20 +219,6 @@ impl ChatWidget {
         self.model_catalog.clone()
     }
 
-    pub(crate) fn on_account_email_loaded(
-        &mut self,
-        current_email: Option<String>,
-        current_workspace: Option<String>,
-    ) {
-        if let Some(StatusAccountDisplay::ChatGpt {
-            email, workspace, ..
-        }) = &mut self.status_account_display
-        {
-            *email = current_email;
-            *workspace = current_workspace;
-        }
-    }
-
     pub(crate) fn current_plan_type(&self) -> Option<PlanType> {
         self.plan_type
     }
@@ -260,12 +246,10 @@ impl ChatWidget {
         self.invalidate_permission_discovery();
         self.permission_discovery = None;
         self.invalidate_connector_scope();
-        self.clear_pending_rate_limit_reset_requests();
         self.clear_backend_banner();
         self.luna_reserve_notice_account_id = None;
         self.automatic_model_switch_state = backend_banners::AutomaticModelSwitchState::default();
         self.input_queue.rate_limit_recovery_pending = false;
-        self.add_credits_nudge_email_in_flight = None;
         self.codex_rate_limit_reached_type = None;
         self.codex_spend_control_reached = None;
         self.rate_limit_warnings = RateLimitWarningState::default();
@@ -273,14 +257,6 @@ impl ChatWidget {
         self.rate_limit_switch_prompt = RateLimitSwitchPromptState::Idle;
         self.bottom_pane
             .dismiss_view_by_id(RATE_LIMIT_SWITCH_PROMPT_VIEW_ID);
-        let had_refreshing_status_outputs = !self.refreshing_status_outputs.is_empty();
-        let now = Local::now();
-        for (_, handle) in self.refreshing_status_outputs.drain(..) {
-            handle.finish_rate_limit_refresh(&[], now);
-        }
-        if had_refreshing_status_outputs {
-            self.request_redraw();
-        }
         self.status_line_workspace_headline = None;
         self.status_line_workspace_headline_pending_request_id = None;
         self.status_line_workspace_headline_last_requested_at = None;
@@ -297,8 +273,7 @@ impl ChatWidget {
         self.bottom_pane
             .set_connectors_enabled(self.connectors_enabled());
         self.refresh_connector_mentions(/*force_refresh*/ false);
-        self.bottom_pane
-            .set_token_activity_command_enabled(has_codex_backend_auth);
+        self.bottom_pane.set_usage_command_enabled(true);
         self.refresh_status_surfaces();
     }
 
@@ -312,12 +287,6 @@ impl ChatWidget {
     pub(crate) fn set_model(&mut self, model: &str) {
         if model != self.current_model() {
             self.queue_unavailable_daybreak_disable(model);
-            if self.current_model() == crate::model_catalog::LUNA_RESERVE_MODEL {
-                self.clear_reserve_return();
-            } else {
-                self.automatic_model_switch_state =
-                    backend_banners::AutomaticModelSwitchState::default();
-            }
         }
         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(
             Some(model.to_string()),

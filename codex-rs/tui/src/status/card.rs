@@ -4,15 +4,12 @@ use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::plain_lines;
 use crate::legacy_core::config::Config;
 use crate::line_truncation::line_width;
-use crate::style::accent_color;
 use crate::token_usage::TokenUsage;
 use crate::token_usage::TokenUsageInfo;
 use crate::version::CODEX_CLI_VERSION;
 use chrono::DateTime;
 use chrono::Local;
 use codex_app_server_protocol::AskForApproval;
-use codex_model_provider::provider_uses_first_party_auth_path;
-use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
@@ -33,7 +30,6 @@ use std::path::PathBuf;
 use super::account::StatusAccountDisplay;
 use super::format::FieldFormatter;
 use super::format::push_label;
-use super::helpers::compose_account_display;
 use super::helpers::compose_model_display;
 use super::helpers::format_directory_display;
 use super::helpers::format_tokens_compact;
@@ -51,8 +47,6 @@ use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 use std::sync::Arc;
 use std::sync::RwLock;
-
-const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/settings/usage";
 
 #[derive(Debug, Clone)]
 struct StatusContextWindowData {
@@ -96,26 +90,6 @@ impl StatusHistoryHandle {
         self.card.thread_usage.reserve_label_width();
     }
 
-    pub(crate) fn finish_rate_limit_refresh(
-        &self,
-        rate_limits: &[RateLimitSnapshotDisplay],
-        now: DateTime<Local>,
-    ) {
-        let rate_limits = if rate_limits.len() <= 1 {
-            compose_rate_limit_data(rate_limits.first(), now)
-        } else {
-            compose_rate_limit_data_many(rate_limits, now)
-        };
-        #[expect(clippy::expect_used)]
-        let mut state = self
-            .card
-            .rate_limit_state
-            .write()
-            .expect("status history rate-limit state poisoned");
-        state.rate_limits = rate_limits;
-        state.refreshing_rate_limits = false;
-    }
-
     pub(crate) fn set_thread_usage(
         &self,
         estimate: Option<codex_app_server_protocol::ThreadUsage>,
@@ -134,13 +108,10 @@ struct StatusHistoryCell {
     collaboration_mode: Option<String>,
     model_provider: Option<String>,
     remote_connection: Option<RemoteConnectionStatus>,
-    show_chatgpt_usage_link: bool,
-    account: Option<StatusAccountDisplay>,
     thread_name: Option<String>,
     session_id: Option<String>,
     forked_from: Option<String>,
     token_usage: StatusTokenUsageData,
-    rate_limit_state: Arc<RwLock<StatusRateLimitState>>,
     thread_usage: StatusThreadUsage,
     plan_type: Option<PlanType>,
 }
@@ -278,23 +249,23 @@ impl StatusHistoryCell {
     #[allow(clippy::too_many_arguments)]
     fn new(
         config: &Config,
-        requires_openai_auth: bool,
+        _requires_openai_auth: bool,
         model_provider_id: Option<&str>,
         remote_connection: Option<&RemoteConnectionStatus>,
-        account_display: Option<&StatusAccountDisplay>,
+        _account_display: Option<&StatusAccountDisplay>,
         token_info: Option<&TokenUsageInfo>,
         total_usage: &TokenUsage,
         session_id: &Option<ThreadId>,
         thread_name: Option<String>,
         forked_from: Option<ThreadId>,
-        rate_limits: &[RateLimitSnapshotDisplay],
+        _rate_limits: &[RateLimitSnapshotDisplay],
         _plan_type: Option<PlanType>,
-        now: DateTime<Local>,
+        _now: DateTime<Local>,
         model_name: &str,
         collaboration_mode: Option<&str>,
         reasoning_effort_override: Option<Option<ReasoningEffort>>,
         agents_summary: String,
-        refreshing_rate_limits: bool,
+        _refreshing_rate_limits: bool,
     ) -> Self {
         let approval_policy = AskForApproval::from(config.permissions.approval_policy.value());
         let permission_profile = config.permissions.effective_permission_profile();
@@ -352,28 +323,6 @@ impl StatusHistoryCell {
             &approval,
             workspace_root_suffix.as_deref(),
         );
-        let show_chatgpt_usage_link = requires_openai_auth;
-        let mut account = compose_account_display(account_display);
-        let workspace_matches_provider = if remote_connection.is_some() {
-            // A connected server owns the provider definitions; only the built-in ID is certain.
-            model_provider
-                .as_deref()
-                .is_none_or(|provider| provider == OPENAI_PROVIDER_ID)
-        } else {
-            config
-                .model_providers
-                .get(
-                    model_provider
-                        .as_deref()
-                        .unwrap_or(&config.model_provider_id),
-                )
-                .is_some_and(provider_uses_first_party_auth_path)
-        };
-        if !workspace_matches_provider
-            && let Some(StatusAccountDisplay::ChatGpt { workspace, .. }) = &mut account
-        {
-            *workspace = None;
-        }
         let session_id = session_id.as_ref().map(std::string::ToString::to_string);
         let forked_from = forked_from.map(|id| id.to_string());
         let default_usage = TokenUsage::default();
@@ -393,15 +342,6 @@ impl StatusHistoryCell {
             output: total_usage.output_tokens,
             context_window,
         };
-        let rate_limits = if rate_limits.len() <= 1 {
-            compose_rate_limit_data(rate_limits.first(), now)
-        } else {
-            compose_rate_limit_data_many(rate_limits, now)
-        };
-        let rate_limit_state = Arc::new(RwLock::new(StatusRateLimitState {
-            rate_limits,
-            refreshing_rate_limits,
-        }));
         let agents_summary = Arc::new(RwLock::new(agents_summary));
         let thread_usage = StatusThreadUsage::default();
 
@@ -413,14 +353,11 @@ impl StatusHistoryCell {
             collaboration_mode: collaboration_mode.map(ToString::to_string),
             model_provider,
             remote_connection: remote_connection.cloned(),
-            show_chatgpt_usage_link,
-            account,
             thread_name,
             session_id,
             forked_from,
             token_usage,
             agents_summary,
-            rate_limit_state,
             thread_usage,
             plan_type: _plan_type,
         }
@@ -761,34 +698,12 @@ impl StatusHistoryCell {
         }
         let mut lines = Vec::new();
 
-        let account_value = self.account.as_ref().map(|account| match account {
-            StatusAccountDisplay::ChatGpt { email, plan, .. } => match (email, plan) {
-                (Some(email), Some(plan)) => format!("{email} ({plan})"),
-                (Some(email), None) => email.clone(),
-                (None, Some(plan)) => plan.clone(),
-                (None, None) => "ChatGPT".to_string(),
-            },
-            StatusAccountDisplay::ApiKey => {
-                "API key configured (run codex login to use ChatGPT)".to_string()
-            }
-        });
-
-        let workspace = match &self.account {
-            Some(StatusAccountDisplay::ChatGpt { workspace, .. }) => workspace.as_deref(),
-            _ => None,
-        };
-
         let mut labels: Vec<String> = vec!["Model", "Directory", "Permissions", "Agents.md"]
             .into_iter()
             .map(str::to_string)
             .collect();
         let mut seen: BTreeSet<String> = labels.iter().cloned().collect();
         let thread_name = self.thread_name.as_deref().filter(|name| !name.is_empty());
-        #[expect(clippy::expect_used)]
-        let rate_limit_state = self
-            .rate_limit_state
-            .read()
-            .expect("status history rate-limit state poisoned");
         #[expect(clippy::expect_used)]
         let agents_summary = self
             .agents_summary
@@ -798,12 +713,6 @@ impl StatusHistoryCell {
 
         if self.model_provider.is_some() {
             push_label(&mut labels, &mut seen, "Model provider");
-        }
-        if account_value.is_some() {
-            push_label(&mut labels, &mut seen, "Account");
-        }
-        if workspace.is_some() {
-            push_label(&mut labels, &mut seen, "ChatGPT workspace");
         }
         if thread_name.is_some() {
             push_label(&mut labels, &mut seen, "Thread name");
@@ -821,7 +730,6 @@ impl StatusHistoryCell {
         if self.token_usage.context_window.is_some() {
             push_label(&mut labels, &mut seen, "Context window");
         }
-        self.collect_rate_limit_labels(&rate_limit_state, &mut seen, &mut labels);
         self.thread_usage.push_labels(&mut labels, &mut seen);
 
         let formatter = FieldFormatter::from_labels(labels.iter().map(String::as_str));
@@ -864,13 +772,6 @@ impl StatusHistoryCell {
         lines.push(formatter.line("Permissions", vec![Span::from(self.permissions.clone())]));
         lines.push(formatter.line("Agents.md", vec![Span::from(agents_summary)]));
 
-        if let Some(account_value) = account_value {
-            lines.push(formatter.line("Account", vec![Span::from(account_value)]));
-        }
-        if let Some(workspace) = workspace {
-            lines.push(formatter.line("ChatGPT workspace", vec![Span::from(workspace.to_owned())]));
-        }
-
         if let Some(thread_name) = thread_name {
             lines.push(formatter.line("Thread name", vec![Span::from(thread_name.to_string())]));
         }
@@ -887,16 +788,12 @@ impl StatusHistoryCell {
         }
 
         lines.push(Line::from(Vec::<Span<'static>>::new()));
-        // Hide token usage only for ChatGPT subscribers
-        if !matches!(self.account, Some(StatusAccountDisplay::ChatGpt { .. })) {
-            lines.push(formatter.line("Token usage", self.token_usage_spans()));
-        }
+        lines.push(formatter.line("Token usage", self.token_usage_spans()));
 
         if let Some(spans) = self.context_window_spans() {
             lines.push(formatter.line("Context window", spans));
         }
 
-        lines.extend(self.rate_limit_lines(&rate_limit_state, available_width, &formatter));
         let thread_usage_lines = self
             .thread_usage
             .lines(&formatter, value_width, self.plan_type);
@@ -918,27 +815,6 @@ impl StatusHistoryCell {
             RtOptions::new(available_width).subsequent_indent(indent.into()),
         );
         rendered.push(Line::default());
-        // Providers such as Bedrock manage limits and billing elsewhere.
-        if self.show_chatgpt_usage_link {
-            rendered.extend(word_wrap_lines(
-                [
-                    Line::from(vec![
-                        "Visit ".fg(accent_color()),
-                        CHATGPT_USAGE_URL.fg(accent_color()).underlined(),
-                        " for up-to-date".fg(accent_color()),
-                    ]),
-                    "information on rate limits and credits"
-                        .fg(accent_color())
-                        .into(),
-                ],
-                RtOptions::new(available_width)
-                    .initial_indent(indent.into())
-                    .subsequent_indent(indent.into())
-                    .word_separator(textwrap::WordSeparator::AsciiSpace)
-                    .word_splitter(textwrap::WordSplitter::NoHyphenation),
-            ));
-            rendered.push(Line::default());
-        }
         // Keep every value, including long paths and IDs, aligned beneath its first line.
         // At widths too small for the label column, use the outer indent instead.
         let continuation = if value_width > 0 {
@@ -983,27 +859,7 @@ impl HistoryCell for Arc<StatusHistoryCell> {
         &self,
         width: u16,
     ) -> Vec<crate::terminal_hyperlinks::HyperlinkLine> {
-        let mut lines =
-            crate::terminal_hyperlinks::plain_hyperlink_lines(self.display_lines(width));
-        // The usage URL has a known destination; wrapping preserves its underlined spans.
-        // Attach that destination to every fragment instead of searching for the full URL.
-        if self.show_chatgpt_usage_link {
-            for line in &mut lines {
-                let mut column = 0;
-                for span in &line.line.spans {
-                    let end = column + span.width();
-                    if span.style.add_modifier.contains(Modifier::UNDERLINED) {
-                        line.hyperlinks
-                            .push(crate::terminal_hyperlinks::TerminalHyperlink::web(
-                                column..end,
-                                CHATGPT_USAGE_URL.to_string(),
-                            ));
-                    }
-                    column = end;
-                }
-            }
-        }
-        lines
+        crate::terminal_hyperlinks::plain_hyperlink_lines(self.display_lines(width))
     }
 
     fn transcript_hyperlink_lines(

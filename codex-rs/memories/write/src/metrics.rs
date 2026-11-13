@@ -1,4 +1,3 @@
-pub(crate) const MEMORY_STARTUP: &str = "codex.memory.startup";
 pub(crate) const MEMORY_STORAGE_BYTES: &str = "codex.memory.storage_bytes";
 
 pub(crate) const MEMORY_PHASE_ONE_JOBS: &str = "codex.memory.phase1";

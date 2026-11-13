@@ -59,7 +59,7 @@ impl App {
 
         let AppCommand::UserTurn {
             items,
-            cloud_submission,
+            submission_intent,
             cwd,
             active_permission_profile,
             approval_policy,
@@ -74,7 +74,7 @@ impl App {
             );
             return;
         };
-        *cloud_submission = crate::app_command::CloudSubmissionIntent::UseKnownTurn;
+        *submission_intent = crate::app_command::UserSubmissionIntent::UseKnownTurn;
         let permissions_override = Self::turn_permissions_override_from_config(
             &retry_config,
             active_permission_profile.as_ref(),

@@ -15,11 +15,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::inline_visualization::InlineVisualizationContext;
-use codex_app_server_protocol::AddCreditsNudgeCreditType;
-use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
-use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::DynamicToolCallResponse;
-use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
@@ -211,32 +207,6 @@ pub(crate) struct PluginRemoteSectionError {
     pub(crate) message: String,
 }
 
-/// Distinguishes why a rate-limit refresh was requested so the completion
-/// handler can route the result correctly.
-///
-/// A `StartupPrefetch` fires once, concurrently with the rest of TUI init, and
-/// updates the cached snapshots and any available reset-credit notice (no
-/// status card to finalize). A `StatusCommand` is tied to a specific `/status`
-/// invocation and must call `finish_status_rate_limit_refresh` when done so the
-/// card stops showing a "refreshing" state. A `ResetPicker` refreshes the rate
-/// limits and detailed reset-credit rows before showing redemption choices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RateLimitRefreshOrigin {
-    /// Eagerly fetched after bootstrap for `/status` data and reset availability.
-    StartupPrefetch { reset_hint_request_id: u64 },
-    /// User-initiated via `/status`; the `request_id` correlates with the
-    /// status card that should be updated when the fetch completes.
-    StatusCommand { request_id: u64 },
-    /// User opened the reset-credit picker.
-    ResetPicker { request_id: u64 },
-    /// Refresh requested after a reset credit was successfully consumed.
-    ResetConsume { request_id: u64 },
-    /// Refresh backend recovery after an inference limit error.
-    Recovery,
-    /// Background account usage read, scheduled more frequently near exhaustion.
-    Periodic,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KeymapEditIntent {
     ReplaceAll,
@@ -348,17 +318,9 @@ impl CapturedSideWork {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
-    AccountEmailLoaded {
-        request_id: uuid::Uuid,
-        email: Option<String>,
-        workspace: Option<String>,
-    },
-    SecuritySetupLoaded {
-        request_id: uuid::Uuid,
-        identity: crate::security_setup::Identity,
-        notice: crate::security_setup::Notice,
-    },
     OpenDaemonMenu,
+    /// Run the private MCP tunnel setup wizard in the current terminal session.
+    OpenMcpTunnelSetup,
     ConfirmDaemonRestart,
     RunDaemonRestart,
     ConfirmDaemonUpdate(crate::update_action::DaemonUpdateSource),
@@ -866,16 +828,6 @@ pub(crate) enum AppEvent {
         matches: Vec<crate::task_mentions::TaskMention>,
     },
 
-    /// Refresh account rate limits in the background.
-    RefreshRateLimits {
-        origin: RateLimitRefreshOrigin,
-    },
-
-    /// Reconcile inherited account usage with an attached task before its queued input runs.
-    ApplyBackendBannerFallback {
-        thread_id: ThreadId,
-    },
-
     /// Open the current thread goal summary/action menu.
     OpenThreadGoalMenu {
         thread_id: ThreadId,
@@ -904,49 +856,9 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
     },
 
-    /// Result of refreshing rate limits.
-    RateLimitsLoaded {
-        request_id: u64,
-        origin: RateLimitRefreshOrigin,
-        hard_stop_generation: u64,
-        result: Result<GetAccountRateLimitsResponse, String>,
-    },
-
-    /// Open the authenticated account analytics dashboard.
-    OpenAnalytics {
-        view: Option<crate::analytics::TokenActivityView>,
-    },
-
     /// Open token statistics without account limit history sections.
     OpenUsageStatistics {
-        view: Option<crate::analytics::TokenActivityView>,
-    },
-
-    /// Open the account reset-credit flow selected from a rate-limit surface.
-    OpenRateLimitResetCredits,
-
-    /// Confirm the reset credit selected from the reset-credit picker.
-    OpenRateLimitResetConfirmation {
-        picker_request_id: u64,
-        confirmation_gate: Arc<AtomicBool>,
-        credit_id: Option<String>,
-        reset_title: String,
-        reset_detail: Option<String>,
-        reset_description: String,
-    },
-
-    /// Consume one reset credit using a stable idempotency key.
-    ConsumeRateLimitResetCredit {
-        idempotency_key: String,
-        credit_id: Option<String>,
-    },
-
-    /// Result of consuming one reset credit.
-    RateLimitResetCreditConsumed {
-        request_id: u64,
-        idempotency_key: String,
-        credit_id: Option<String>,
-        result: Result<ConsumeAccountRateLimitResetCreditResponse, String>,
+        view: Option<crate::chatwidget::local_usage::UsagePeriod>,
     },
 
     /// Restore the displayed thread's live terminals after replaying its history.
@@ -979,23 +891,6 @@ pub(crate) enum AppEvent {
     /// Fetch workspace messages for the status-line headline item.
     RefreshStatusLineWorkspaceHeadline {
         request_id: u64,
-    },
-
-    /// Commit settled asynchronous usage output after active-output barriers clear.
-    CommitPendingUsageOutput,
-
-    /// Commit settled asynchronous usage output after stream shutdown.
-    CommitPendingUsageOutputAfterStreamShutdown,
-
-    /// Send a user-confirmed request to notify the workspace owner.
-    SendAddCreditsNudgeEmail {
-        credit_type: AddCreditsNudgeCreditType,
-    },
-
-    /// Result of notifying the workspace owner.
-    AddCreditsNudgeEmailFinished {
-        request_id: Uuid,
-        result: Result<AddCreditsNudgeEmailStatus, String>,
     },
 
     /// Result of prefetching connectors.
@@ -1399,12 +1294,6 @@ pub(crate) enum AppEvent {
     /// Update the current reasoning effort in the running app and widget.
     UpdateReasoningEffort(Option<ReasoningEffort>),
 
-    /// Change Reserve effort only on the task that opened the picker, without saving defaults.
-    UpdateLunaReserveReasoning {
-        thread_id: ThreadId,
-        effort: Option<ReasoningEffort>,
-    },
-
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
 
@@ -1539,12 +1428,6 @@ pub(crate) enum AppEvent {
         request_id: uuid::Uuid,
         result: Result<Vec<ModelPreset>, String>,
     },
-    /// Finished the API-key compatibility check; do not check the same catalog again.
-    ApiKeyCompatModelsLoaded {
-        request_id: uuid::Uuid,
-        result: Result<Vec<ModelPreset>, String>,
-    },
-
     FetchPermissionProfiles {
         request_id: uuid::Uuid,
         thread_cwd: Option<PathBuf>,

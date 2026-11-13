@@ -13,7 +13,6 @@ use super::thread_attachment::PreparedAttachment;
 use super::thread_attachment::Selection;
 use super::thread_attachment::SelectionMode;
 use super::*;
-use crate::app_server_session::SessionAccount;
 use crate::app_server_session::SideChatStorage;
 use crate::app_server_session::is_server_shutting_down_error;
 use crate::app_server_session::source_agent_path;
@@ -576,7 +575,6 @@ impl App {
             && chat_widget.has_chatgpt_account() == self.chat_widget.has_chatgpt_account()
         {
             chat_widget.inherit_backend_banner_state(&mut self.chat_widget);
-            chat_widget.inherit_security_setup(&mut self.chat_widget);
         }
         chat_widget
             .mention_usage_mut()
@@ -1151,9 +1149,6 @@ impl App {
                         .blank_sessions
                         .insert(thread_id, started.clone());
                 }
-                // A full usage read can finish before thread/start. Apply its cached fallback
-                // after attachment but before the initial prompt or queued draft is submitted.
-                let recovery_was_pending = self.chat_widget.hold_rate_limit_recovery();
                 if self.loader_overrides.user_config_profile.is_none() {
                     self.chat_widget.accept_startup_approval_policy(
                         &mut self.config.permissions.approval_policy,
@@ -1162,26 +1157,8 @@ impl App {
                 }
                 self.enqueue_primary_thread_session(started.session, started.turns)
                     .await?;
-                self.apply_backend_banner_fallback(app_server).await;
-                if let Some(model) = self.harness_overrides.model.as_deref()
-                    && model == self.chat_widget.current_model()
-                    && self.chat_widget.has_chatgpt_account()
-                    && self.chat_widget.config_ref().model_provider_id == OPENAI_PROVIDER_ID
-                    && !self
-                        .model_catalog
-                        .models
-                        .iter()
-                        .any(|preset| preset.model == model)
-                {
-                    self.chat_widget.add_to_history(history_cell::new_visible_warning_event(format!(
-                        "Your ChatGPT model list doesn't include `{model}`. Check the spelling or use /model to choose another model."
-                    )));
-                }
                 if let Some(notice) = self.pending_server_version_notice.take() {
                     self.chat_widget.add_server_version_warning(notice);
-                }
-                if !recovery_was_pending {
-                    self.chat_widget.finish_rate_limit_recovery();
                 }
                 self.chat_widget.maybe_send_next_queued_input();
             }
@@ -1285,7 +1262,6 @@ impl App {
             session_start_source,
             /*remote_cwd_override*/ None,
             /*selected_profile*/ None,
-            self.backend_preference_context.local_cwd.as_deref(),
         ))
         .await
         .map_err(|err| {
@@ -1415,26 +1391,17 @@ impl App {
             None
         };
         let thread_id = started.session.thread_id;
-        let (account, account_error) = if self.model_catalog.provider_may_have_changed() {
-            match app_server.read_thread_account(&started.session).await {
-                Ok(account) => (Some(account), None),
-                Err(err) => (Some(SessionAccount::default()), Some(err)),
-            }
-        } else {
-            (None, None)
-        };
         if !self.config.ephemeral {
             self.agents_overview
                 .blank_sessions
                 .insert(thread_id, started.clone());
         }
         if let Err(err) = self
-            .replace_chat_widget_with_account(
+            .replace_chat_widget_with_app_server_thread(
                 tui,
                 started,
                 presentation,
                 initial_user_message,
-                account,
             )
             .await
         {
@@ -1446,11 +1413,6 @@ impl App {
             if let Some(err) = name_error {
                 self.chat_widget.add_error_message(err);
             }
-            if let Some(err) = account_error {
-                self.chat_widget.add_error_message(format!(
-                    "Could not load account details for this chat: {err}"
-                ));
-            }
         }
     }
 
@@ -1460,24 +1422,6 @@ impl App {
         started: AppServerStartedThread,
         presentation: ThreadAttachPresentation,
         initial_user_message: Option<crate::chatwidget::UserMessage>,
-    ) -> Result<()> {
-        self.replace_chat_widget_with_account(
-            tui,
-            started,
-            presentation,
-            initial_user_message,
-            /*account*/ None,
-        )
-        .await
-    }
-
-    async fn replace_chat_widget_with_account(
-        &mut self,
-        tui: &mut tui::Tui,
-        started: AppServerStartedThread,
-        presentation: ThreadAttachPresentation,
-        initial_user_message: Option<crate::chatwidget::UserMessage>,
-        account: Option<SessionAccount>,
     ) -> Result<()> {
         // Initial messages are for freshly attached primary threads only. Thread switches and
         // resume/fork flows pass `None` so they cannot replay old history and then auto-submit a new
@@ -1517,15 +1461,6 @@ impl App {
             self.config.clone(),
             initial_user_message,
         );
-        if let Some(account) = account {
-            self.account_email_request_id = None;
-            self.feedback_audience = account.feedback_audience();
-            init.has_chatgpt_account = account.has_chatgpt_account();
-            init.has_codex_backend_auth = init.has_chatgpt_account;
-            init.requires_openai_auth = account.requires_openai_auth;
-            init.status_account_display = account.display;
-            init.initial_plan_type = account.plan;
-        }
         self.replace_chat_widget(ChatWidget::new_with_app_event(init));
         if matches!(
             presentation,

@@ -4,7 +4,6 @@
 //! into another, especially while Plan mode is active.
 
 use super::*;
-use crate::model_catalog::LUNA_RESERVE_MODEL;
 
 const ULTRA_REASONING_CONCURRENCY_WARNING_THRESHOLD: usize = 8;
 pub(super) const MODEL_OPTIONS_VIEW_ID: &str = "model-options";
@@ -61,17 +60,6 @@ impl ChatWidget {
         if !subtitle.is_empty() {
             header.push(Line::from(subtitle.dim()));
         }
-        if let Some(selection) = &self.cloud_picker_selection {
-            let effort = selection
-                .effort
-                .as_ref()
-                .map_or_else(|| "server effort".to_string(), Self::reasoning_effort_label);
-            header.push(
-                format!("Accepted for future turns: {} · {effort}", selection.model)
-                    .dim()
-                    .into(),
-            );
-        }
         if let Some(warning) = self.model_menu_warning_line() {
             header.push(warning);
         }
@@ -106,10 +94,6 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_model_popup_with_presets(&mut self, presets: Vec<ModelPreset>) {
-        if self.restrict_model_picker_to_luna_reserve() {
-            self.open_luna_reserve_model_popup(presets, MODEL_SELECTION_VIEW_ID);
-            return;
-        }
         let presets: Vec<ModelPreset> = presets
             .into_iter()
             .filter(|preset| preset.show_in_picker)
@@ -239,13 +223,6 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_all_models_popup(&mut self) {
-        if self.restrict_model_picker_to_luna_reserve() {
-            self.open_luna_reserve_model_popup(
-                self.model_catalog.try_list_models().unwrap_or_default(),
-                ALL_MODELS_SELECTION_VIEW_ID,
-            );
-            return;
-        }
         let presets = self
             .model_catalog
             .try_list_models()
@@ -326,19 +303,10 @@ impl ChatWidget {
         let warning = effort_for_action
             .as_ref()
             .and_then(|effort| self.ultra_reasoning_concurrency_warning(effort));
-        let thread_id = self.thread_id();
         let sparkle_thread = self.sparkle_thread_for_picker_action(&model_for_action);
         let scoped = self.scope_model_picker_event();
         vec![Box::new(move |tx| {
-            if model_for_action == LUNA_RESERVE_MODEL {
-                // Reserve is temporary: update the active task without persisting a model default.
-                if let Some(thread_id) = thread_id {
-                    tx.send(scoped(AppEvent::UpdateLunaReserveReasoning {
-                        thread_id,
-                        effort: effort_for_action.clone(),
-                    }));
-                }
-            } else if effort_for_action == Some(ReasoningEffortConfig::Ultra) {
+            if effort_for_action == Some(ReasoningEffortConfig::Ultra) {
                 tx.send(scoped(
                     AstraModelPickerAction::ApplyAdvancedReasoning {
                         effort: ReasoningEffortConfig::Ultra,
@@ -372,7 +340,6 @@ impl ChatWidget {
         selected_effort: Option<ReasoningEffortConfig>,
     ) -> bool {
         if !self.collaboration_modes_enabled()
-            || selected_model == LUNA_RESERVE_MODEL
             || self.active_mode_kind() != ModeKind::Plan
             || selected_model != self.current_model()
         {

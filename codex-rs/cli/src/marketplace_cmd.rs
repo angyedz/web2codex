@@ -135,7 +135,8 @@ impl MarketplaceCli {
             ConfigOverrides::default(),
         )
         .await?;
-        let config = builder.clone().build().await?;
+        let mut config = builder.clone().build().await?;
+        config.model_provider_id = "web2codex".to_string();
 
         match subcommand {
             MarketplaceSubcommand::Add(args) => run_add(config, args).await?,

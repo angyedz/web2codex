@@ -855,7 +855,8 @@ impl PluginsManager {
         config: &PluginsConfigInput,
         on_effective_plugins_changed: Option<EffectivePluginsChangedCallback>,
     ) {
-        if config.plugins_enabled
+        if config.model_provider_id != "web2codex"
+            && config.plugins_enabled
             && !self.remote_global_catalog_active(config)
             && MarketplacePolicy::from_requirements(config.config_layer_stack.requirements())
                 .validate_git_source(OPENAI_PLUGINS_GIT_URL, /*ref_name*/ None)

@@ -1,7 +1,6 @@
 //! Fetch picker models without blocking the event loop and keep new-thread defaults in sync.
 
 use super::AppServerSession;
-use super::ThreadParamsMode;
 use super::model_preset_from_api_model;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -28,7 +27,6 @@ impl AppServerSession {
 
     pub(crate) fn fetch_models(&self, request_id: Uuid, app_event_tx: AppEventSender) {
         let models = list(
-            self.thread_params_mode,
             self.request_handle(),
             RequestId::String(format!("model-list-{request_id}")),
         );
@@ -40,7 +38,6 @@ impl AppServerSession {
 }
 
 pub(super) async fn list(
-    mode: ThreadParamsMode,
     request_handle: AppServerRequestHandle,
     request_id: RequestId,
 ) -> Result<Vec<ModelPreset>, TypedRequestError> {
@@ -57,12 +54,6 @@ pub(super) async fn list(
         .await
     {
         Ok(response) => response,
-        // Older Cloud servers do not expose model discovery. Preserve their startup behavior.
-        Err(TypedRequestError::Server { source, .. })
-            if mode == ThreadParamsMode::Cloud && source.code == -32601 =>
-        {
-            return Ok(Vec::new());
-        }
         Err(error) => return Err(error),
     };
     Ok(response

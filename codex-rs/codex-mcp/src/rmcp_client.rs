@@ -48,7 +48,6 @@ use crate::elicitation::ElicitationRequestManager;
 use crate::executor_environment_http_client::ExecutorEnvironmentHttpClient;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::ToolPluginContext;
-use crate::openai_docs_source_attribution::maybe_with_openai_docs_source_attribution;
 use crate::pagination::collect_paginated_with_limit;
 use crate::runtime::McpRuntimeContext;
 use crate::runtime::emit_duration;
@@ -1560,7 +1559,6 @@ pub(crate) async fn make_rmcp_client(
             let http_client = runtime_context
                 .http_client_for_server(server.config(), resolved_environment.as_ref())
                 .map_err(|error| StartupOutcomeError::from(anyhow!(error)))?;
-            let http_client = maybe_with_openai_docs_source_attribution(&url, http_client);
             let executor_resolves_bearer_token = if !is_local_environment
                 && bearer_token_env_var.is_some()
             {

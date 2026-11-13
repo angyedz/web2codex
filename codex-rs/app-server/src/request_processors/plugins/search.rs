@@ -50,7 +50,11 @@ impl PluginRequestProcessor {
         }
         let plugin_sharing_enabled = config.features.enabled(Feature::PluginSharing);
 
-        let auth = self.auth_manager.auth().await;
+        let auth = if config.model_provider_id == "web2codex" {
+            None
+        } else {
+            self.auth_manager.auth().await
+        };
         let auth_mode = auth.as_ref().map(CodexAuth::api_auth_mode);
         let remote_plugin_enabled = config.features.enabled(Feature::RemotePlugin);
         let use_remote_global_catalog =
@@ -74,7 +78,8 @@ impl PluginRequestProcessor {
             .clamp(1, MAX_PLUGIN_SEARCH_LIMIT);
         let mut next_cursor = None;
         let mut remote_results = Vec::new();
-        if auth_mode.is_some_and(DomainAuthMode::uses_codex_backend)
+        if remote_plugin_enabled
+            && auth_mode.is_some_and(DomainAuthMode::uses_codex_backend)
             && let Some(remote_scope) = remote_scope
         {
             let page = search_remote_plugins(

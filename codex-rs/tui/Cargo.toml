@@ -33,9 +33,7 @@ codex-app-server-client = { workspace = true }
 codex-app-server-daemon = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-arg0 = { workspace = true }
-codex-backend-client = { workspace = true }
 codex-install-context = { workspace = true }
-codex-cloud-config = { workspace = true }
 codex-config = { workspace = true }
 codex-context-fragments = { workspace = true }
 codex-connectors = { workspace = true }
@@ -46,6 +44,7 @@ codex-features = { workspace = true }
 codex-feedback = { workspace = true }
 codex-file-search = { workspace = true }
 codex-git-utils = { workspace = true }
+http = { workspace = true }
 codex-http-client = { workspace = true }
 codex-login = { workspace = true }
 codex-mermaid = { workspace = true }
@@ -71,7 +70,6 @@ codex-utils-cli = { workspace = true }
 codex-utils-elapsed = { workspace = true }
 codex-utils-fuzzy-match = { workspace = true }
 codex-utils-home-dir = { workspace = true }
-codex-utils-oss = { workspace = true }
 codex-utils-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
 codex-utils-plugins = { workspace = true }
@@ -185,7 +183,6 @@ codex-utils-cargo-bin = { workspace = true }
 assert_matches = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
-http = { workspace = true }
 insta = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 pretty_assertions = { workspace = true }

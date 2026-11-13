@@ -17,7 +17,6 @@ use crate::app_server_session::ThreadParamsMode;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::load_config_toml_with_layer_stack;
-use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
 use crate::named_session_lookup::SessionCollection;
 use crate::named_session_lookup::display_label;
@@ -32,7 +31,6 @@ use codex_exec_server::ExecServerRuntimeOptions;
 use codex_protocol::ThreadId;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_home_dir::find_codex_home;
-use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::eyre;
@@ -231,6 +229,11 @@ pub(super) async fn start_app_server_for_session_command(
         arg0_paths,
         explicit_remote_endpoint,
     } = options;
+    if cli.oss || cli.oss_provider.is_some() {
+        return Err(eyre!(
+            "Web2Codex uses ChatGPT Web models only; local OSS model providers are not supported."
+        ));
+    }
     if cli.no_daemon && explicit_remote_endpoint.is_some() {
         return Err(eyre!("--no-daemon cannot be used with --remote."));
     }
@@ -336,7 +339,6 @@ pub(super) async fn start_app_server_for_session_command(
     )
     .await
     .wrap_err("failed to load config.toml")?;
-    let config_toml = &bootstrap_config.config_toml;
     let cloud_config_bundle = super::cloud_config_bundle_for_app_server_target(
         &app_server_target,
         &bootstrap_config,
@@ -345,17 +347,8 @@ pub(super) async fn start_app_server_for_session_command(
     )
     .await?;
 
-    let model_provider = if cli.oss {
-        resolve_oss_provider(cli.oss_provider.as_deref(), config_toml)
-    } else {
-        None
-    };
-    let model = cli.model.clone().or_else(|| {
-        model_provider
-            .as_deref()
-            .and_then(get_default_model_for_oss_provider)
-            .map(ToOwned::to_owned)
-    });
+    let model_provider = None;
+    let model = cli.model.clone();
     let cwd = cli.cwd.clone();
     let config = ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides.clone())
@@ -369,7 +362,7 @@ pub(super) async fn start_app_server_for_session_command(
             model_provider,
             codex_self_exe: arg0_paths.codex_self_exe.clone(),
             codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
-            show_raw_agent_reasoning: cli.oss.then_some(true),
+            show_raw_agent_reasoning: None,
             bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
             ..Default::default()
         })

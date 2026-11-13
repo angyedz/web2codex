@@ -112,7 +112,6 @@ impl ChatWidget {
             .models
             .iter()
             .find(|model| model.model == self.current_model() && model.show_in_picker)
-            .filter(|_| !self.restrict_model_picker_to_luna_reserve())
         else {
             return Err("The current model cannot be recalled with /model.");
         };

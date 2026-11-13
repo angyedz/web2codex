@@ -90,7 +90,7 @@ impl ChatWidget {
         self.set_skills(/*skills*/ None);
         self.session_network_proxy = session.network_proxy.clone();
         let previous_thread_id = self.thread_id;
-        if previous_thread_id != Some(session.thread_id) || self.cloud_picker_selection.is_some() {
+        if previous_thread_id != Some(session.thread_id) {
             self.dismiss_stale_model_picker();
         }
         let connector_scope_changed = previous_thread_id != Some(session.thread_id)
@@ -109,8 +109,8 @@ impl ChatWidget {
                 thread_id: session.thread_id,
             });
         }
-        self.realtime_conversation_available_for_thread =
-            codex_realtime_webrtc::RealtimeWebrtcSession::is_supported();
+        self.realtime_conversation_available_for_thread = session.model_provider_id != "web2codex"
+            && codex_realtime_webrtc::RealtimeWebrtcSession::is_supported();
         self.bottom_pane
             .set_voice_command_enabled(self.realtime_conversation_available_for_thread);
         self.bottom_pane
@@ -222,19 +222,6 @@ impl ChatWidget {
             .set_active_reasoning_effort_baseline(effort.as_ref());
         self.refresh_model_display();
         self.refresh_status_surfaces();
-        if previous_thread_id != self.thread_id
-            && self.should_prefetch_rate_limits()
-            && (self.current_model() == crate::model_catalog::LUNA_RESERVE_MODEL
-                || self.backend_banner_fallback().is_some())
-        {
-            // Reconcile this task with retained account state before sending its initial/queued
-            // prompt. Do not wait for the next usage poll after /new, /resume or a thread switch.
-            self.hold_rate_limit_recovery();
-            self.app_event_tx
-                .send(AppEvent::ApplyBackendBannerFallback {
-                    thread_id: session.thread_id,
-                });
-        }
         self.sync_service_tier_commands();
         self.sync_worktrees_enabled();
         self.sync_plugins_command_enabled();
@@ -394,7 +381,6 @@ impl ChatWidget {
         self.transcript.last_plan_progress = None;
         self.last_rendered_user_message_display = None;
         self.last_rendered_user_message_client_id = None;
-        self.clear_pending_rate_limit_reset_hint();
         self.set_token_info(/*info*/ None);
         self.bottom_pane.clear_pending_questions();
         self.bottom_pane.set_task_running(/*running*/ false);

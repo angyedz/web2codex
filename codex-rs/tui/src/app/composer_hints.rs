@@ -1,4 +1,4 @@
-//! Usage warnings appear above the fullscreen composer when no interaction takes priority.
+//! Optional composer hints appear above the fullscreen composer when useful.
 
 use super::*;
 use crate::terminal_hyperlinks::HyperlinkLine;
@@ -17,7 +17,8 @@ impl App {
         if width == 0 {
             return None;
         }
-        self.chat_widget.usage_notice(width).map(HyperlinkLine::new)
+        let _ = width;
+        None
     }
 }
 

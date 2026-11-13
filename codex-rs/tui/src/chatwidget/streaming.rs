@@ -81,7 +81,6 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::ConsolidateProposedPlan(source));
             }
-            self.request_pending_usage_output_insertion_after_stream_shutdown();
         }
     }
 
@@ -166,9 +165,7 @@ impl ChatWidget {
         if had_stream_controller && self.stream_controllers_idle() {
             self.app_event_tx.send(AppEvent::StopCommitAnimation);
         }
-        if had_stream_controller {
-            self.request_pending_usage_output_insertion_after_stream_shutdown();
-        }
+        if had_stream_controller {}
         if completed_message.is_some() {
             self.transcript.active_streamed_agent_message = None;
             self.transcript.last_flushed_agent_message = None;
@@ -400,7 +397,6 @@ impl ChatWidget {
         if should_restore_after_stream {
             self.status_state.pending_status_indicator_restore = true;
             self.maybe_restore_status_indicator_after_stream_idle();
-            self.request_pending_usage_output_insertion_after_stream_shutdown();
         }
     }
 
@@ -540,9 +536,6 @@ impl ChatWidget {
         if !from_replay && let Some(questions) = &item.questions {
             self.add_async_questions(&item.id, questions);
         }
-        if self.transcript.has_replayed_cloud_text(turn_id, &item.id) {
-            return;
-        }
         self.transcript.last_completed_agent_message = Some((turn_id.to_string(), item.id.clone()));
         let mut message = String::new();
         for content in &item.content {
@@ -588,13 +581,6 @@ impl ChatWidget {
                     .send(AppEvent::CorrectFlushedAgentMessage { item, cell });
             } else {
                 self.add_to_history(cell);
-            }
-            if self.transcript.recording_finished_cloud_text
-                && let Some(seen) = &mut self.transcript.replayed_cloud_text
-            {
-                seen.entry(turn_id.to_owned())
-                    .or_default()
-                    .insert(item.id.clone());
             }
             self.handle_stream_finished();
             self.request_redraw();

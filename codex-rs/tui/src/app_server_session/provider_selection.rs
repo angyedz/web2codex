@@ -29,7 +29,6 @@ impl AppServerSession {
     /// profile from disk before /new, so only invocation flags can pin its provider.
     pub(crate) fn client_provider_override_for_new_chats(&self, config: &Config) -> Option<String> {
         match self.thread_params_mode() {
-            ThreadParamsMode::Cloud => None,
             ThreadParamsMode::Remote => self.explicit_model_provider(config),
             ThreadParamsMode::Embedded => {
                 let launch_flag = self.model_provider_override.is_some()

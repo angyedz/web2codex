@@ -466,7 +466,6 @@ impl App {
                     /*session_start_source*/ None,
                     /*remote_cwd_override*/ None,
                     selected_profile.as_ref(),
-                    /*host_project_cwd*/ None,
                 )
                 .await
         };

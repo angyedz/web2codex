@@ -75,7 +75,6 @@ use serde::Serialize;
 use supports_color::Stream;
 
 mod background;
-mod desktop;
 mod disk;
 mod filesystem_paths;
 mod git;
@@ -91,10 +90,6 @@ mod title;
 mod updates;
 #[cfg(target_os = "windows")]
 mod windows_dev_drive;
-
-#[cfg(test)]
-#[path = "doctor/desktop_tests.rs"]
-mod desktop_tests;
 
 use background::background_server_check;
 use git::git_check;
@@ -410,9 +405,17 @@ async fn build_report(
                 filesystem_paths::check(config),
             )
             .await;
-            let auth_manager_result =
-                AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await;
-            let auth_manager = auth_manager_result.as_ref().ok().cloned();
+            let auth_manager_result = if config.model_provider_id == "web2codex" {
+                Ok(None)
+            } else {
+                AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
+                    .await
+                    .map(Some)
+            };
+            let auth_manager = auth_manager_result
+                .as_ref()
+                .ok()
+                .and_then(|manager| manager.clone());
             let reachability_plan = provider_reachability_plan(config);
             #[cfg(target_os = "macos")]
             let reachability_url = reachability_plan
@@ -565,17 +568,6 @@ async fn build_report(
                 reachability_check,
             ]);
         }
-    }
-
-    progress.begin("desktop");
-    if let Some(desktop) = desktop::collect().await {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        if let Some(application) = desktop.application.as_ref() {
-            updates::append_desktop_update(&mut checks, config_result.as_ref().ok(), application)
-                .await;
-        }
-        progress.finish("desktop", overall_status(&desktop.checks));
-        checks.extend(desktop.checks);
     }
 
     progress.settle();
@@ -1227,6 +1219,16 @@ fn config_toml_details(config: &Config, details: &mut Vec<String>) {
 }
 
 fn auth_check(config: &Config) -> DoctorCheck {
+    if config.model_provider_id == "web2codex" {
+        return DoctorCheck::new(
+            "auth.webview",
+            "auth",
+            CheckStatus::Ok,
+            "ChatGPT sign-in is handled by the private WebView",
+        )
+        .detail("Codex API keys and OAuth credentials are not used for model access.");
+    }
+
     let mut details = Vec::new();
     let auth_path = config.codex_home.join("auth.json");
     details.push(format!(
@@ -2670,13 +2672,17 @@ fn provider_reachability_plan(config: &Config) -> ReachabilityPlan {
             .map(|(name, value)| (name.clone(), value.as_str().to_owned()))
             .collect::<HashMap<_, _>>()
     });
-    let stored_auth = load_auth_dot_json(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-    )
-    .ok()
-    .flatten();
+    let stored_auth = (config.model_provider_id != "web2codex")
+        .then(|| {
+            load_auth_dot_json(
+                &config.codex_home,
+                config.cli_auth_credentials_store_mode,
+                config.auth_keyring_backend_kind(),
+            )
+            .ok()
+            .flatten()
+        })
+        .flatten();
     let mode = provider_auth_reachability_mode_from_auth(
         config.model_provider.requires_openai_auth,
         config.model_provider.env_key.as_deref(),
@@ -2699,13 +2705,13 @@ fn provider_reachability_plan(config: &Config) -> ReachabilityPlan {
 
 fn default_reachability_plan() -> ReachabilityPlan {
     provider_reachability_plan_from_parts(
-        ProviderAuthReachabilityMode::Chatgpt,
-        "openai",
-        "OpenAI",
+        ProviderAuthReachabilityMode::NotRequired,
+        "web2codex",
+        "Web2Codex",
         /*provider_base_url*/ None,
         /*provider_query_params*/ None,
         /*is_amazon_bedrock*/ false,
-        "https://chatgpt.com/backend-api/",
+        /*chatgpt_base_url*/ "",
     )
 }
 

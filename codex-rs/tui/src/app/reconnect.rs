@@ -43,9 +43,6 @@ pub(super) async fn reconnect(
     task_tools: ThreadToolTransport,
     presentation: ReconnectPresentation,
 ) -> Result<Reconnected> {
-    if matches!(target, AppServerTarget::Cloud) {
-        color_eyre::eyre::bail!("Reopen Codex to reconnect the cloud backend.");
-    }
     let mode = target.thread_params_mode();
     if matches!(target, AppServerTarget::Embedded) {
         color_eyre::eyre::bail!("in-process sessions have no connection to restore");
@@ -238,7 +235,6 @@ impl App {
                 pane.opening = None;
             }
             self.reconnect.offline = true;
-            self.account_email_request_id = None;
             // Cached blank sessions are usable only while this connection owns a subscription.
             self.agents_overview.blank_sessions.retain(|id, _| {
                 self.backend_registry
@@ -400,7 +396,6 @@ impl App {
         }
         self.agent_navigation.picker_refresh = None;
         self.last_subagent_backfill_attempt = None;
-        self.rate_limit_refresh_state.invalidate_recovery();
         session.worktree_source_config_builder = app_server.worktree_source_config_builder.clone();
         session.inherit_task_tool_capabilities(app_server);
         *app_server = session;
@@ -415,7 +410,7 @@ impl App {
             }
         }
         self.chat_widget.windows_sandbox_host = WindowsSandboxHost::Unknown;
-        self.chat_widget.requires_openai_auth = bootstrap.requires_openai_auth;
+        self.chat_widget.requires_openai_auth = false;
         let managed_daemon = self
             .chat_widget
             .remote_connection
@@ -602,19 +597,9 @@ impl App {
         }
         self.reconnect.offline = false;
         self.chat_widget.update_account_state(
-            bootstrap.status_account_display,
-            bootstrap.plan_type,
-            bootstrap.has_chatgpt_account,
-            matches!(bootstrap.auth_mode, Some(TelemetryAuthMode::Chatgpt)),
+            /*status_account_display*/ None, /*plan_type*/ None,
+            /*has_chatgpt_account*/ false, /*has_codex_backend_auth*/ false,
         );
-        if self.chat_widget.has_chatgpt_account() {
-            crate::security_setup::prefetch(
-                &self.config,
-                app_server,
-                self.app_event_tx.clone(),
-                self.chat_widget.security_setup_request_id,
-            );
-        }
         self.feedback_audience = bootstrap.feedback_audience;
         if displayed.is_some_and(|id| !self.thread_unavailable(id)) {
             self.chat_widget.maybe_send_next_queued_input();

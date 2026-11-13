@@ -3,7 +3,7 @@
 //! This is the single app-server submission path for both new user turns and steering.
 
 use super::*;
-use crate::app_command::CloudSubmissionIntent;
+use crate::app_command::UserSubmissionIntent;
 use crate::app_server_session::UnsupportedLegacyPermissionProfile;
 use crate::app_server_session::user_message_submission::TurnStartSettings;
 use crate::app_server_session::user_message_submission::UserMessageAdmission;
@@ -17,7 +17,7 @@ pub(super) async fn try_submit_user_turn(
 ) -> Result<bool> {
     let AppCommand::UserTurn {
         turn_trigger,
-        cloud_submission,
+        submission_intent,
         client_user_message_id,
         ..
     } = op
@@ -25,24 +25,9 @@ pub(super) async fn try_submit_user_turn(
         return Ok(false);
     };
     let intent = if *turn_trigger == "user" {
-        match (*cloud_submission, app_server.thread_params_mode()) {
-            (
-                CloudSubmissionIntent::QuestionAnswer { during_turn },
-                crate::ThreadParamsMode::Cloud,
-            ) => {
-                if during_turn {
-                    CloudSubmissionIntent::StartOrSteer
-                } else {
-                    CloudSubmissionIntent::StartIfIdle
-                }
-            }
-            (CloudSubmissionIntent::QuestionAnswer { .. }, _) => {
-                CloudSubmissionIntent::UseKnownTurn
-            }
-            (intent, _) => intent,
-        }
+        *submission_intent
     } else {
-        CloudSubmissionIntent::UseKnownTurn
+        UserSubmissionIntent::UseKnownTurn
     };
     let original_active = app.active_turn_id_for_thread(thread_id).await;
     let mut active = original_active.clone();
@@ -81,7 +66,7 @@ pub(super) async fn try_submit_user_turn(
         }
     }
 
-    let ordinary = intent != CloudSubmissionIntent::UseKnownTurn;
+    let ordinary = intent != UserSubmissionIntent::UseKnownTurn;
     if let Err(UserMessageSubmissionFailure::Unhandled(error)) = result {
         return Err(error);
     }
@@ -93,10 +78,7 @@ pub(super) async fn try_submit_user_turn(
     }
 
     match result {
-        Ok((admission, selection)) => {
-            if selection.is_some() {
-                app.chat_widget.cloud_picker_selection = selection;
-            }
+        Ok(admission) => {
             if !matches!(&admission, UserMessageAdmission::Queued(_)) {
                 crate::startup_recovery::acknowledged(client_user_message_id);
             }
@@ -129,13 +111,8 @@ pub(super) async fn try_submit_user_turn(
             app.chat_widget
                 .hold_unconfirmed_user_message(client_user_message_id);
             if !reconnect || !app.recover_transport_error(&error) {
-                let label = if reconnect {
-                    "Submission"
-                } else {
-                    "Cloud submission"
-                };
                 app.chat_widget
-                    .add_error_message(format!("{label} could not be confirmed: {error}"));
+                    .add_error_message(format!("Submission could not be confirmed: {error}"));
             }
         }
         Err(UserMessageSubmissionFailure::Unhandled(_)) => unreachable!("returned above"),

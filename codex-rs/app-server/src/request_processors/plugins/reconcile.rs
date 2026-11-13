@@ -19,6 +19,9 @@ impl PluginRequestProcessor {
         request_serialization_queues: &RequestSerializationQueues,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        if config.model_provider_id == "web2codex" {
+            return Ok(Some(PluginReconcileResponse::default().into()));
+        }
         let plugins_input = config.plugins_config_input();
         let auth = self.auth_manager.auth().await;
         if !plugins_input.plugins_enabled

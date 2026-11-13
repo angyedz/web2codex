@@ -7,7 +7,7 @@
   - Installs helpful CLIs used by the repo: git, ripgrep (rg), just, cmake
   - Installs cargo-insta (for snapshot tests) via cargo
   - Ensures PATH contains Cargo bin for the current session
-  - Builds the workspace (cargo build)
+  - Builds the Web2Codex CLI and its private browser
 
   Usage:
     - Right-click PowerShell and "Run as Administrator" (VS Build Tools require elevation)
@@ -231,13 +231,13 @@ if ($SkipBuild) {
   exit 0
 }
 
-Write-Host "==> Building workspace (cargo build)" -ForegroundColor Cyan
+Write-Host "==> Building Web2Codex and its private browser" -ForegroundColor Cyan
 pushd "$PSScriptRoot\.." | Out-Null
 try {
   # Clear RUSTFLAGS if coming from constrained environments
   $env:RUSTFLAGS = ''
   Enter-VsDevShell
-  & cargo build
+  & cargo build -p codex-cli --bin web2codex -p codex-web-browser --bin codex-web-browser
 }
 finally {
   popd | Out-Null

@@ -49,13 +49,13 @@ async fn reconnect_queues_enter_and_resumes_ordinary_next_turn_submission() {
                 sequence.push("prompt")
             }
             AppEvent::CodexOp(AppCommand::UserTurn {
-                cloud_submission,
+                submission_intent,
                 items,
                 ..
             }) => {
                 assert_eq!(
-                    cloud_submission,
-                    crate::app_command::CloudSubmissionIntent::StartIfIdle
+                    submission_intent,
+                    crate::app_command::UserSubmissionIntent::StartIfIdle
                 );
                 assert_eq!(
                     items,

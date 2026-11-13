@@ -1487,6 +1487,11 @@ async fn prepare_realtime_start(
         .auth_manager()
         .unwrap_or_else(|| Arc::clone(&sess.services.auth_manager));
     let config = sess.get_config().await;
+    if config.model_provider_id == "web2codex" {
+        return Err(CodexErr::InvalidRequest(
+            "realtime voice is unavailable with the Web2Codex browser provider".to_string(),
+        ));
+    }
     let auth_context = codex_model_provider::ProviderAuthContext {
         credentials: Arc::clone(&auth_manager),
         runtime_auth: if config.features.enabled(Feature::RuntimeAgentInstances) {

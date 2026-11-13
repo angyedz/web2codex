@@ -95,15 +95,13 @@ impl Serialize for RealtimeSpeechText {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub(crate) enum CloudSubmissionIntent {
+pub(crate) enum UserSubmissionIntent {
     /// Use the TUI's known turn for explicit operations such as safety retries.
     UseKnownTurn,
     /// Enter lets the server choose whether to start or steer the current turn.
     StartOrSteer,
     /// A message leaving the local queue starts a fresh turn.
     StartIfIdle,
-    /// Use Cloud admission for answers, with steering enabled during a running turn.
-    QuestionAnswer { during_turn: bool },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -130,7 +128,7 @@ pub(crate) enum AppCommand {
     },
     UserTurn {
         turn_trigger: &'static str,
-        cloud_submission: CloudSubmissionIntent,
+        submission_intent: UserSubmissionIntent,
         client_user_message_id: String,
         items: Vec<UserInput>,
         cwd: PathBuf,
@@ -239,7 +237,7 @@ impl AppCommand {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn user_turn(
         turn_trigger: &'static str,
-        cloud_submission: CloudSubmissionIntent,
+        submission_intent: UserSubmissionIntent,
         client_user_message_id: String,
         items: Vec<UserInput>,
         cwd: PathBuf,
@@ -254,7 +252,7 @@ impl AppCommand {
     ) -> Self {
         Self::UserTurn {
             turn_trigger,
-            cloud_submission,
+            submission_intent,
             client_user_message_id,
             items,
             cwd,

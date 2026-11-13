@@ -3,7 +3,7 @@ source: cli/src/main.rs
 assertion_line: 3324
 expression: "errors.join(\"\\n\")"
 ---
-codex --worktree login: `--worktree` supports new interactive sessions, `codex fork`, `codex exec`, and `codex exec fork`
+codex delete --worktree session: `--worktree` supports new interactive sessions, `codex fork`, `codex exec`, and `codex exec fork`
 codex fork --worktree: `codex fork --worktree` requires an explicit session ID
 codex fork --worktree --last: `codex fork --worktree` requires an explicit session ID
 codex exec resume --worktree session: `--worktree` cannot resume an existing session; use `codex exec fork --worktree`

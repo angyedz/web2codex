@@ -538,21 +538,7 @@ impl ChatWidget {
             }
             SlashCommand::Daemon => self.app_event_tx.send(AppEvent::OpenDaemonMenu),
             SlashCommand::Warnings => self.app_event_tx.send(AppEvent::OpenWarnings),
-            SlashCommand::Status => {
-                if self.should_prefetch_rate_limits() {
-                    let request_id = self.next_status_refresh_request_id;
-                    self.next_status_refresh_request_id =
-                        self.next_status_refresh_request_id.wrapping_add(1);
-                    self.add_status_output(/*refreshing_rate_limits*/ true, Some(request_id));
-                    self.app_event_tx.send(AppEvent::RefreshRateLimits {
-                        origin: RateLimitRefreshOrigin::StatusCommand { request_id },
-                    });
-                } else {
-                    self.add_status_output(
-                        /*refreshing_rate_limits*/ false, /*request_id*/ None,
-                    );
-                }
-            }
+            SlashCommand::Status => self.add_status_output(),
             SlashCommand::Cd => {
                 self.dispatch_command_with_args(SlashCommand::Cd, "~".to_string(), Vec::new());
             }
@@ -836,7 +822,7 @@ impl ChatWidget {
             SlashCommand::Pwd => {
                 self.add_error_message("Usage: /pwd".to_string());
             }
-            SlashCommand::Usage => match crate::analytics::TokenActivityView::parse(trimmed) {
+            SlashCommand::Usage => match local_usage::UsagePeriod::parse(trimmed) {
                 Some(view) => self
                     .app_event_tx
                     .send(AppEvent::OpenUsageStatistics { view: Some(view) }),
@@ -862,6 +848,11 @@ impl ChatWidget {
             SlashCommand::Mcp => {
                 if trimmed.eq_ignore_ascii_case("verbose") {
                     self.add_mcp_output(McpServerStatusDetail::Full);
+                } else if matches!(
+                    trimmed.to_ascii_lowercase().as_str(),
+                    "tunnel" | "tunnel setup" | "tunnel configure"
+                ) {
+                    self.app_event_tx.send(AppEvent::OpenMcpTunnelSetup);
                 } else if let Some((command, name)) = trimmed.split_once(' ')
                     && command.eq_ignore_ascii_case("login")
                     && !name.trim().is_empty()
@@ -877,7 +868,9 @@ impl ChatWidget {
                         );
                     }
                 } else {
-                    self.add_error_message("Usage: /mcp [verbose | login <name>]".to_string());
+                    self.add_error_message(
+                        "Usage: /mcp [verbose | login <name> | tunnel]".to_string(),
+                    );
                 }
             }
             SlashCommand::Keymap => match trimmed.to_ascii_lowercase().as_str() {
@@ -1259,7 +1252,7 @@ impl ChatWidget {
             collaboration_modes_enabled: self.collaboration_modes_enabled(),
             connectors_enabled: self.connectors_enabled(),
             plugins_command_enabled: self.config.features.enabled(Feature::Plugins),
-            token_activity_command_enabled: self.has_codex_backend_auth,
+            usage_command_enabled: true,
             goal_command_enabled: self.config.features.enabled(Feature::Goals),
             service_tier_commands_enabled: !self.current_model_service_tier_commands().is_empty(),
             daybreak_command_description: self.daybreak_command_description(),

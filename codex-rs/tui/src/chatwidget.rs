@@ -78,8 +78,6 @@ use crate::text_formatting::proper_join;
 use crate::token_usage::TokenUsage;
 use crate::token_usage::TokenUsageInfo;
 use crate::version::CODEX_CLI_VERSION;
-use codex_app_server_protocol::AddCreditsNudgeCreditType;
-use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
 use codex_app_server_protocol::CollabAgentTool;
@@ -191,7 +189,6 @@ fn normalize_thread_name(name: &str) -> Option<String> {
 use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
 use crate::app_event::PermissionProfileSelection;
-use crate::app_event::RateLimitRefreshOrigin;
 use crate::app_event_sender::AppEventSender;
 use crate::auto_review_denials;
 use crate::auto_review_denials::RecentAutoReviewDenials;
@@ -326,6 +323,7 @@ use self::plugins::PluginListFetchState;
 use self::plugins::PluginsCacheState;
 mod plan_implementation;
 use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
+pub(crate) mod local_usage;
 mod model_command;
 mod model_popup_state;
 mod model_popups;
@@ -342,9 +340,7 @@ pub(crate) use self::permissions_menu::auto_review_available;
 pub(crate) use self::permissions_menu::cyber_model_approval_reviewer;
 mod backend_banners;
 mod compaction;
-mod luna_reserve_model;
 mod luna_reserve_return;
-mod security_setup;
 pub(crate) use backend_banners::AutomaticModelSwitchReason;
 mod protocol;
 pub(crate) use protocol::final_agent_message;
@@ -359,7 +355,6 @@ use self::rate_limits::app_server_rate_limit_error_kind;
 pub(crate) use self::rate_limits::fallback_limit_label;
 use self::rate_limits::is_app_server_cyber_policy_error;
 mod recap;
-mod reset_credits;
 pub(crate) use self::rate_limits::limit_label_for_window;
 mod completion;
 mod realtime;
@@ -413,7 +408,6 @@ use self::transcript::TranscriptState;
 mod turn_lifecycle;
 mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;
-mod usage;
 mod user_messages;
 mod working_directory;
 use self::user_messages::MessageDelivery;
@@ -550,8 +544,6 @@ pub(crate) struct ChatWidget {
     has_codex_backend_auth: bool,
     model_catalog: Arc<ModelCatalog>,
     model_popup_request_id: Option<uuid::Uuid>,
-    pub(crate) cloud_picker_selection:
-        Option<crate::app_server_session::user_message_submission::CloudModelSelection>,
     /// An app event has been queued to open the permissions picker, but no view exists yet.
     pub(crate) permission_popup_pending: bool,
     permission_popup_request_id: Option<uuid::Uuid>,
@@ -579,15 +571,6 @@ pub(crate) struct ChatWidget {
     token_usage_pending: bool,
     // Status and polling use account usage reads; response streams may identify meters differently.
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
-    refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,
-    next_status_refresh_request_id: u64,
-    pending_rate_limit_reset_request_id: Option<u64>,
-    pending_rate_limit_reset_idempotency_key: Option<String>,
-    rate_limit_reset_picker_request_id: Option<u64>,
-    pending_rate_limit_reset_hint_request_id: Option<u64>,
-    pending_rate_limit_reset_hint: Option<PlainHistoryCell>,
-    available_rate_limit_reset_credits: Option<i64>,
-    next_rate_limit_reset_request_id: u64,
     plan_type: Option<PlanType>,
     codex_rate_limit_reached_type: Option<RateLimitReachedType>,
     codex_spend_control_reached: Option<bool>,
@@ -595,10 +578,6 @@ pub(crate) struct ChatWidget {
     clock_format: crate::clock_format::ClockFormat,
     usage_notice_state: usage_notice::UsageNoticeState,
     backend_banner_state: backend_banners::BackendBannerState,
-    pub(crate) security_setup_request_id: uuid::Uuid,
-    security_setup_presented: bool,
-    security_setup_identity: Option<crate::security_setup::Identity>,
-    security_setup_dismissed: bool,
     automatic_model_switch_state: backend_banners::AutomaticModelSwitchState,
     backend_banner_notice_model: Option<String>,
     // Remember the account's Reserve entry notice across chats and transient banner refreshes.
@@ -607,7 +586,6 @@ pub(crate) struct ChatWidget {
     pub(crate) composer_images: Option<crate::transcript_image::composer::ComposerImages>,
     pub(crate) rendered_selection: std::cell::RefCell<crate::rendered_selection::RenderedSelection>,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
-    add_credits_nudge_email_in_flight: Option<rate_limits::PendingCreditsNudge>,
     adaptive_chunking: AdaptiveChunkingPolicy,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
@@ -999,7 +977,6 @@ impl ChatWidget {
     pub(crate) fn open_feedback(&mut self, mode: crate::ThreadParamsMode) {
         use crate::ThreadParamsMode;
         let unavailable = match mode {
-            ThreadParamsMode::Cloud => "Feedback is unavailable in Cloud threads.",
             ThreadParamsMode::Remote if !self.config.feedback_enabled => {
                 "Feedback uploads are disabled, and saving a ZIP requires a local app server."
             }
@@ -1248,7 +1225,6 @@ impl ChatWidget {
     fn flush_active_cell(&mut self) {
         if let Some(active) = self.transcript.take_active_cell() {
             self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
-            self.request_pending_usage_output_insertion();
         }
     }
 
@@ -1280,7 +1256,6 @@ impl ChatWidget {
         };
         if let Some(active) = self.take_history_insertion_prefix(cell.as_ref()) {
             self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
-            self.request_pending_usage_output_insertion();
         }
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
     }
@@ -1498,7 +1473,6 @@ impl ChatWidget {
                 computer.mark_failed();
             }
             self.add_boxed_history(cell);
-            self.request_pending_usage_output_insertion();
         }
     }
 
@@ -2043,7 +2017,6 @@ impl ChatWidget {
     pub(crate) fn active_cell_transcript_key(&self) -> Option<ActiveCellTranscriptKey> {
         let cell = self.transcript.active_cell.as_ref();
         let mut realtime_cells = self.realtime_conversation.live_transcript_cells();
-        let rate_limit_reset_hint = self.pending_rate_limit_reset_hint();
         if cell.is_none()
             && self
                 .realtime_conversation
@@ -2051,14 +2024,10 @@ impl ChatWidget {
                 .next()
                 .is_none()
             && self.realtime_conversation.pending_history_cells.is_empty()
-            && rate_limit_reset_hint.is_none()
         {
             return None;
         }
-        let live_sources: [Option<&dyn HistoryCell>; 2] = [
-            cell.map(AsRef::as_ref),
-            rate_limit_reset_hint.map(|cell| cell as &dyn HistoryCell),
-        ];
+        let live_sources: [Option<&dyn HistoryCell>; 1] = [cell.map(AsRef::as_ref)];
         Some(ActiveCellTranscriptKey {
             cacheable: live_sources
                 .into_iter()
@@ -2149,7 +2118,6 @@ impl Drop for ChatWidget {
                 .send(AppEvent::StopRealtimeConversation { thread_id });
         }
         self.reset_realtime_conversation();
-        self.stop_rate_limit_poller();
     }
 }
 

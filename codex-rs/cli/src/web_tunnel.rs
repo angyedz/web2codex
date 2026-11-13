@@ -1,4 +1,4 @@
-//! Background runtime for the Codex Web MCP connector.
+//! Background runtime for the Web2Codex MCP connector.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
@@ -217,8 +217,9 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
                 let _ = force_terminate_tunnel_process(pid);
                 let _ = child.wait();
                 return Err(match remove_runtime_state(&paths) {
-                    Ok(()) => error.context("failed to remove the temporary tunnel API key file"),
-                    Err(cleanup_error) => error.context(format!(
+                    Ok(()) => anyhow::Error::new(error)
+                        .context("failed to remove the temporary tunnel API key file"),
+                    Err(cleanup_error) => anyhow::Error::new(error).context(format!(
                         "failed to remove the temporary tunnel API key file; cleanup also failed: {cleanup_error:#}"
                     )),
                 });
@@ -842,7 +843,7 @@ fn health_response(base_url: &str, endpoint: &str) -> Option<(u16, Vec<u8>)> {
 fn install_tunnel_client() -> anyhow::Result<PathBuf> {
     let (os, arch) = target_asset_parts()?;
     let client = Client::builder()
-        .user_agent(concat!("codex-web/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("web2codex/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(90))
         .build()
         .context("failed to initialize the tunnel-client downloader")?;

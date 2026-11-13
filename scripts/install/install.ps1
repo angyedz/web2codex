@@ -12,19 +12,10 @@ if ([string]::IsNullOrWhiteSpace($Release)) {
 }
 
 $NonInteractive = $env:CODEX_NON_INTERACTIVE -match "^(?i:1|true|yes)$"
-$DefaultPreferReleasesOpenAICom = $true
-$PreferReleasesOpenAICom = if ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM)) {
-    $DefaultPreferReleasesOpenAICom
-} else {
-    $env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM -match "^(?i:1|true|yes)$"
-}
-$ReleasesBaseUri = "https://releases.openai.com/codex"
-$GitHubRepository = if ([string]::IsNullOrWhiteSpace($env:CODEX_GITHUB_REPOSITORY)) { "openai/codex" } else { $env:CODEX_GITHUB_REPOSITORY }
-$GitHubTagPrefix = if ([string]::IsNullOrWhiteSpace($env:CODEX_GITHUB_TAG_PREFIX)) { "rust-v" } else { $env:CODEX_GITHUB_TAG_PREFIX }
+$GitHubRepository = if ([string]::IsNullOrWhiteSpace($env:CODEX_GITHUB_REPOSITORY)) { "angyedz/web2codex" } else { $env:CODEX_GITHUB_REPOSITORY }
+$GitHubTagPrefix = if ([string]::IsNullOrWhiteSpace($env:CODEX_GITHUB_TAG_PREFIX)) { "codex-web-v" } else { $env:CODEX_GITHUB_TAG_PREFIX }
 $CommandName = if ([string]::IsNullOrWhiteSpace($env:CODEX_COMMAND_NAME)) { "web2codex" } else { $env:CODEX_COMMAND_NAME }
 if ($CommandName -cnotmatch '^[A-Za-z0-9_-]+$') { throw "Invalid command name: $CommandName" }
-$ReleasesMetadataTimeoutSec = 30
-$ReleasesAssetTimeoutSec = 300
 
 function Write-Step {
     param(
@@ -68,10 +59,6 @@ function Normalize-Version {
         return "latest"
     }
 
-    if ($RawVersion.StartsWith("rust-v")) {
-        return $RawVersion.Substring(6)
-    }
-
     if ($RawVersion.StartsWith("codex-web-v")) {
         return $RawVersion.Substring(11)
     }
@@ -89,16 +76,14 @@ function Assert-ValidReleaseVersion {
     )
 
     if ($Version -cne "latest" -and $Version -cnotmatch "^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$") {
-        throw "Invalid Codex release version: $Version. Expected latest or a semantic version."
+        throw "Invalid Web2Codex release version: $Version. Expected latest or a semantic version."
     }
 }
 
 function Find-ReleaseAssetMetadata {
     param(
         [string]$AssetName,
-        [object]$ReleaseMetadata,
-        [string]$Url = $null,
-        [string]$FallbackUrl = $null
+        [object]$ReleaseMetadata
     )
 
     $asset = $ReleaseMetadata.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
@@ -112,54 +97,23 @@ function Find-ReleaseAssetMetadata {
     }
 
     return [PSCustomObject]@{
-        Url = if ([string]::IsNullOrWhiteSpace($Url)) { $asset.browser_download_url } else { $Url }
-        FallbackUrl = $FallbackUrl
+        Url = $asset.browser_download_url
         Sha256 = $digestMatch.Groups[1].Value.ToLowerInvariant()
     }
 }
 
-function Invoke-WebRequestWithFallback {
+function Invoke-VerifiedGithubReleaseAsset {
     param(
         [object]$Metadata,
         [string]$OutFile,
         [string]$ExpectedDigest,
-        [string]$AssetName,
-        [string]$ReleaseVersion,
         [string]$RequiredManifestAsset
     )
 
-    try {
-        if ($Metadata.Url.StartsWith("$ReleasesBaseUri/", [System.StringComparison]::OrdinalIgnoreCase)) {
-            Invoke-WebRequest -UseBasicParsing -Uri $Metadata.Url -OutFile $OutFile -TimeoutSec $ReleasesAssetTimeoutSec
-        } else {
-            Invoke-WebRequest -UseBasicParsing -Uri $Metadata.Url -OutFile $OutFile
-        }
-        Test-ArchiveDigest -ArchivePath $OutFile -ExpectedDigest $ExpectedDigest
-        if (-not [string]::IsNullOrWhiteSpace($RequiredManifestAsset)) {
-            $null = Get-PackageArchiveDigest -ManifestPath $OutFile -AssetName $RequiredManifestAsset
-        }
-    } catch {
-        if ([string]::IsNullOrWhiteSpace($Metadata.FallbackUrl)) {
-            throw
-        }
-        Write-WarningStep "Could not download or verify $($Metadata.Url); retrying from GitHub Releases."
-        Invoke-WebRequest -UseBasicParsing -Uri $Metadata.FallbackUrl -OutFile $OutFile
-        try {
-            Test-ArchiveDigest -ArchivePath $OutFile -ExpectedDigest $ExpectedDigest
-            if (-not [string]::IsNullOrWhiteSpace($RequiredManifestAsset)) {
-                $null = Get-PackageArchiveDigest -ManifestPath $OutFile -AssetName $RequiredManifestAsset
-            }
-        } catch {
-            $githubRelease = Resolve-ReleaseFromGitHub -NormalizedVersion $ReleaseVersion
-            $githubAssetMetadata = Find-ReleaseAssetMetadata -AssetName $AssetName -ReleaseMetadata $githubRelease.Metadata
-            if ($null -eq $githubAssetMetadata) {
-                throw "Could not find GitHub release metadata for asset $AssetName."
-            }
-            Test-ArchiveDigest -ArchivePath $OutFile -ExpectedDigest $githubAssetMetadata.Sha256
-            if (-not [string]::IsNullOrWhiteSpace($RequiredManifestAsset)) {
-                $null = Get-PackageArchiveDigest -ManifestPath $OutFile -AssetName $RequiredManifestAsset
-            }
-        }
+    Invoke-WebRequest -UseBasicParsing -Uri $Metadata.Url -OutFile $OutFile
+    Test-ArchiveDigest -ArchivePath $OutFile -ExpectedDigest $ExpectedDigest
+    if (-not [string]::IsNullOrWhiteSpace($RequiredManifestAsset)) {
+        $null = Get-PackageArchiveDigest -ManifestPath $OutFile -AssetName $RequiredManifestAsset
     }
 }
 
@@ -174,19 +128,8 @@ function Resolve-ReleaseAssetSelection {
     $releaseMetadata = $ResolvedRelease.Metadata
     $packageAsset = "codex-package-$Target.tar.gz"
     $checksumAsset = "codex-package_SHA256SUMS"
-    $packageUrl = $null
-    $packageFallbackUrl = $null
-    $checksumUrl = $null
-    $checksumFallbackUrl = $null
-    if ($ResolvedRelease.Source -eq "ReleasesOpenAICom") {
-        $packageUrl = "$ReleasesBaseUri/releases/$version/$packageAsset"
-        $packageFallbackUrl = "https://github.com/$GitHubRepository/releases/download/$GitHubTagPrefix$version/$packageAsset"
-        $checksumUrl = "$ReleasesBaseUri/releases/$version/$checksumAsset"
-        $checksumFallbackUrl = "https://github.com/$GitHubRepository/releases/download/$GitHubTagPrefix$version/$checksumAsset"
-    }
-
-    $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata -Url $packageUrl -FallbackUrl $packageFallbackUrl
-    $checksumMetadata = Find-ReleaseAssetMetadata -AssetName $checksumAsset -ReleaseMetadata $releaseMetadata -Url $checksumUrl -FallbackUrl $checksumFallbackUrl
+    $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata
+    $checksumMetadata = Find-ReleaseAssetMetadata -AssetName $checksumAsset -ReleaseMetadata $releaseMetadata
     if ($null -ne $packageMetadata -and $null -ne $checksumMetadata) {
         return [PSCustomObject]@{
             PackageAsset = $packageAsset
@@ -197,13 +140,7 @@ function Resolve-ReleaseAssetSelection {
     }
 
     $packageAsset = "codex-npm-$NpmTag-$version.tgz"
-    $packageUrl = $null
-    $packageFallbackUrl = $null
-    if ($ResolvedRelease.Source -eq "ReleasesOpenAICom") {
-        $packageUrl = "$ReleasesBaseUri/releases/$version/$packageAsset"
-        $packageFallbackUrl = "https://github.com/$GitHubRepository/releases/download/$GitHubTagPrefix$version/$packageAsset"
-    }
-    $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata -Url $packageUrl -FallbackUrl $packageFallbackUrl
+    $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata
     if ($null -eq $packageMetadata) {
         throw "Could not find Codex package or platform npm release assets for Codex $version."
     }
@@ -333,6 +270,123 @@ function Remove-StaleInstallArtifacts {
     }
 }
 
+function Remove-OldStandaloneReleases {
+    param(
+        [string]$ReleasesDir,
+        [string]$SelectedReleaseDir
+    )
+
+    try {
+        # Pruning is only safe in the installer's ordinary, local Web2Codex tree.
+        $guardPaths = @(
+            $codexHome,
+            (Join-Path $codexHome "packages"),
+            $standaloneRoot,
+            $ReleasesDir
+        )
+        foreach ($path in $guardPaths) {
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                return
+            }
+        }
+
+        $resolvedReleases = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $ReleasesDir -ErrorAction Stop).Path).TrimEnd('\')
+        $resolvedRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $standaloneRoot -ErrorAction Stop).Path).TrimEnd('\')
+        if (-not $resolvedReleases.Equals((Join-Path $resolvedRoot "releases"), [StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+        $driveRoot = [IO.Path]::GetPathRoot($resolvedReleases)
+        if ([IO.DriveInfo]::new($driveRoot).DriveType -ne [IO.DriveType]::Fixed) {
+            return
+        }
+
+        $selected = [CodexInstaller.JunctionV3]::ResolveDirectory($SelectedReleaseDir).TrimEnd('\')
+        if (-not $selected.StartsWith("$resolvedReleases\", [StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+        $selectedItem = Get-Item -LiteralPath $selected -Force -ErrorAction Stop
+        if (-not $selectedItem.PSIsContainer -or ($selectedItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            return
+        }
+
+        $processNames = @(
+            $CommandName,
+            "codex",
+            "codex-code-mode-host",
+            "codex-exec-server",
+            "codex-command-runner",
+            "codex-windows-sandbox-setup",
+            "codex-web-browser",
+            "rg"
+        )
+        $runningPackagePaths = [System.Collections.Generic.List[string]]::new()
+        foreach ($process in Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) {
+            $processName = [IO.Path]::GetFileNameWithoutExtension([string]$process.Name)
+            if ($processNames -notcontains $processName) { continue }
+            if ([string]::IsNullOrWhiteSpace([string]$process.ExecutablePath)) {
+                return
+            }
+            $processPath = [IO.Path]::GetFullPath([string]$process.ExecutablePath)
+            $visiblePrefix = "$([IO.Path]::GetFullPath($visibleBinDir).TrimEnd('\'))\"
+            $currentPrefix = "$([IO.Path]::GetFullPath($currentDir).TrimEnd('\'))\"
+            if ($processPath.StartsWith($visiblePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+                $processPath.StartsWith($currentPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                # Windows may preserve the stable junction path in process metadata.
+                return
+            }
+            $runningPackagePaths.Add($processPath)
+        }
+
+        foreach ($candidate in Get-ChildItem -LiteralPath $resolvedReleases -Force -Directory -ErrorAction Stop) {
+            if ($candidate.FullName.TrimEnd('\').Equals($selected, [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            if ($candidate.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+
+            $manifestPath = Join-Path $candidate.FullName "codex-package.json"
+            $manifestItem = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+            if ($null -eq $manifestItem -or $manifestItem.PSIsContainer -or
+                ($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+
+            try {
+                $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $version = [string]$manifest.version
+                $releaseTarget = [string]$manifest.target
+                if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' -or
+                    $releaseTarget -notin @("aarch64-pc-windows-msvc", "x86_64-pc-windows-msvc") -or
+                    $candidate.Name -cne "$version-$releaseTarget" -or
+                    [string]$manifest.entrypoint -cne "bin/$CommandName.exe") { continue }
+
+                $entrypoint = Join-Path $candidate.FullName "bin\$CommandName.exe"
+                if ((Get-VersionFromBinary -CodexPath $entrypoint) -cne $version) { continue }
+
+                $treeIsOrdinary = $true
+                foreach ($child in Get-ChildItem -LiteralPath $candidate.FullName -Force -Recurse -ErrorAction Stop) {
+                    if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                        $treeIsOrdinary = $false
+                        break
+                    }
+                }
+                if (-not $treeIsOrdinary) { continue }
+
+                $candidateRoot = "$($candidate.FullName.TrimEnd('\'))\"
+                if ($runningPackagePaths | Where-Object { $_.StartsWith($candidateRoot, [StringComparison]::OrdinalIgnoreCase) }) {
+                    continue
+                }
+
+                Remove-Item -LiteralPath $candidate.FullName -Recurse -Force -ErrorAction Stop
+                Write-Step "Removed unused Web2Codex release $version ($releaseTarget)."
+            } catch {
+                # A locked, unreadable, or modified release is retained.
+                continue
+            }
+        }
+    } catch {
+        Write-WarningStep "Could not safely inspect old Web2Codex releases; skipped cleanup."
+    }
+}
+
 function Resolve-VersionFromReleaseMetadata {
     param(
         [object]$ReleaseMetadata
@@ -378,47 +432,9 @@ function Resolve-ReleaseFromGitHub {
     }
 }
 
-function Resolve-ReleaseFromReleases {
-    param(
-        [string]$NormalizedVersion
-    )
-
-    $metadataUri = if ($NormalizedVersion -eq "latest") {
-        "$ReleasesBaseUri/channels/latest"
-    } else {
-        "$ReleasesBaseUri/releases/$NormalizedVersion/release.json"
-    }
-    try {
-        $metadataResponse = Invoke-WebRequest -UseBasicParsing -Uri $metadataUri -TimeoutSec $ReleasesMetadataTimeoutSec
-        $releaseMetadata = [string]$metadataResponse.Content | ConvertFrom-Json -ErrorAction Stop
-        $resolvedVersion = Resolve-VersionFromReleaseMetadata -ReleaseMetadata $releaseMetadata
-        if ($NormalizedVersion -ne "latest" -and $resolvedVersion -cne $NormalizedVersion) {
-            throw "Release metadata version did not match requested Codex version $NormalizedVersion."
-        }
-        $resolvedRelease = [PSCustomObject]@{
-            Version = $resolvedVersion
-            Metadata = $releaseMetadata
-            Source = "ReleasesOpenAICom"
-        }
-        $null = Resolve-ReleaseAssetSelection -ResolvedRelease $resolvedRelease -Target $target -NpmTag $npmTag
-    } catch {
-        return $null
-    }
-    return $resolvedRelease
-}
-
 function Resolve-Release {
     $normalizedVersion = Normalize-Version -RawVersion $Release
     Assert-ValidReleaseVersion -Version $normalizedVersion
-
-    if ($PreferReleasesOpenAICom) {
-        $release = Resolve-ReleaseFromReleases -NormalizedVersion $normalizedVersion
-        if ($null -ne $release) {
-            return $release
-        }
-        Write-WarningStep "releases.openai.com is unavailable; falling back to GitHub Releases."
-    }
-
     return Resolve-ReleaseFromGitHub -NormalizedVersion $normalizedVersion
 }
 
@@ -928,23 +944,7 @@ function Maybe-HandleConflictingInstall {
 
     $manager = $Conflict.Manager
 
-    $uninstallArgs = if ($manager -eq "bun") {
-        @("remove", "-g", "@openai/codex")
-    } else {
-        @("uninstall", "-g", "@openai/codex")
-    }
-    $uninstallCommand = if ($manager -eq "bun") { "bun" } else { "npm" }
-
-    if (Prompt-YesNo "Uninstall the existing $manager-managed Codex now?") {
-        Write-Step "Running: $uninstallCommand $($uninstallArgs -join ' ')"
-        try {
-            & $uninstallCommand @uninstallArgs
-        } catch {
-            Write-WarningStep "Failed to uninstall the existing $manager-managed Codex. Continuing with the standalone install."
-        }
-    } else {
-        Write-WarningStep "Leaving the existing $manager-managed Codex installed. PATH order will determine which codex runs."
-    }
+    Write-WarningStep "Leaving the existing $manager-managed Codex untouched. Remove it yourself if it conflicts with Web2Codex on PATH."
 }
 
 function Test-VisibleCodexCommand {
@@ -990,10 +990,12 @@ switch ($architecture) {
     }
 }
 
-$codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-    Join-Path $env:USERPROFILE ".codex"
-} else {
+$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:WEB2CODEX_HOME)) {
+    $env:WEB2CODEX_HOME
+} elseif (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
     $env:CODEX_HOME
+} else {
+    Join-Path $env:USERPROFILE ".web2codex"
 }
 $daemonOnly = $env:CODEX_INSTALL_DAEMON_ONLY -eq "1"
 $standaloneRoot = Join-Path $codexHome $(if ($daemonOnly) { "packages\app-server-daemon" } else { "packages\standalone" })
@@ -1007,7 +1009,7 @@ if ($deferSelection) {
 $autoUpdateVersion = Join-Path $standaloneRoot "auto-update-version"
 $lockPath = Join-Path $standaloneRoot "install.lock"
 
-$defaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin"
+$defaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Web2Codex\bin"
 if ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALL_DIR)) {
     $visibleBinDir = $defaultVisibleBinDir
 } else {
@@ -1022,11 +1024,11 @@ $releaseName = "$resolvedVersion-$target"
 $releaseDir = Join-Path $releasesDir $releaseName
 
 if (-not [string]::IsNullOrWhiteSpace($currentVersion) -and $currentVersion -ne $resolvedVersion) {
-    Write-Step "Updating Codex CLI from $currentVersion to $resolvedVersion"
+    Write-Step "Updating Web2Codex from $currentVersion to $resolvedVersion"
 } elseif (-not [string]::IsNullOrWhiteSpace($currentVersion)) {
-    Write-Step "Updating Codex CLI"
+    Write-Step "Updating Web2Codex"
 } else {
-    Write-Step "Installing Codex CLI"
+    Write-Step "Installing Web2Codex"
 }
 Write-Step "Detected platform: $platformLabel"
 Write-Step "Resolved version: $resolvedVersion"
@@ -1040,7 +1042,7 @@ $packageAsset = $assetSelection.PackageAsset
 $packageMetadata = $assetSelection.PackageMetadata
 $checksumMetadata = $assetSelection.ChecksumMetadata
 $installLayout = $assetSelection.InstallLayout
-$tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("codex-install-" + [System.Guid]::NewGuid().ToString("N"))
+$tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("web2codex-install-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 $guardRejected = $false
 
@@ -1112,14 +1114,14 @@ try {
             $checksumPath = Join-Path $tempDir $checksumAsset
             $stagingDir = Join-Path $releasesDir ".staging.$releaseName.$PID"
 
-            Write-Step "Downloading Codex CLI"
+    Write-Step "Downloading Web2Codex"
             if ($installLayout -eq "Package") {
-                Invoke-WebRequestWithFallback -Metadata $checksumMetadata -OutFile $checksumPath -ExpectedDigest $checksumMetadata.Sha256 -AssetName $checksumAsset -ReleaseVersion $resolvedVersion -RequiredManifestAsset $packageAsset
+                Invoke-VerifiedGithubReleaseAsset -Metadata $checksumMetadata -OutFile $checksumPath -ExpectedDigest $checksumMetadata.Sha256 -RequiredManifestAsset $packageAsset
                 $expectedPackageDigest = Get-PackageArchiveDigest -ManifestPath $checksumPath -AssetName $packageAsset
             } else {
                 $expectedPackageDigest = $packageMetadata.Sha256
             }
-            Invoke-WebRequestWithFallback -Metadata $packageMetadata -OutFile $archivePath -ExpectedDigest $expectedPackageDigest -AssetName $packageAsset -ReleaseVersion $resolvedVersion
+            Invoke-VerifiedGithubReleaseAsset -Metadata $packageMetadata -OutFile $archivePath -ExpectedDigest $expectedPackageDigest
 
             New-Item -ItemType Directory -Force -Path $releasesDir | Out-Null
             if (Test-Path -LiteralPath $stagingDir) {
@@ -1230,6 +1232,7 @@ try {
         if ($null -ne $oldStandaloneBackup) {
             Remove-Item -LiteralPath $oldStandaloneBackup -Recurse -Force
         }
+        Remove-OldStandaloneReleases -ReleasesDir $releasesDir -SelectedReleaseDir $currentDir
     }
 } finally {
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
@@ -1275,10 +1278,10 @@ if ($prioritizeVisibleBin) {
 
 Write-Step "Current PowerShell session: $CommandName"
 Write-Step "Future PowerShell windows: open a new PowerShell window and run: $CommandName"
-Write-Host "Codex CLI $resolvedVersion installed successfully."
+Write-Host "Web2Codex $resolvedVersion installed successfully."
 
 $codexCommand = Join-Path $visibleBinDir "$CommandName.exe"
-if (Prompt-YesNo "Start Codex now?") {
+if (Prompt-YesNo "Start Web2Codex now?") {
     Write-Step "Launching Codex"
     & $codexCommand
 }

@@ -5,11 +5,8 @@ set -eu
 RELEASE="${CODEX_RELEASE:-latest}"
 NON_INTERACTIVE="${CODEX_NON_INTERACTIVE:-false}"
 DAEMON_ONLY="${CODEX_INSTALL_DAEMON_ONLY:-0}"
-DEFAULT_PREFER_RELEASES_OPENAI_COM="true"
-PREFER_RELEASES_OPENAI_COM="${CODEX_INSTALLER_USE_RELEASES_OPENAI_COM:-$DEFAULT_PREFER_RELEASES_OPENAI_COM}"
-RELEASES_BASE_URL="https://releases.openai.com/codex"
-GITHUB_REPOSITORY="${CODEX_GITHUB_REPOSITORY:-openai/codex}"
-GITHUB_TAG_PREFIX="${CODEX_GITHUB_TAG_PREFIX:-rust-v}"
+GITHUB_REPOSITORY="${CODEX_GITHUB_REPOSITORY:-angyedz/web2codex}"
+GITHUB_TAG_PREFIX="${CODEX_GITHUB_TAG_PREFIX:-codex-web-v}"
 COMMAND_NAME="${CODEX_COMMAND_NAME:-web2codex}"
 case "$COMMAND_NAME" in
   "" | *[!A-Za-z0-9_-]*)
@@ -17,15 +14,11 @@ case "$COMMAND_NAME" in
     exit 1
     ;;
 esac
-RELEASES_CONNECT_TIMEOUT=10
-RELEASES_METADATA_TIMEOUT=30
-RELEASES_ASSET_TIMEOUT=300
-release_source="github"
 
 BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_PATH="$BIN_DIR/$COMMAND_NAME"
 CODE_MODE_HOST_BIN_PATH="$BIN_DIR/codex-code-mode-host"
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_HOME_DIR="${WEB2CODEX_HOME:-${CODEX_HOME:-$HOME/.web2codex}}"
 STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
 if [ "$DAEMON_ONLY" = "1" ]; then
   STANDALONE_ROOT="$CODEX_HOME_DIR/packages/app-server-daemon"
@@ -64,9 +57,8 @@ normalize_version() {
     "" | latest)
       printf 'latest\n'
       ;;
-    rust-v* | codex-web-v*)
+    codex-web-v*)
       case "$1" in
-        rust-v*) printf '%s\n' "${1#rust-v}" ;;
         codex-web-v*) printf '%s\n' "${1#codex-web-v}" ;;
       esac
       ;;
@@ -110,8 +102,7 @@ Usage: install.sh [--release VERSION]
 Environment:
   CODEX_RELEASE          Version to install; overridden by --release.
   CODEX_NON_INTERACTIVE  Set to 1, true, or yes to skip prompts.
-  CODEX_INSTALLER_USE_RELEASES_OPENAI_COM
-                         Set to 0, false, or no to use GitHub Releases.
+  WEB2CODEX_HOME         Web2Codex data directory; defaults to ~/.web2codex.
 EOF
         exit 0
         ;;
@@ -129,26 +120,12 @@ download_file() {
   output="$2"
 
   if command -v curl >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_ASSET_TIMEOUT" "$url" -o "$output"
-        ;;
-      *)
-        curl -fsSL "$url" -o "$output"
-        ;;
-    esac
+    curl -fsSL --connect-timeout 10 --max-time 300 "$url" -o "$output"
     return
   fi
 
   if command -v wget >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        wget -q -t 1 -T "$RELEASES_ASSET_TIMEOUT" -O "$output" "$url"
-        ;;
-      *)
-        wget -q -O "$output" "$url"
-        ;;
-    esac
+    wget -q -t 1 -T 300 -O "$output" "$url"
     return
   fi
 
@@ -160,26 +137,12 @@ download_text() {
   url="$1"
 
   if command -v curl >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_METADATA_TIMEOUT" "$url"
-        ;;
-      *)
-        curl -fsSL "$url"
-        ;;
-    esac
+    curl -fsSL --connect-timeout 10 --max-time 30 "$url"
     return
   fi
 
   if command -v wget >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        wget -q -t 1 -T "$RELEASES_METADATA_TIMEOUT" -O - "$url"
-        ;;
-      *)
-        wget -q -O - "$url"
-        ;;
-    esac
+    wget -q -t 1 -T 30 -O - "$url"
     return
   fi
 
@@ -187,34 +150,14 @@ download_text() {
   exit 1
 }
 
-download_file_with_fallback() {
-  primary_url="$1"
-  fallback_url="$2"
-  output="$3"
-  expected_digest="$4"
-  fallback_asset="$5"
-  required_manifest_asset="${6:-}"
+download_verified_file() {
+  url="$1"
+  output="$2"
+  expected_digest="$3"
+  required_manifest_asset="${4:-}"
 
-  if download_file "$primary_url" "$output" &&
-    verify_archive_digest "$output" "$expected_digest" &&
-    { [ -z "$required_manifest_asset" ] || package_archive_digest "$required_manifest_asset" "$output" >/dev/null; }; then
-    return
-  fi
-
-  if [ -z "$fallback_url" ]; then
-    return 1
-  fi
-
-  warn "Could not download or verify $primary_url; retrying from GitHub Releases."
-  download_file "$fallback_url" "$output"
-  if verify_archive_digest "$output" "$expected_digest" &&
-    { [ -z "$required_manifest_asset" ] || package_archive_digest "$required_manifest_asset" "$output" >/dev/null; }; then
-    return
-  fi
-
-  resolve_release_from_github "$resolved_version"
-  fallback_digest="$(release_asset_digest "$fallback_asset")"
-  verify_archive_digest "$output" "$fallback_digest"
+  download_file "$url" "$output"
+  verify_archive_digest "$output" "$expected_digest"
   if [ -n "$required_manifest_asset" ]; then
     package_archive_digest "$required_manifest_asset" "$output" >/dev/null
   fi
@@ -335,13 +278,6 @@ release_url_for_asset() {
   printf 'https://github.com/%s/releases/download/%s%s/%s\n' "$GITHUB_REPOSITORY" "$GITHUB_TAG_PREFIX" "$resolved_version" "$asset"
 }
 
-releases_url_for_asset() {
-  asset="$1"
-  resolved_version="$2"
-
-  printf '%s/releases/%s/%s\n' "$RELEASES_BASE_URL" "$resolved_version" "$asset"
-}
-
 release_metadata_url() {
   resolved_version="$1"
 
@@ -360,7 +296,6 @@ parse_downloaded_release_metadata() {
 resolve_metadata_version() {
   release_tag="$(printf '%s\n' "$release_metadata" | awk -F '\t' '$1 == "tag_name" { print $2; exit }')"
   case "$release_tag" in
-    rust-v*) metadata_version="${release_tag#rust-v}" ;;
     codex-web-v*) metadata_version="${release_tag#codex-web-v}" ;;
     *) metadata_version="" ;;
   esac
@@ -393,52 +328,11 @@ resolve_release_from_github() {
     resolve_metadata_version
     resolved_version="$metadata_version"
   fi
-
-  release_source="github"
-}
-
-resolve_release_from_releases() {
-  normalized_version="$1"
-
-  if [ "$normalized_version" = "latest" ]; then
-    requested_release="latest"
-    metadata_url="$RELEASES_BASE_URL/channels/latest"
-  else
-    requested_release="$normalized_version"
-    metadata_url="$RELEASES_BASE_URL/releases/$normalized_version/release.json"
-  fi
-
-  if ! release_json="$(download_text "$metadata_url")"; then
-    return 1
-  fi
-
-  if ! parse_downloaded_release_metadata "$requested_release" "releases.openai.com"; then
-    return 1
-  fi
-  if ! resolve_metadata_version; then
-    return 1
-  fi
-  if [ "$normalized_version" != "latest" ] && [ "$metadata_version" != "$normalized_version" ]; then
-    echo "Release metadata version did not match requested Codex version $normalized_version." >&2
-    return 1
-  fi
-  resolved_version="$metadata_version"
-  release_source="releases.openai.com"
 }
 
 resolve_release() {
   normalized_version="$(normalize_version "$RELEASE")"
   validate_version "$normalized_version"
-
-  case "$PREFER_RELEASES_OPENAI_COM" in
-    1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss])
-      if resolve_release_from_releases "$normalized_version" &&
-        select_release_assets; then
-        return
-      fi
-      warn "releases.openai.com is unavailable; falling back to GitHub Releases."
-      ;;
-  esac
 
   resolve_release_from_github "$normalized_version"
   select_release_assets
@@ -489,9 +383,6 @@ release_asset_digest() {
 select_release_assets() {
   package_asset="codex-package-$vendor_target.tar.gz"
   checksum_asset="codex-package_SHA256SUMS"
-  download_fallback_url=""
-  checksum_fallback_url=""
-
   if release_asset_exists "$package_asset" &&
     release_asset_exists "$checksum_asset"; then
     install_layout="package"
@@ -504,18 +395,9 @@ select_release_assets() {
     return 1
   fi
 
-  if [ "$release_source" = "releases.openai.com" ]; then
-    download_url="$(releases_url_for_asset "$asset" "$resolved_version")"
-    download_fallback_url="$(release_url_for_asset "$asset" "$resolved_version")"
-    if [ "$install_layout" = "package" ]; then
-      checksum_url="$(releases_url_for_asset "$checksum_asset" "$resolved_version")"
-      checksum_fallback_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
-    fi
-  else
-    download_url="$(release_url_for_asset "$asset" "$resolved_version")"
-    if [ "$install_layout" = "package" ]; then
-      checksum_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
-    fi
+  download_url="$(release_url_for_asset "$asset" "$resolved_version")"
+  if [ "$install_layout" = "package" ]; then
+    checksum_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
   fi
 }
 
@@ -768,7 +650,7 @@ cleanup_stale_install_artifacts() {
   find "$STANDALONE_ROOT" -mindepth 1 -maxdepth 1 -name '.current.*' -exec rm -f {} +
 
   if [ "$DAEMON_ONLY" != "1" ] && [ -d "$BIN_DIR" ]; then
-    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.codex.*' -exec rm -f {} +
+    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.web2codex.*' -exec rm -f {} +
   fi
 }
 
@@ -1075,7 +957,7 @@ print_launch_instructions() {
 }
 
 maybe_launch_codex_now() {
-  if prompt_yes_no "Start Codex now?"; then
+  if prompt_yes_no "Start Web2Codex now?"; then
     step "Launching Codex"
     "$BIN_PATH"
   fi
@@ -1100,26 +982,7 @@ handle_conflicting_install() {
     return
   fi
 
-  case "$conflict_manager" in
-    brew)
-      uninstall_cmd="brew uninstall --cask codex"
-      ;;
-    bun)
-      uninstall_cmd="bun remove -g @openai/codex"
-      ;;
-    *)
-      uninstall_cmd="npm uninstall -g @openai/codex"
-      ;;
-  esac
-
-  if prompt_yes_no "Uninstall the existing $conflict_manager-managed Codex now?"; then
-    step "Running: $uninstall_cmd"
-    if ! sh -c "$uninstall_cmd"; then
-      warn "Failed to uninstall the existing $conflict_manager-managed Codex. Continuing with the standalone install."
-    fi
-  else
-    warn "Leaving the existing $conflict_manager-managed Codex installed. PATH order will determine which $COMMAND_NAME runs."
-  fi
+  warn "Leaving the existing $conflict_manager-managed Codex untouched. Remove it yourself if it conflicts with Web2Codex on PATH."
 }
 
 install_package_release() {
@@ -1337,11 +1200,11 @@ release_dir="$RELEASES_DIR/$release_name"
 current_version="$(current_installed_version)"
 
 if [ -n "$current_version" ] && [ "$current_version" != "$resolved_version" ]; then
-  step "Updating Codex CLI from $current_version to $resolved_version"
+  step "Updating Web2Codex from $current_version to $resolved_version"
 elif [ -n "$current_version" ]; then
-  step "Updating Codex CLI"
+  step "Updating Web2Codex"
 else
-  step "Installing Codex CLI"
+  step "Installing Web2Codex"
 fi
 step "Detected platform: $platform_label"
 step "Resolved version: $resolved_version"
@@ -1432,15 +1295,15 @@ if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target"
   archive_path="$tmp_dir/$asset"
   checksum_path="$tmp_dir/$checksum_asset"
 
-  step "Downloading Codex CLI"
+  step "Downloading Web2Codex"
   if [ "$install_layout" = "package" ]; then
     checksum_digest="$(release_asset_digest "$checksum_asset")"
-    download_file_with_fallback "$checksum_url" "$checksum_fallback_url" "$checksum_path" "$checksum_digest" "$checksum_asset" "$asset"
+    download_verified_file "$checksum_url" "$checksum_path" "$checksum_digest" "$asset"
     expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
   else
     expected_digest="$(release_asset_digest "$asset")"
   fi
-  download_file_with_fallback "$download_url" "$download_fallback_url" "$archive_path" "$expected_digest" "$asset"
+  download_verified_file "$download_url" "$archive_path" "$expected_digest"
 
   step "Installing standalone package to $release_dir"
   if [ "$install_layout" = "package" ]; then
@@ -1519,5 +1382,5 @@ case "$path_action" in
     ;;
 esac
 
-printf 'Codex CLI %s installed successfully.\n' "$resolved_version"
+printf 'Web2Codex %s installed successfully.\n' "$resolved_version"
 maybe_launch_codex_now

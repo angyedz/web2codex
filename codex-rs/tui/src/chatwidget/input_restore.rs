@@ -35,7 +35,8 @@ impl ChatWidget {
         draft
     }
 
-    /// Continue an active Cloud-switch draft without undoing an accepted Vim Escape.
+    /// Continue a backend-switch draft without undoing an accepted Vim Escape.
+    #[cfg(test)]
     pub(crate) fn restore_cloud_switch_draft(&mut self, draft: ComposerDraftSnapshot) {
         let continue_vim_normal_mode = draft.vim_normal_mode;
         self.restore_startup_draft(draft);

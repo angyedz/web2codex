@@ -1,28 +1,16 @@
 //! Onboarding screen orchestration and top-level keyboard routing.
 //!
-//! The onboarding flow is a small state machine over visible steps
-//! (welcome/auth/trust/GovCloud). This module decides which step receives key/paste
-//! events and enforces flow-level safety rules that cut across individual step
-//! widgets. Folder-entry consent reuses this same event loop for startup and in-app navigation.
-//!
-//! In particular, onboarding quit handling has a text-entry guard for API-key
-//! input: the printable `q` quit key is treated as text input while the user is
-//! editing a non-empty API-key field, while control/alt chords remain available
-//! as explicit exit shortcuts.
+//! The onboarding flow presents project trust prompts and folder-entry consent.
 
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
-use codex_app_server_protocol::GatewayOAuthPrompt;
 use codex_app_server_protocol::RequestId;
-use codex_app_server_protocol::ServerNotification;
 use codex_exec_server::LOCAL_FS;
 use codex_git_utils::resolve_root_git_project_for_trust;
-use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
@@ -30,12 +18,7 @@ use ratatui::style::Color;
 use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
 
-use codex_protocol::config_types::ForcedLoginMethod;
-
-use crate::LoginStatus;
 use crate::app_server_session::AppServerSession;
-use crate::clipboard_copy::CopyFormat;
-use crate::clipboard_copy::CopyStatus;
 use crate::config_update::RemoteProjectTrust;
 use crate::config_update::format_config_error;
 use crate::config_update::replace_config_value;
@@ -43,10 +26,6 @@ use crate::config_update::write_trusted_project;
 use crate::empty_state_animation::Presentation;
 use crate::key_hint::KeyBindingListExt;
 use crate::legacy_core::config::Config;
-use crate::onboarding::auth::AuthModeWidget;
-use crate::onboarding::auth::SignInOption;
-use crate::onboarding::auth::SignInState;
-use crate::onboarding::bedrock::BedrockState;
 use crate::onboarding::keys;
 use crate::onboarding::trust_directory::TrustDirectorySelection;
 use crate::onboarding::trust_directory::TrustDirectoryWidget;
@@ -58,8 +37,6 @@ use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
-use std::sync::Arc;
-use std::sync::RwLock;
 use uuid::Uuid;
 
 #[path = "directory_trust.rs"]
@@ -70,13 +47,7 @@ pub(crate) use directory_trust::check_directory_trust;
 #[allow(clippy::large_enum_variant)]
 enum Step {
     Welcome(WelcomeWidget),
-    Auth(AuthModeWidget),
-    GatewayDevice(GatewayOAuthPrompt),
     TrustDirectory(TrustDirectoryWidget),
-    GovCloudGuidance {
-        state: BedrockState,
-        acknowledged: bool,
-    },
 }
 
 pub(crate) trait KeyboardHandler {
@@ -106,12 +77,6 @@ pub(crate) struct OnboardingScreen {
 pub(crate) struct OnboardingScreenArgs {
     pub show_trust_screen: bool,
     pub remote_project_trust: Option<RemoteProjectTrust>,
-    pub show_login_screen: bool,
-    pub bedrock_setup_enabled: bool,
-    pub gcp_setup_enabled: bool,
-    pub gateway_setup_enabled: bool,
-    pub login_status: LoginStatus,
-    pub app_server_target: crate::AppServerTarget,
     pub app_server_request_handle: Option<AppServerRequestHandle>,
     pub config: Config,
 }
@@ -119,16 +84,7 @@ pub(crate) struct OnboardingScreenArgs {
 #[derive(Default)]
 pub(crate) struct OnboardingResult {
     pub directory_trust_persisted: bool,
-    pub selected_gateway: Option<String>,
     pub should_exit: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct TextEntryContext {
-    /// Whether onboarding is currently rendering a text-entry state.
-    active: bool,
-    /// Whether printable quit shortcuts should be consumed as text input.
-    has_text: bool,
 }
 
 impl OnboardingScreen {
@@ -136,12 +92,6 @@ impl OnboardingScreen {
         let OnboardingScreenArgs {
             show_trust_screen,
             remote_project_trust,
-            show_login_screen,
-            bedrock_setup_enabled,
-            gcp_setup_enabled,
-            gateway_setup_enabled,
-            login_status,
-            app_server_target,
             app_server_request_handle,
             config,
         } = args;
@@ -150,10 +100,9 @@ impl OnboardingScreen {
         let remote_trust_key = remote_project_trust
             .as_ref()
             .map(|project| project.trust_target.to_string_lossy().into_owned());
-        let auth_config = config.auth_config();
         let mut steps: Vec<Step> = Vec::new();
         steps.push(Step::Welcome(WelcomeWidget::new(
-            !matches!(login_status, LoginStatus::NotAuthenticated),
+            false,
             tui.frame_requester(),
             local_settings.tui.animations && local_settings.tui.effects.welcome,
         )));
@@ -173,36 +122,6 @@ impl OnboardingScreen {
         };
         #[cfg(not(target_os = "windows"))]
         let show_windows_create_sandbox_hint = false;
-        if show_login_screen {
-            let highlighted_mode =
-                if auth_config.is_login_method_allowed(ForcedLoginMethod::Chatgpt) {
-                    SignInOption::ChatGpt
-                } else {
-                    SignInOption::OtherMethods
-                };
-            if let Some(app_server_request_handle) = app_server_request_handle {
-                steps.push(Step::Auth(AuthModeWidget {
-                    request_frame: tui.frame_requester(),
-                    highlighted_mode,
-                    activation_key_guard: None,
-                    error: Arc::new(RwLock::new(None)),
-                    sign_in_state: Arc::new(RwLock::new(SignInState::PickMode)),
-                    login_status,
-                    app_server_target,
-                    app_server_request_handle,
-                    auth_config,
-                    bedrock_setup_enabled,
-                    gcp_setup_enabled,
-                    gateway_setup_enabled,
-                    gateway: None,
-                    animations_enabled: local_settings.tui.animations
-                        && local_settings.tui.effects.shimmer,
-                    animations_suppressed: std::cell::Cell::new(false),
-                }));
-            } else {
-                tracing::warn!("skipping onboarding login step without app-server request handle");
-            }
-        }
         let highlighted = TrustDirectorySelection::Trust;
         if show_trust_screen {
             let (cwd, trust_target) = match remote_project_trust {
@@ -270,23 +189,6 @@ impl OnboardingScreen {
         out
     }
 
-    fn should_suppress_animations(&self) -> bool {
-        // Freeze the whole onboarding screen when auth is showing copyable login
-        // material so terminal selection is not interrupted by redraws.
-        self.current_steps().into_iter().any(|step| match step {
-            Step::Auth(widget) => widget.should_suppress_animations(),
-            Step::GatewayDevice(_) => true,
-            Step::Welcome(_) | Step::TrustDirectory(_) | Step::GovCloudGuidance { .. } => false,
-        })
-    }
-
-    fn is_auth_in_progress(&self) -> bool {
-        self.steps.iter().any(|step| {
-            matches!(step, Step::Auth(_) | Step::GatewayDevice(_))
-                && matches!(step.get_step_state(), StepState::InProgress)
-        })
-    }
-
     pub(crate) fn is_done(&self) -> bool {
         self.is_done
             || !self
@@ -306,94 +208,13 @@ impl OnboardingScreen {
             .find(|step| matches!(step.get_step_state(), StepState::InProgress))
             .is_some_and(|step| matches!(step, Step::TrustDirectory(_)))
     }
-
-    fn cancel_auth_if_active(&self) {
-        for step in &self.steps {
-            if let Step::Auth(widget) = step {
-                widget.cancel_active_attempt();
-            }
-        }
-    }
-
-    pub(super) fn auth_widget_mut(&mut self) -> Option<&mut AuthModeWidget> {
-        self.steps.iter_mut().find_map(|step| match step {
-            Step::Auth(widget) => Some(widget),
-            Step::Welcome(_)
-            | Step::TrustDirectory(_)
-            | Step::GovCloudGuidance { .. }
-            | Step::GatewayDevice(_) => None,
-        })
-    }
-
-    fn handle_app_server_notification(&mut self, notification: ServerNotification) {
-        match notification {
-            ServerNotification::AccountLoginCompleted(notification) => {
-                if let Some(widget) = self.auth_widget_mut() {
-                    widget.on_account_login_completed(notification);
-                }
-            }
-            ServerNotification::GatewayOAuthChanged(notification) => {
-                if let Some(widget) = self.auth_widget_mut() {
-                    widget.on_gateway_oauth_changed(notification);
-                }
-            }
-            ServerNotification::AccountUpdated(notification) => {
-                if let Some(widget) = self.auth_widget_mut() {
-                    widget.on_account_updated(notification);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn text_entry_context(&self) -> TextEntryContext {
-        self.steps
-            .iter()
-            .find_map(|step| {
-                if let Step::Auth(widget) = step {
-                    Some(TextEntryContext {
-                        active: widget.is_text_entry_active(),
-                        has_text: widget.should_suppress_printable_quit(),
-                    })
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default()
-    }
 }
-
 impl KeyboardHandler for OnboardingScreen {
-    /// Route key events to onboarding steps while preserving text-entry safety.
-    ///
-    /// OpenAI API-key entry suppresses printable quit bindings after typing
-    /// starts, while cloud provider fields suppress them from the first character.
-    /// Control/alt quit chords still work as emergency exits.
+    /// Route key events to onboarding steps.
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if key_event.kind == KeyEventKind::Release {
-            if let Some(widget) = self.auth_widget_mut() {
-                widget.handle_key_event(key_event);
-            }
-            return;
-        }
-        let text_entry_context = self.text_entry_context();
-        let should_quit = key_event.kind == KeyEventKind::Press
-            && (keys::QUIT.is_pressed(key_event)
-                || matches!(self.steps.as_slice(), [Step::GatewayDevice(_)])
-                    && keys::CANCEL.is_pressed(key_event))
-            && !suppress_quit_while_typing(key_event, text_entry_context);
+        let should_quit = key_event.kind == KeyEventKind::Press && keys::QUIT.is_pressed(key_event);
         if should_quit {
-            if self.is_auth_in_progress() {
-                self.cancel_auth_if_active();
-                // If the user cancels the auth menu, exit the app rather than
-                // leave the user at a prompt in an unauthed state.
-                self.should_exit = true;
-            } else if self.is_trust_step_active()
-                || self
-                    .steps
-                    .iter()
-                    .any(|step| matches!(step, Step::GovCloudGuidance { .. }))
-            {
+            if self.is_trust_step_active() {
                 self.should_exit = true;
             }
             self.is_done = true;
@@ -434,36 +255,13 @@ impl KeyboardHandler for OnboardingScreen {
     }
 }
 
-/// Returns `true` when a quit shortcut should be ignored as text input.
-///
-/// This only applies when the active text-entry state suppresses printable quit
-/// shortcuts and the key has no control/alt modifiers.
-fn suppress_quit_while_typing(key_event: KeyEvent, text_entry_context: TextEntryContext) -> bool {
-    text_entry_context.active
-        && text_entry_context.has_text
-        && matches!(key_event.code, KeyCode::Char(_))
-        && !key_event
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-}
-
 impl WidgetRef for &OnboardingScreen {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let suppress_animations = self.should_suppress_animations();
-        let logo_presentation = if suppress_animations {
-            Presentation::Hidden
-        } else if self.text_entry_context().active {
-            Presentation::Faded
-        } else {
-            Presentation::Animated
-        };
+        let logo_presentation = Presentation::Animated;
         for step in self.current_steps() {
             match step {
                 Step::Welcome(widget) => widget.set_presentation(logo_presentation),
-                Step::Auth(widget) => widget.set_animations_suppressed(suppress_animations),
-                Step::TrustDirectory(_)
-                | Step::GovCloudGuidance { .. }
-                | Step::GatewayDevice(_) => {}
+                Step::TrustDirectory(_) => {}
             }
         }
 
@@ -534,23 +332,14 @@ impl WidgetRef for &OnboardingScreen {
 impl KeyboardHandler for Step {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match self {
-            Step::GatewayDevice(_) => {}
             Step::Welcome(widget) => widget.handle_key_event(key_event),
-            Step::Auth(widget) => widget.handle_key_event(key_event),
             Step::TrustDirectory(widget) => widget.handle_key_event(key_event),
-            Step::GovCloudGuidance {
-                state,
-                acknowledged,
-            } => {
-                *acknowledged = state.handle_guidance_key_event(&key_event);
-            }
         }
     }
 
     fn handle_paste(&mut self, pasted: String) {
         match self {
-            Step::Welcome(_) | Step::GovCloudGuidance { .. } | Step::GatewayDevice(_) => {}
-            Step::Auth(widget) => widget.handle_paste(pasted),
+            Step::Welcome(_) => {}
             Step::TrustDirectory(widget) => widget.handle_paste(pasted),
         }
     }
@@ -559,17 +348,8 @@ impl KeyboardHandler for Step {
 impl StepStateProvider for Step {
     fn get_step_state(&self) -> StepState {
         match self {
-            Step::GatewayDevice(_) => StepState::InProgress,
             Step::Welcome(w) => w.get_step_state(),
-            Step::Auth(w) => w.get_step_state(),
             Step::TrustDirectory(w) => w.get_step_state(),
-            Step::GovCloudGuidance { acknowledged, .. } => {
-                if *acknowledged {
-                    StepState::Complete
-                } else {
-                    StepState::InProgress
-                }
-            }
         }
     }
 }
@@ -580,87 +360,11 @@ impl WidgetRef for Step {
             Step::Welcome(widget) => {
                 widget.render_ref(area, buf);
             }
-            Step::Auth(widget) => {
-                widget.render_ref(area, buf);
-            }
             Step::TrustDirectory(widget) => {
                 widget.render_ref(area, buf);
             }
-            Step::GatewayDevice(prompt) => render_gateway_device_prompt(prompt, area, buf),
-            Step::GovCloudGuidance { state, .. } => state.render(area, buf, /*error*/ None),
         }
     }
-}
-
-pub(crate) fn render_gateway_device_prompt(
-    prompt: &GatewayOAuthPrompt,
-    area: Rect,
-    buf: &mut Buffer,
-) {
-    super::auth::render_device_code_prompt(
-        area,
-        buf,
-        "  Sign in to your gateway".into(),
-        Some((&prompt.verification_url, &prompt.user_code)),
-        [
-            "  1. Open this link in a browser",
-            "  2. Enter this one-time code when prompted",
-        ],
-        keys::CANCEL[0],
-    );
-}
-
-pub(crate) async fn run_gateway_device_login(
-    tui: &mut Tui,
-    server: &mut AppServerSession,
-    prompt: GatewayOAuthPrompt,
-) -> Result<()> {
-    let screen = OnboardingScreen {
-        request_frame: tui.frame_requester(),
-        steps: vec![Step::GatewayDevice(prompt)],
-        remote_trust_key: None,
-        is_done: false,
-        should_exit: false,
-    };
-    let result = run_onboarding_screen(
-        screen,
-        /*app_server_request_handle*/ None,
-        Some(server),
-        tui,
-    )
-    .await
-    .and_then(|result| {
-        if result.should_exit {
-            Err(std::io::Error::new(std::io::ErrorKind::Interrupted, StartupCancelled).into())
-        } else {
-            Ok(())
-        }
-    });
-    if result.is_err() {
-        crate::device_login::cancel(server).await;
-    }
-    result
-}
-
-pub(crate) async fn run_gov_cloud_guidance(tui: &mut Tui) -> Result<()> {
-    let screen = OnboardingScreen {
-        request_frame: tui.frame_requester(),
-        steps: vec![Step::GovCloudGuidance {
-            state: BedrockState::guidance(),
-            acknowledged: false,
-        }],
-        remote_trust_key: None,
-        is_done: false,
-        should_exit: false,
-    };
-    let result = run_onboarding_screen(
-        screen, /*app_server_request_handle*/ None, /*app_server*/ None, tui,
-    )
-    .await?;
-    if result.should_exit {
-        return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, StartupCancelled).into());
-    }
-    Ok(())
 }
 
 pub(crate) async fn run_onboarding_app(
@@ -679,7 +383,7 @@ pub(super) async fn run_onboarding_screen(
     app_server: Option<&mut AppServerSession>,
     tui: &mut Tui,
 ) -> Result<OnboardingResult> {
-    // Let the terminal select and copy login URLs and device codes, even in fullscreen mode.
+    // Keep project trust prompts readable and selectable in fullscreen mode.
     let previous_mouse_capture = tui.mouse_capture;
     let result = match tui.set_mouse_capture(MouseCapture::Disabled) {
         Ok(()) => {
@@ -705,9 +409,6 @@ async fn run_onboarding_screen_inner(
 ) -> Result<OnboardingResult> {
     use tokio_stream::StreamExt;
     let mut directory_trust_persisted = false;
-    // One-time guard to fully clear the screen after ChatGPT login success message is shown
-    let mut did_full_clear_after_success = false;
-    let mut pending_copy: Option<(u64, String)> = None;
 
     tui.draw(u16::MAX, |frame| {
         frame.render_widget_ref(&onboarding_screen, frame.area());
@@ -720,47 +421,12 @@ async fn run_onboarding_screen_inner(
 
     while !onboarding_screen.is_done() {
         tokio::select! {
-            () = async {
-                match onboarding_screen.auth_widget_mut() {
-                    Some(auth) => auth.advance_gateway_request().await,
-                    None => std::future::pending().await,
-                }
-            } => {}
             event = tui_events.next() => {
                 if let Some(event) = event {
                     tui.screen_size_for_event(&event)?;
                     match event {
                         TuiEvent::Key(key_event) => {
-                            let copy_link = if key_event.kind == KeyEventKind::Press
-                                && keys::COPY_LINK.is_pressed(key_event)
-                                && let Some(Step::Auth(widget)) = onboarding_screen.current_steps().last()
-                                && let Ok(state) = widget.sign_in_state.read()
-                                && let SignInState::ChatGptContinueInBrowser(state) = &*state
-                                && !state.auth_url.is_empty()
-                            {
-                                Some((state.login_id.clone(), Arc::<str>::from(state.auth_url.as_str())))
-                            } else {
-                                None
-                            };
-                            if let Some((login_id, url)) = copy_link {
-                                let result = tui.clipboard.copy(url, CopyFormat::PlainText, tui.frame_requester());
-                                let message = match result {
-                                    Ok(CopyStatus::Pending(id)) => {
-                                        pending_copy = Some((id, login_id));
-                                        "Copying link…".to_string()
-                                    }
-                                    Ok(CopyStatus::Busy) => "Clipboard busy; try again".to_string(),
-                                    Ok(CopyStatus::Confirmed) => "Copied link to clipboard".to_string(),
-                                    Ok(CopyStatus::Unconfirmed) => "Copy requested; check your clipboard".to_string(),
-                                    Err(error) => format!("Could not copy link: {error}"),
-                                };
-                                if let Some(Step::Auth(widget)) = onboarding_screen.current_steps_mut().into_iter().last() {
-                                    *widget.error.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
-                                }
-                                tui.frame_requester().schedule_frame();
-                            } else {
-                                onboarding_screen.handle_key_event(key_event);
-                            }
+                            onboarding_screen.handle_key_event(key_event);
                             if !directory_trust_persisted {
                                 directory_trust_persisted = persist_selected_trust(
                                     &mut onboarding_screen,
@@ -777,25 +443,6 @@ async fn run_onboarding_screen_inner(
                         | TuiEvent::Resize(_)
                         | TuiEvent::FocusGained
                         | TuiEvent::FocusLost => {
-                            if let Some((id, result)) = tui.clipboard.poll().cloned()
-                                && let Some((pending_id, login_id)) = &pending_copy
-                                && id == *pending_id
-                            {
-                                if let Some(Step::Auth(widget)) = onboarding_screen.current_steps_mut().into_iter().last()
-                                    && widget.sign_in_state.read().is_ok_and(|state| {
-                                        matches!(&*state, SignInState::ChatGptContinueInBrowser(state) if state.login_id == *login_id)
-                                    })
-                                {
-                                    let message = match result {
-                                        Ok(CopyStatus::Confirmed) => "Copied link to clipboard".to_string(),
-                                        Ok(CopyStatus::Unconfirmed) => "Copy requested; check your clipboard".to_string(),
-                                        Ok(CopyStatus::Busy | CopyStatus::Pending(_)) => "Clipboard busy; try again".to_string(),
-                                        Err(error) => format!("Could not copy link: {error}"),
-                                    };
-                                    *widget.error.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
-                                }
-                                pending_copy = None;
-                            }
                             for step in &onboarding_screen.steps {
                                 if let Step::Welcome(widget) = step {
                                     if matches!(&event, TuiEvent::Resume) {
@@ -803,36 +450,6 @@ async fn run_onboarding_screen_inner(
                                     }
                                     widget.set_focused(tui.is_terminal_focused());
                                 }
-                            }
-                            if !did_full_clear_after_success
-                                && onboarding_screen.steps.iter().any(|step| {
-                                    if let Step::Auth(w) = step {
-                                        w.sign_in_state.read().is_ok_and(|g| {
-                                            matches!(&*g, super::auth::SignInState::ChatGptSuccessMessage)
-                                        })
-                                    } else {
-                                        false
-                                    }
-                                })
-                            {
-                                // Reset any lingering SGR (underline/color) before clearing
-                                let _ = ratatui::crossterm::execute!(
-                                    std::io::stdout(),
-                                    ratatui::crossterm::style::SetAttribute(
-                                        ratatui::crossterm::style::Attribute::Reset
-                                    ),
-                                    ratatui::crossterm::style::SetAttribute(
-                                        ratatui::crossterm::style::Attribute::NoUnderline
-                                    ),
-                                    ratatui::crossterm::style::SetForegroundColor(
-                                        ratatui::crossterm::style::Color::Reset
-                                    ),
-                                    ratatui::crossterm::style::SetBackgroundColor(
-                                        ratatui::crossterm::style::Color::Reset
-                                    )
-                                );
-                                let _ = tui.terminal.clear();
-                                did_full_clear_after_success = true;
                             }
                             tui.draw(u16::MAX, |frame| {
                                 frame.render_widget_ref(&onboarding_screen, frame.area());
@@ -853,25 +470,13 @@ async fn run_onboarding_screen_inner(
                 let Some(event) = event else {
                     return Err(color_eyre::eyre::eyre!(super::SETUP_CONNECTION_LOST));
                 };
-                if let (Some(server), [Step::GatewayDevice(prompt)]) = (app_server.as_deref(), onboarding_screen.steps.as_slice()) {
-                    onboarding_screen.is_done = crate::device_login::handle_event_during_device_login(
-                        prompt,
-                        event.event,
-                        &server.request_handle(),
-                    ).await?;
-                } else {
-                    match event.event {
-                        AppServerEvent::ServerNotification(notification) => {
-                            onboarding_screen.handle_app_server_notification(*notification);
-                        }
-                        AppServerEvent::Disconnected { message } => {
-                            return Err(color_eyre::eyre::eyre!(message));
-                        }
-                        AppServerEvent::ThreadStreamReconnected(_)
-                | AppServerEvent::ThreadStreamDisconnected(_)
-                        | AppServerEvent::Lagged { .. }
-                        | AppServerEvent::ServerRequest(_) => {}
+                match event.event {
+                    AppServerEvent::ServerNotification(_) => {}
+                    AppServerEvent::Disconnected { message } => {
+                        return Err(color_eyre::eyre::eyre!(message));
                     }
+                    AppServerEvent::Lagged { .. }
+                    | AppServerEvent::ServerRequest(_) => {}
                 }
             }
         }
@@ -890,16 +495,6 @@ async fn run_onboarding_screen_inner(
     }
     Ok(OnboardingResult {
         directory_trust_persisted,
-        selected_gateway: onboarding_screen.auth_widget_mut().and_then(|widget| {
-            match &*widget
-                .sign_in_state
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-            {
-                SignInState::GatewaySelected(id) => Some(id.clone()),
-                _ => None,
-            }
-        }),
         should_exit: onboarding_screen.should_exit(),
     })
 }
@@ -998,10 +593,8 @@ mod tests {
     use super::OnboardingScreen;
     use super::Step;
     use super::StepStateProvider;
-    use super::TextEntryContext;
     use super::discard_pending_input_on_trust_step_transition;
     use super::persist_selected_trust;
-    use super::suppress_quit_while_typing;
     use crate::onboarding::onboarding_screen::KeyboardHandler;
     use crate::onboarding::trust_directory::TrustDirectorySelection;
     use crate::onboarding::trust_directory::TrustDirectoryWidget;
@@ -1011,54 +604,6 @@ mod tests {
     use crossterm::event::KeyModifiers;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
-
-    #[test]
-    fn suppresses_printable_quit_key_during_api_key_entry() {
-        let suppressed = suppress_quit_while_typing(
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-            TextEntryContext {
-                active: true,
-                has_text: true,
-            },
-        );
-        assert!(suppressed);
-    }
-
-    #[test]
-    fn does_not_suppress_printable_quit_key_when_api_key_input_is_empty() {
-        let suppressed = suppress_quit_while_typing(
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-            TextEntryContext {
-                active: true,
-                has_text: false,
-            },
-        );
-        assert!(!suppressed);
-    }
-
-    #[test]
-    fn does_not_suppress_control_quit_key_during_api_key_entry() {
-        let suppressed = suppress_quit_while_typing(
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
-            TextEntryContext {
-                active: true,
-                has_text: true,
-            },
-        );
-        assert!(!suppressed);
-    }
-
-    #[test]
-    fn does_not_suppress_when_not_in_api_key_entry() {
-        let suppressed = suppress_quit_while_typing(
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
-            TextEntryContext {
-                active: false,
-                has_text: true,
-            },
-        );
-        assert!(!suppressed);
-    }
 
     #[test]
     fn buffered_enter_is_discarded_when_trust_step_becomes_active() {

@@ -188,34 +188,8 @@ Configured OTLP metrics exporters (HTTP or gRPC) default to delta temporality. S
 `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative` for backends that require
 cumulative metrics. The values `delta`, `cumulative`, and `lowmemory` are case-insensitive;
 unset, empty, or unrecognized values retain the delta default. This setting does not change
-the built-in Statsig exporter or on-demand runtime snapshots.
-
-`codex-otel` also provides `OtelExporter::Statsig`, a shorthand for exporting OTLP/HTTP JSON metrics
-to Statsig using Codex-internal defaults.
-
-Statsig ingestion (OTLP/HTTP JSON) example:
-
-```rust
-use codex_otel::config::{OtelExporter, OtelHttpProtocol};
-
-let metrics = MetricsClient::new(MetricsConfig::otlp(
-    "dev",
-    "codex-cli",
-    env!("CARGO_PKG_VERSION"),
-    OtelExporter::OtlpHttp {
-        endpoint: "https://api.statsig.com/otlp".to_string(),
-        headers: std::collections::HashMap::from([(
-            "statsig-api-key".to_string(),
-            std::env::var("STATSIG_SERVER_SDK_SECRET")?,
-        )]),
-        protocol: OtelHttpProtocol::Json,
-        tls: None,
-    },
-))?;
-
-metrics.counter("codex.session_started", 1, &[("source", "tui")])?;
-metrics.histogram("codex.request_latency", 83, &[("route", "chat")])?;
-```
+unset, empty, or unrecognized values retain the delta default. This setting does not change
+on-demand runtime snapshots.
 
 In-memory (tests):
 

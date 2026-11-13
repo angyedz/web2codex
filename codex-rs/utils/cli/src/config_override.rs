@@ -17,13 +17,14 @@ use toml::Value;
 /// calling code can decide how to interpret the right-hand side.
 #[derive(Parser, Debug, Default, Clone)]
 pub struct CliConfigOverrides {
-    /// Override a configuration value that would otherwise be loaded from
-    /// `~/.codex/config.toml`. Use a dotted path (`foo.bar.baz`) to override
-    /// nested values. The `value` portion is parsed as TOML. If it fails to
-    /// parse as TOML, the raw string is used as a literal.
+    /// Override a configuration value loaded from
+    /// `$WEB2CODEX_HOME/config.toml` (defaults to `~/.web2codex/config.toml`).
+    /// Use a dotted path (`foo.bar.baz`) to override nested values. The
+    /// `value` portion is parsed as TOML. If it fails to parse as TOML, the raw
+    /// string is used as a literal.
     ///
     /// Examples:
-    ///   - `-c model="o3"`
+    ///   - `-c model="<exact ChatGPT Web model label>"`
     ///   - `-c 'sandbox_permissions=["disk-full-read-access"]'`
     ///   - `-c shell_environment_policy.inherit=all`
     #[arg(

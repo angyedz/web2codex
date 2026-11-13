@@ -3,9 +3,11 @@
 //! This module owns the typed JSON-RPC calls needed by the TUI and keeps
 //! request/response plumbing out of `App` and `ChatWidget`.
 
+#[cfg(test)]
 mod account;
+#[cfg(test)]
 pub(crate) use account::SessionAccount;
-mod cloud_project;
+#[cfg(test)]
 mod daybreak_api_key_compat;
 mod events;
 mod external_agent_config;
@@ -51,29 +53,26 @@ use crate::local_settings::LocalSettings;
 use crate::service_tier_resolution;
 use crate::session_state::MessageHistoryMetadata;
 use crate::session_state::ThreadSessionState;
+#[cfg(test)]
 use crate::status::StatusAccountDisplay;
+#[cfg(test)]
 use crate::status::plan_type_display_name;
 use crate::terminal_visualization_instructions::with_terminal_visualization_instructions;
 use codex_app_server_client::AppServerClient;
 use codex_app_server_client::AppServerPath;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
-use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ConfigWriteResponse;
-use codex_app_server_protocol::GetAccountParams;
-use codex_app_server_protocol::GetAccountRateLimitsResponse;
-use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
 use codex_app_server_protocol::NewThreadModelDefaults;
-use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
@@ -149,6 +148,7 @@ use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
 use codex_config::ConfigLayerSource;
 use codex_context_fragments::SideConversationPolicy;
+#[cfg(test)]
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
@@ -361,18 +361,20 @@ pub(crate) fn is_method_unsupported(source: &JSONRPCErrorError, method: &str) ->
 /// its first frame without waiting for the rate-limit round-trip.
 pub(crate) struct AppServerBootstrap {
     pub(crate) duration: Duration,
+    #[cfg(test)]
     pub(crate) account_email: Option<String>,
-    pub(crate) auth_mode: Option<TelemetryAuthMode>,
-    pub(crate) status_account_display: Option<StatusAccountDisplay>,
+    #[cfg(test)]
+    pub(crate) auth_mode: Option<codex_otel::TelemetryAuthMode>,
+    #[cfg(test)]
+    pub(crate) status_account_display: Option<crate::status::StatusAccountDisplay>,
+    #[cfg(test)]
     pub(crate) plan_type: Option<codex_protocol::account::PlanType>,
-    /// Whether the configured model provider needs OpenAI-style auth. Combined
-    /// with `has_chatgpt_account` to decide if a startup rate-limit prefetch
-    /// should be fired.
+    #[cfg(test)]
     pub(crate) requires_openai_auth: bool,
-    /// Cloud supplies its model when it starts or resumes a thread.
+    #[cfg(test)]
+    pub(crate) has_chatgpt_account: bool,
     pub(crate) default_model: Option<String>,
     pub(crate) feedback_audience: FeedbackAudience,
-    pub(crate) has_chatgpt_account: bool,
     pub(crate) available_models: Vec<ModelPreset>,
     pub(crate) collaboration_modes: Vec<codex_protocol::config_types::CollaborationModeMask>,
     pub(crate) allowed_approval_policies: Option<Vec<AskForApproval>>,
@@ -413,10 +415,10 @@ pub(crate) struct AppServerSession {
     pub(crate) model_provider_override: Option<String>,
     history_support: ThreadHistorySupport,
     pub(crate) thread_settings_update_supported: bool,
-    cloud_model_selections: HashMap<ThreadId, user_message_submission::CloudModelSelection>,
     default_model: Option<String>,
     available_models: Vec<ModelPreset>,
     prefetched_model_list: Option<RemoteHandle<Result<Vec<ModelPreset>>>>,
+    #[cfg(test)]
     daybreak_api_key_compat: Arc<tokio::sync::Semaphore>,
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_id: Mutex<Option<String>>,
@@ -458,17 +460,6 @@ impl AutomaticThreadName {
 pub(crate) enum ThreadParamsMode {
     Embedded,
     Remote,
-    /// Native hosted sessions own their execution settings and workspace.
-    Cloud,
-}
-
-/// Identifies which side supplies execution settings for a conversation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ThreadSettingsOwner {
-    /// The client may send its configured settings as request overrides.
-    Client,
-    /// The server retains its settings unless changed through a dedicated API.
-    Server,
 }
 
 /// Determines where model settings come from when resuming a thread.
@@ -485,19 +476,12 @@ pub(crate) enum ResumeModelSettings {
 }
 
 impl ThreadParamsMode {
-    pub(crate) fn settings_owner(self) -> ThreadSettingsOwner {
-        match self {
-            Self::Embedded | Self::Remote => ThreadSettingsOwner::Client,
-            Self::Cloud => ThreadSettingsOwner::Server,
-        }
-    }
-
     fn workspace_roots_from_config(self, config: &Config) -> Option<Vec<AbsolutePathBuf>> {
         match self {
             Self::Embedded => Some(config.workspace_roots.clone()),
             // Client config paths belong to the client host. Let the server resolve its
             // defaults or restore the saved roots, then adopt the roots in its response.
-            Self::Remote | Self::Cloud => None,
+            Self::Remote => None,
         }
     }
 }
@@ -633,10 +617,10 @@ impl AppServerSession {
             model_provider_override: None,
             history_support: ThreadHistorySupport::Paginated,
             thread_settings_update_supported: true,
-            cloud_model_selections: HashMap::new(),
             default_model: None,
             available_models: Vec::new(),
             prefetched_model_list: None,
+            #[cfg(test)]
             daybreak_api_key_compat: Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             managed_new_thread_defaults: None,
             external_agent_config_import_id: Mutex::default(),
@@ -723,9 +707,6 @@ impl AppServerSession {
         app_event_tx: AppEventSender,
         status_updates: tokio::sync::broadcast::Sender<ThreadStatusChangedNotification>,
     ) -> std::io::Result<()> {
-        if self.thread_params_mode == ThreadParamsMode::Cloud {
-            return Ok(());
-        }
         let worktrees = if !self.uses_remote_workspace() && !config.active_project.is_untrusted() {
             // Listing a fresh, nonexistent thread is read-only and returns an empty page
             // on supported stores. Probe before advertising tools or allocating a checkout.
@@ -828,10 +809,7 @@ impl AppServerSession {
     }
 
     pub(crate) fn uses_remote_workspace(&self) -> bool {
-        matches!(
-            self.thread_params_mode,
-            ThreadParamsMode::Remote | ThreadParamsMode::Cloud
-        )
+        matches!(self.thread_params_mode, ThreadParamsMode::Remote)
     }
 
     pub(crate) fn uses_embedded_app_server(&self) -> bool {
@@ -895,15 +873,10 @@ impl AppServerSession {
     }
 
     fn request_model_list(&mut self) -> impl Future<Output = Result<Vec<ModelPreset>>> + use<> {
-        let mode = self.thread_params_mode;
         let handle = self.request_handle();
         let request_id = self.next_request_id();
         async move {
-            if mode == ThreadParamsMode::Cloud {
-                // Cloud activation supplies the model. Fetch the catalog on picker demand.
-                return Ok(Vec::new());
-            }
-            models::list(mode, handle, request_id).await.map_err(|err| {
+            models::list(handle, request_id).await.map_err(|err| {
                 bootstrap_request_error("model/list failed during TUI bootstrap", err)
             })
         }
@@ -911,8 +884,9 @@ impl AppServerSession {
 
     pub(crate) async fn bootstrap(&mut self, config: &Config) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
-        let account = self.read_account().await?;
-        let mut bootstrap = self.bootstrap_with_account(config, account).await?;
+        let mut bootstrap = self
+            .bootstrap_inner(config, EmptyCatalogFallback::Error)
+            .await?;
         bootstrap.duration = started_at.elapsed();
         Ok(bootstrap)
     }
@@ -922,30 +896,26 @@ impl AppServerSession {
         config: &Config,
     ) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
-        let account = self.read_account().await?;
         let mut bootstrap = self
-            .bootstrap_with_account_inner(config, account, EmptyCatalogFallback::ManagedNewThread)
+            .bootstrap_inner(config, EmptyCatalogFallback::ManagedNewThread)
             .await?;
         bootstrap.duration = started_at.elapsed();
         Ok(bootstrap)
     }
 
-    /// Bootstraps using a previously read account.
-    ///
-    /// Callers must discard a prefetched account after authentication, server, or provider changes.
+    #[cfg(test)]
     pub(crate) async fn bootstrap_with_account(
         &mut self,
         config: &Config,
-        account: GetAccountResponse,
+        _account: codex_app_server_protocol::GetAccountResponse,
     ) -> Result<AppServerBootstrap> {
-        self.bootstrap_with_account_inner(config, account, EmptyCatalogFallback::Error)
+        self.bootstrap_inner(config, EmptyCatalogFallback::Error)
             .await
     }
 
-    async fn bootstrap_with_account_inner(
+    async fn bootstrap_inner(
         &mut self,
         config: &Config,
-        account: GetAccountResponse,
         fallback: EmptyCatalogFallback,
     ) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
@@ -971,12 +941,6 @@ impl AppServerSession {
                     // A native transport may expose resolved thread permissions without
                     // exposing the conventional requirements catalog. Keep that absence
                     // distinct from an authoritative response with no requirements.
-                    Err(TypedRequestError::Server { source, .. })
-                        if self.thread_params_mode == ThreadParamsMode::Cloud
-                            && source.code == -32601 =>
-                    {
-                        Ok(None)
-                    }
                     Err(error) => Err(bootstrap_request_error(
                         "configRequirements/read failed during TUI bootstrap",
                         error,
@@ -991,18 +955,6 @@ impl AppServerSession {
                 requirements,
             );
         }
-        if matches!(account.account, Some(Account::ApiKey {})) {
-            available_models = self
-                .constrain_api_key_models(
-                    config,
-                    /*thread_id*/ None,
-                    requirements
-                        .as_ref()
-                        .and_then(|response| response.requirements.as_ref()),
-                    available_models,
-                )
-                .await;
-        }
         let allowed_approval_policies = requirements
             .as_ref()
             .and_then(|response| response.requirements.as_ref())
@@ -1011,10 +963,9 @@ impl AppServerSession {
             .and_then(|response| response.requirements)
             .and_then(|requirements| requirements.models)
             .and_then(|models| models.new_thread);
-        let default_model = (self.thread_params_mode.settings_owner()
-            == ThreadSettingsOwner::Client)
-            .then(|| config.model.clone())
-            .flatten()
+        let default_model = config
+            .model
+            .clone()
             .or_else(|| {
                 available_models
                     .iter()
@@ -1029,7 +980,7 @@ impl AppServerSession {
                     .as_ref()
                     .and_then(|defaults| defaults.model.clone()),
             });
-        if default_model.is_none() && self.thread_params_mode != ThreadParamsMode::Cloud {
+        if default_model.is_none() {
             color_eyre::eyre::bail!(
                 "No models are available. Set `model` explicitly or check your model catalog configuration."
             );
@@ -1037,16 +988,21 @@ impl AppServerSession {
         self.default_model.clone_from(&default_model);
         self.available_models = available_models.clone();
 
-        let account = SessionAccount::from(account);
         Ok(AppServerBootstrap {
             duration: started_at.elapsed(),
-            account_email: account.email().map(str::to_owned),
-            auth_mode: account.auth_mode(),
-            feedback_audience: account.feedback_audience(),
-            has_chatgpt_account: account.has_chatgpt_account(),
-            status_account_display: account.display,
-            plan_type: account.plan,
-            requires_openai_auth: account.requires_openai_auth,
+            #[cfg(test)]
+            account_email: None,
+            #[cfg(test)]
+            auth_mode: None,
+            #[cfg(test)]
+            status_account_display: None,
+            #[cfg(test)]
+            plan_type: None,
+            #[cfg(test)]
+            requires_openai_auth: false,
+            #[cfg(test)]
+            has_chatgpt_account: false,
+            feedback_audience: FeedbackAudience::External,
             default_model,
             available_models,
             collaboration_modes,
@@ -1066,12 +1022,15 @@ impl AppServerSession {
     ///
     /// Used by both `bootstrap` (to populate the initial UI) and `get_login_status`
     /// (to check auth mode without the overhead of a full bootstrap).
-    pub(crate) async fn read_account(&mut self) -> Result<GetAccountResponse> {
+    #[cfg(test)]
+    pub(crate) async fn read_account(
+        &mut self,
+    ) -> Result<codex_app_server_protocol::GetAccountResponse> {
         let account_request_id = self.next_request_id();
         self.request_handle
             .request_typed(ClientRequest::GetAccount {
                 request_id: account_request_id,
-                params: GetAccountParams {
+                params: codex_app_server_protocol::GetAccountParams {
                     refresh_token: false,
                 },
             })
@@ -1102,7 +1061,6 @@ impl AppServerSession {
             /*session_start_source*/ None,
             /*remote_cwd_override*/ None,
             /*selected_profile*/ None,
-            /*host_project_cwd*/ None,
         )
         .await
     }
@@ -1114,15 +1072,7 @@ impl AppServerSession {
         session_start_source: Option<ThreadStartSource>,
         remote_cwd_override: Option<&std::path::Path>,
         selected_profile: Option<&PermissionProfileSelection>,
-        host_project_cwd: Option<&std::path::Path>,
     ) -> Result<AppServerStartedThread> {
-        if self.thread_params_mode.settings_owner() == ThreadSettingsOwner::Server
-            && selected_profile.is_some()
-        {
-            color_eyre::eyre::bail!(
-                "Cloud conversations currently use server-selected permissions."
-            );
-        }
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(config);
         let mut params = thread_start_params_from_config(
@@ -1131,14 +1081,11 @@ impl AppServerSession {
             remote_cwd_override.or(self.remote_cwd_override.as_deref()),
             session_start_source,
         );
-        if self.thread_params_mode.settings_owner() == ThreadSettingsOwner::Client {
-            params.model_provider = self
-                .model_provider_override
-                .clone()
-                .or(params.model_provider);
-            params.daybreak_enabled =
-                (config.daybreak_enabled && !config.ephemeral).then_some(true);
-        }
+        params.model_provider = self
+            .model_provider_override
+            .clone()
+            .or(params.model_provider);
+        params.daybreak_enabled = (config.daybreak_enabled && !config.ephemeral).then_some(true);
         if let Some(selected_profile) = selected_profile {
             params.runtime_workspace_roots = None;
             params.permissions = Some(selected_profile.profile_id.clone());
@@ -1150,31 +1097,13 @@ impl AppServerSession {
         if self.history_support == ThreadHistorySupport::LegacyOnly {
             params.history_mode = None;
         }
-        if self.thread_params_mode.settings_owner() == ThreadSettingsOwner::Client {
-            self.thread_tool_transport()
-                .check_namespace(&self.request_handle, &config.cwd)
-                .await?;
-            self.thread_tool_transport().configure(&mut params);
-        }
+        self.thread_tool_transport()
+            .check_namespace(&self.request_handle, &config.cwd)
+            .await?;
+        self.thread_tool_transport().configure(&mut params);
         let request_handle = self.request_handle();
-        let project = if self.thread_params_mode == ThreadParamsMode::Cloud {
-            match host_project_cwd {
-                Some(cwd) => cloud_project::from_local_cwd(cwd).await,
-                None => None,
-            }
-        } else {
-            None
-        };
-        let started = match project {
-            Some(project) => request_handle
-                .start_cloud_project_thread(request_id, params, project)
-                .await
-                .map(|response| (response, ThreadHistorySupport::Paginated, false)),
-            None => {
-                request_thread_start_with_history_fallback(&request_handle, request_id, params)
-                    .await
-            }
-        };
+        let started =
+            request_thread_start_with_history_fallback(&request_handle, request_id, params).await;
         let (response, history_support, task_tools_available) = started.map_err(|err| {
             bootstrap_request_error("thread/start failed during TUI bootstrap", err)
         })?;
@@ -1281,7 +1210,7 @@ impl AppServerSession {
     ) -> Result<AppServerStartedThread> {
         let permission_mode = match self.thread_params_mode() {
             ThreadParamsMode::Embedded => ForkPermissionMode::OverrideFromCurrentConfig,
-            ThreadParamsMode::Remote | ThreadParamsMode::Cloud => ForkPermissionMode::InheritSaved,
+            ThreadParamsMode::Remote => ForkPermissionMode::InheritSaved,
         };
         self.fork_thread_at_with_presentation(
             local_settings,
@@ -1422,9 +1351,6 @@ impl AppServerSession {
         permission_mode: ForkPermissionMode,
         config_source: ForkConfigSource,
     ) -> Result<AppServerStartedThread> {
-        if self.thread_params_mode == ThreadParamsMode::Cloud {
-            color_eyre::eyre::bail!("Cloud conversations cannot be forked in the TUI yet.");
-        }
         self.thread_tool_transport()
             .check_namespace(&self.request_handle, &config.cwd)
             .await?;
@@ -1865,7 +1791,6 @@ impl AppServerSession {
         collaboration_mode: Option<codex_protocol::config_types::CollaborationMode>,
         output_schema: Option<serde_json::Value>,
         cyber_access_program: Option<codex_app_server_protocol::CyberAccessProgram>,
-        cloud_selection: Option<&user_message_submission::CloudModelSelection>,
     ) -> Result<TurnStartResponse> {
         let mut params = TurnStartParams {
             thread_id: thread_id.to_string(),
@@ -1876,24 +1801,19 @@ impl AppServerSession {
             cyber_access_program,
             ..TurnStartParams::default()
         };
-        if self.thread_params_mode.settings_owner() == ThreadSettingsOwner::Client {
-            let (sandbox_policy, permissions) =
-                turn_permissions_overrides(permissions_override, cwd.as_path())?;
-            params.cwd = Some(cwd);
-            params.runtime_workspace_roots = Some(workspace_roots.to_vec());
-            params.approval_policy = approval_policy;
-            params.approvals_reviewer = approvals_reviewer;
-            params.sandbox_policy = sandbox_policy;
-            params.permissions = permissions;
-            params.model = Some(model);
-            params.service_tier = service_tier;
-            params.effort = effort;
-            params.summary = summary;
-            params.collaboration_mode = collaboration_mode;
-        } else if let Some(selection) = cloud_selection {
-            params.model = Some(selection.model.clone());
-            params.effort.clone_from(&selection.effort);
-        }
+        let (sandbox_policy, permissions) =
+            turn_permissions_overrides(permissions_override, cwd.as_path())?;
+        params.cwd = Some(cwd);
+        params.runtime_workspace_roots = Some(workspace_roots.to_vec());
+        params.approval_policy = approval_policy;
+        params.approvals_reviewer = approvals_reviewer;
+        params.sandbox_policy = sandbox_policy;
+        params.permissions = permissions;
+        params.model = Some(model);
+        params.service_tier = service_tier;
+        params.effort = effort;
+        params.summary = summary;
+        params.collaboration_mode = collaboration_mode;
         let request_id = self.next_request_id();
         self.request_handle
             .request_typed(ClientRequest::TurnStart { request_id, params })
@@ -2321,14 +2241,12 @@ pub(crate) async fn start_thread_with_request_handle(
         launch_choices.approvals_reviewer,
         &launch_choices.approval_policy,
     );
-    if thread_params_mode.settings_owner() == ThreadSettingsOwner::Client {
-        thread_tool_transport
-            .check_namespace(&request_handle, &config.cwd)
-            .await?;
-        launch_choices.configure(&mut params);
-        params.daybreak_enabled = (config.daybreak_enabled && !config.ephemeral).then_some(true);
-        thread_tool_transport.configure(&mut params);
-    }
+    thread_tool_transport
+        .check_namespace(&request_handle, &config.cwd)
+        .await?;
+    launch_choices.configure(&mut params);
+    params.daybreak_enabled = (config.daybreak_enabled && !config.ephemeral).then_some(true);
+    thread_tool_transport.configure(&mut params);
     let (response, _history_support, task_tools_available) =
         request_thread_start_with_history_fallback(&request_handle, request_id, params)
             .await
@@ -2342,6 +2260,7 @@ pub(crate) async fn start_thread_with_request_handle(
     Ok(started)
 }
 
+#[cfg(test)]
 pub(crate) fn workspace_display(
     name: Option<String>,
     routing: Option<codex_app_server_protocol::WorkspaceRouting>,
@@ -2356,6 +2275,7 @@ pub(crate) fn workspace_display(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn status_account_display_from_auth_mode(
     auth_mode: Option<AuthMode>,
     plan_type: Option<codex_protocol::account::PlanType>,
@@ -2678,9 +2598,6 @@ fn thread_start_params_with_reviewer(
     reviewer_source: startup_launch::StartupApprovalsReviewer,
     policy_source: &startup_launch::StartupApprovalPolicy,
 ) -> ThreadStartParams {
-    if thread_params_mode.settings_owner() == ThreadSettingsOwner::Server {
-        return ThreadStartParams::default();
-    }
     let permissions = permissions_selection_from_config(config, thread_params_mode);
     let sandbox = permissions
         .is_none()
@@ -2732,13 +2649,10 @@ fn thread_resume_params_from_config(
     model_settings: ResumeModelSettings,
     permission_overrides: crate::resume_permissions::ResumePermissions,
 ) -> ThreadResumeParams {
-    if thread_params_mode.settings_owner() == ThreadSettingsOwner::Server
-        || matches!(
-            model_settings,
-            ResumeModelSettings::PreserveExistingThread
-                | ResumeModelSettings::PreserveSideConversation
-        )
-    {
+    if matches!(
+        model_settings,
+        ResumeModelSettings::PreserveExistingThread | ResumeModelSettings::PreserveSideConversation
+    ) {
         return ThreadResumeParams {
             thread_id: thread_id.to_string(),
             developer_instructions: if model_settings
@@ -2867,7 +2781,7 @@ fn thread_cwd_from_config(
 ) -> Option<String> {
     match thread_params_mode {
         ThreadParamsMode::Embedded => Some(config.cwd.to_string_lossy().to_string()),
-        ThreadParamsMode::Remote | ThreadParamsMode::Cloud => {
+        ThreadParamsMode::Remote => {
             remote_cwd_override.map(|cwd| cwd.to_string_lossy().to_string())
         }
     }
@@ -3070,7 +2984,7 @@ fn display_permission_profile_from_thread_response(
             PermissionProfile::from_legacy_sandbox_policy_for_cwd(&sandbox.to_core(), cwd)
         }
         ThreadParamsMode::Embedded => config.permissions.effective_permission_profile(),
-        ThreadParamsMode::Remote | ThreadParamsMode::Cloud => {
+        ThreadParamsMode::Remote => {
             PermissionProfile::from_legacy_sandbox_policy_for_cwd(&sandbox.to_core(), cwd)
         }
     }
@@ -3137,26 +3051,6 @@ async fn thread_session_state_from_thread_response(
         network_proxy: None,
         rollout_path,
     })
-}
-
-pub(crate) fn app_server_rate_limit_snapshots(
-    response: GetAccountRateLimitsResponse,
-) -> Vec<RateLimitSnapshot> {
-    let primary_limit_id = response.rate_limits.limit_id.clone();
-    let mut snapshots = vec![response.rate_limits];
-    if let Some(by_limit_id) = response.rate_limits_by_limit_id {
-        snapshots.extend(by_limit_id.into_iter().filter_map(|(limit_id, snapshot)| {
-            if primary_limit_id.as_deref().is_some_and(|primary_limit_id| {
-                primary_limit_id == limit_id
-                    || Some(primary_limit_id) == snapshot.limit_id.as_deref()
-            }) {
-                None
-            } else {
-                Some(snapshot)
-            }
-        }));
-    }
-    snapshots
 }
 
 #[cfg(test)]
@@ -3453,25 +3347,6 @@ mod tests {
         Ok(())
     }
 
-    fn rate_limit_snapshot(limit_id: &str) -> RateLimitSnapshot {
-        RateLimitSnapshot {
-            limit_id: Some(limit_id.to_string()),
-            limit_name: None,
-            normal_model_slug: None,
-            primary: Some(codex_app_server_protocol::RateLimitWindow {
-                used_percent: 0,
-                window_duration_mins: Some(10_080),
-                resets_at: None,
-            }),
-            secondary: None,
-            credits: None,
-            individual_limit: None,
-            spend_control_reached: None,
-            plan_type: None,
-            rate_limit_reached_type: None,
-        }
-    }
-
     fn api_model_with_upgrade_retirement_at(retirement_at: Option<i64>) -> ApiModel {
         ApiModel {
             id: "model-id".to_string(),
@@ -3536,31 +3411,6 @@ mod tests {
                 expected_upgrade(None),
                 expected_upgrade(None),
             ]
-        );
-    }
-
-    #[test]
-    fn app_server_rate_limit_snapshots_deduplicates_top_level_limit_from_map() {
-        let response = GetAccountRateLimitsResponse {
-            ordinary_usage_allowed: None,
-            account_id: None,
-            rate_limit_upsell: None,
-            rate_limits: rate_limit_snapshot("codex"),
-            rate_limits_by_limit_id: Some(HashMap::from([
-                ("codex".to_string(), rate_limit_snapshot("codex")),
-                ("other".to_string(), rate_limit_snapshot("other")),
-            ])),
-            rate_limit_reset_credits: None,
-        };
-
-        let snapshots = app_server_rate_limit_snapshots(response);
-
-        assert_eq!(
-            snapshots
-                .iter()
-                .map(|snapshot| snapshot.limit_id.as_deref())
-                .collect::<Vec<_>>(),
-            vec![Some("codex"), Some("other")]
         );
     }
 

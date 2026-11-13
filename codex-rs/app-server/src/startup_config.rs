@@ -1,8 +1,6 @@
 //! One-shot configuration discovery. Never initializes environments, thread storage, or plugins.
 
 use crate::config_manager::ConfigManager;
-use crate::request_processors::account_processor::clear_account_configuration;
-use crate::request_processors::account_processor::logout_configured_account;
 use crate::request_processors::config_errors::config_load_error;
 use crate::request_processors::config_processor::map_requirements_to_api;
 use codex_app_server_protocol::ClientInfo;
@@ -12,13 +10,9 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_core::config::find_codex_home;
-use codex_login::AuthManager;
 use codex_login::default_client::SetOriginatorError;
 use codex_login::default_client::USER_AGENT_SUFFIX;
-use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
-use codex_login::is_workload_identity_selected;
-use codex_login::read_codex_access_token_from_env;
 use codex_utils_cli::CliConfigOverrides;
 use serde::Serialize;
 use std::io;
@@ -27,10 +21,6 @@ use std::sync::Arc;
 
 #[derive(Debug, clap::Args)]
 pub struct StartupConfigArgs {
-    /// Sign out using the managed auth path before loading fresh startup requirements.
-    #[arg(long, requires = "print_startup_config")]
-    pub startup_sign_out: bool,
-
     /// Validate configuration and print requirements as JSON without starting the app server.
     #[arg(long, conflicts_with_all = ["listen", "stdio", "remote_control", "managed_daemon"])]
     pub print_startup_config: bool,
@@ -83,13 +73,6 @@ async fn read_startup_config(
     strict_config: bool,
     startup: StartupConfigArgs,
 ) -> Result<StartupConfig, JSONRPCErrorError> {
-    if startup.startup_sign_out
-        && (is_workload_identity_selected() || read_codex_access_token_from_env().is_some())
-    {
-        return Err(crate::error_code::invalid_request(
-            "Configured external authentication is owned by the app-server host and cannot be changed during startup recovery.",
-        ));
-    }
     if let Some(client) = startup.startup_client_info {
         match set_default_originator(client.name.clone()) {
             Ok(()) | Err(SetOriginatorError::AlreadyInitialized) => {}
@@ -119,38 +102,11 @@ async fn read_startup_config(
         Arc::new(NoopThreadConfigLoader),
     );
     let cwd = std::env::current_dir().ok();
-    let loaded = manager
-        .load_managed_startup_config(cwd.clone())
+    let config = manager
+        .load_startup_config(cwd.clone())
         .await
-        .map_err(startup_error)?;
-    let config = match loaded.config {
-        Ok(config) => config,
-        // Recovery retains local credential settings when cloud policy is unavailable.
-        Err(_) if startup.startup_sign_out => loaded.bootstrap.clone(),
-        Err(error) => return Err(startup_error(error)),
-    };
-    let config = if startup.startup_sign_out {
-        // Preserve local credential authority while using the effective HTTP route.
-        let mut auth_config = loaded.bootstrap.auth_config();
-        auth_config.auth_route_config = config.auth_route_config();
-        auth_config.chatgpt_base_url = Some(config.chatgpt_base_url.clone());
-        let auth = AuthManager::shared_from_auth_config(
-            auth_config,
-            /*enable_codex_api_key_env*/ false,
-        )
-        .await
-        .map_err(|error| startup_error(io::Error::other(error)))?;
-        set_default_client_residency_requirement(config.enforce_residency.value());
-        let config = logout_configured_account(&manager, &auth, &config).await?;
-        clear_account_configuration(&manager, &config).await?;
-        manager.update_managed_config_loader(Arc::clone(&auth), &config);
-        manager
-            .load_latest_config(cwd)
-            .await
-            .map_err(startup_error)?
-    } else {
-        config
-    };
+        .map_err(startup_error)?
+        .config;
     // Validate and emit the fetched snapshot, or the fresh signed-out snapshot.
     config
         .validate_windows_mxc_requirement()

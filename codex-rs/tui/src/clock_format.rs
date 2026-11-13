@@ -15,6 +15,7 @@ impl ClockFormat {
         *FORMAT.get_or_init(|| detect().unwrap_or(Self::TwelveHour))
     }
 
+    #[cfg(test)]
     pub(crate) fn date_time_format(self) -> &'static str {
         match self {
             Self::TwelveHour => "%b %-d %-I:%M %p",

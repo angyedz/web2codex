@@ -14,7 +14,6 @@ use crate::app_event::HistoryLookupResponse;
 use crate::app_event::PermissionProfileSelection;
 use crate::app_event::PluginLocation;
 use crate::app_event::PluginRemoteSectionError;
-use crate::app_event::RateLimitRefreshOrigin;
 use crate::app_event::RunningTaskExitAction;
 use crate::app_event::ThreadTitleDestination;
 #[cfg(target_os = "windows")]
@@ -24,7 +23,6 @@ use crate::app_server_session::AppServerBootstrap;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::AppServerStartedThread;
 use crate::app_server_session::TurnPermissionsOverride;
-use crate::app_server_session::app_server_rate_limit_snapshots;
 use crate::bottom_pane::AppLinkViewParams;
 use crate::bottom_pane::ApplyPatchApprovalRequest;
 use crate::bottom_pane::ApprovalRequest;
@@ -96,7 +94,6 @@ use crate::workspace_command::WorkspaceCommandRunner;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
-use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
@@ -105,7 +102,6 @@ use codex_app_server_protocol::ConfigReadResponse;
 use codex_app_server_protocol::ConfigValueWriteParams;
 use codex_app_server_protocol::ConfigWriteResponse;
 use codex_app_server_protocol::FeedbackUploadParams;
-use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::HooksListEntry;
 use codex_app_server_protocol::ListMcpServerStatusParams;
 use codex_app_server_protocol::ListMcpServerStatusResponse;
@@ -125,7 +121,6 @@ use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallParams;
 use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::SandboxMode as AppServerSandboxMode;
-use codex_app_server_protocol::SendAddCreditsNudgeEmailParams;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillErrorInfo;
@@ -197,7 +192,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use toml::Value as TomlValue;
 use uuid::Uuid;
-mod account_status;
 mod agent_message_consolidation;
 mod agent_navigation;
 mod agent_picker;
@@ -216,12 +210,12 @@ mod app_server_event_targets;
 mod app_server_events;
 pub(crate) mod app_server_requests;
 mod app_server_thread_ownership;
-mod backend_banner_fallback;
 mod backend_events;
 mod backend_registry;
 pub(crate) mod backend_selection;
 pub(crate) mod backend_sessions;
 mod background_requests;
+#[cfg(test)]
 mod cloud_switch_wait;
 #[cfg(test)]
 pub(crate) use cloud_switch_wait::wait_for_cloud_switch;
@@ -259,7 +253,6 @@ mod pets;
 mod platform_actions;
 mod plugin_mentions;
 pub(crate) mod provider;
-mod rate_limit_refresh;
 mod realtime_delivery;
 mod realtime_settings;
 mod reasoning_replay;
@@ -596,9 +589,8 @@ pub(crate) struct App {
     last_thread_usage_status_cell: Option<history_ui::ThreadUsageStatusHistory>,
     pub(crate) pending_thread_usage_history_refresh: bool,
 
-    // Alternate-screen overlays: transcript, diff, and analytics.
+    // Alternate-screen overlays: transcript and diff.
     pub(crate) overlay: Option<Overlay>,
-    pub(crate) retained_analytics: Option<Box<crate::analytics::AnalyticsView>>,
     pub(crate) deferred_history_lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
     has_emitted_history_lines: bool,
     transcript_reflow: TranscriptReflowState,
@@ -714,9 +706,6 @@ pub(crate) struct App {
     /// modal's terminal input has not settled.
     startup_pending_protected_request: bool,
     /// Invalidates in-flight full rate-limit reads when a newer rolling hard stop arrives.
-    account_email_request_id: Option<uuid::Uuid>,
-    rate_limit_hard_stop_generation: u64,
-    rate_limit_refresh_state: rate_limit_refresh::RateLimitRefreshState,
     pending_mcp_login_start: Option<PendingMcpLoginStart>,
     // Latest accepted attempt per server; stale retry completions must not update the UI.
     active_mcp_login_ids: HashMap<String, String>,

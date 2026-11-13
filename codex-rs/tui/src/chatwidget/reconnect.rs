@@ -191,6 +191,7 @@ impl ChatWidget {
         self.bottom_pane.active_view_id() == Some(view_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn composer_paste_deadline(&self) -> Option<Instant> {
         self.bottom_pane.composer_paste_deadline()
     }

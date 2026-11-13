@@ -160,10 +160,6 @@ impl App {
             || self.chat_widget.has_queued_follow_up_messages()
             || self.backtrack.primed
             || self.backtrack.overlay_preview_active
-            || self
-                .chat_widget
-                .usage_notice(width.saturating_sub(/*rhs*/ 2))
-                .is_some()
         {
             return None;
         }

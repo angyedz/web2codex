@@ -1,6 +1,5 @@
 use codex_app_server_protocol::ModelProviderError;
 use codex_arg0::Arg0DispatchPaths;
-use codex_cloud_config::managed_config_bundle_loader;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerStack;
 use codex_config::LoaderOverrides;
@@ -13,7 +12,6 @@ use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_exec_server::LOCAL_FS;
 use codex_features::feature_for_key;
-use codex_login::AuthManager;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
@@ -68,12 +66,6 @@ struct EmaCancellationRoots {
 pub(crate) struct StartupConfig {
     pub(crate) config: Config,
     pub(crate) used_defaults: bool,
-}
-
-/// Local auth authority and the cloud-backed configuration loaded with it.
-pub(crate) struct CloudStartupConfig {
-    pub(crate) bootstrap: Config,
-    pub(crate) config: std::io::Result<Config>,
 }
 
 /// Configuration and policy must finish loading against the same account and cloud snapshot.
@@ -189,39 +181,6 @@ impl ConfigManager {
             self.runtime_feature_enablement.write().map_err(|_| ())?;
         runtime_feature_enablement.extend(enablement);
         Ok(())
-    }
-
-    pub(crate) fn update_managed_config_loader(
-        &self,
-        auth_manager: Arc<AuthManager>,
-        config: &Config,
-    ) {
-        // Keep config-server settings and their refresh worker when only
-        // ChatGPT/API-key credentials change.
-        if self
-            .current_managed_config_loader()
-            .config_server()
-            .is_some()
-        {
-            self.revoke_mcp_ema();
-            return;
-        }
-        let loader = managed_config_bundle_loader(
-            auth_manager,
-            config.chatgpt_base_url.clone(),
-            self.codex_home.clone(),
-            config
-                .http_client_factory()
-                .with_network_policy(self.local_network_policy.policy()),
-            config.config_layer_stack.requirements_toml(),
-        );
-        if let Ok(mut guard) = self.cloud_config_bundle.write() {
-            guard.retire_ema_policy();
-            *guard = loader;
-        } else {
-            warn!("failed to update cloud config bundle loader");
-        }
-        self.revoke_mcp_ema();
     }
 
     pub(crate) fn clear_chatgpt_config_loader(&self) {
@@ -416,22 +375,6 @@ impl ConfigManager {
             ));
         }
         Ok(())
-    }
-
-    /// Load local policy before auth, then fetch the account's cloud configuration.
-    /// Callers choose their error/recovery policy before initializing any runtimes.
-    pub(crate) async fn load_managed_startup_config(
-        &self,
-        cwd: Option<PathBuf>,
-    ) -> std::io::Result<CloudStartupConfig> {
-        let bootstrap = self.load_startup_config(cwd.clone()).await?.config;
-        let auth =
-            AuthManager::shared_from_config(&bootstrap, /*enable_codex_api_key_env*/ false)
-                .await
-                .map_err(std::io::Error::other)?;
-        self.update_managed_config_loader(auth, &bootstrap);
-        let config = self.load_latest_config(cwd).await;
-        Ok(CloudStartupConfig { bootstrap, config })
     }
 
     /// Installs local policy before cloud access; failed policy loads block traffic while
@@ -697,6 +640,15 @@ impl ConfigManager {
             .build_with_validation(validate)
             .await;
         let mut config = result?;
+        if self.web2codex_provider_is_forced() && config.model_provider_id != "web2codex" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Web2Codex only supports ChatGPT Web models; provider `{}` is disabled.",
+                    config.model_provider_id
+                ),
+            ));
+        }
         self.check_application_policy_load(&policy_load)?;
         self.apply_network_policy(&mut config);
         self.apply_runtime_feature_enablement(&mut config);
@@ -705,6 +657,12 @@ impl ConfigManager {
             .config_layer_stack
             .with_mcp_ema_cancellation(mcp_ema_cancellation);
         Ok(config)
+    }
+
+    pub(crate) fn web2codex_provider_is_forced(&self) -> bool {
+        self.current_cli_overrides()
+            .iter()
+            .any(|(key, value)| key == "model_provider" && value.as_str() == Some("web2codex"))
     }
 
     pub(crate) async fn load_config_layers_for_cwd(

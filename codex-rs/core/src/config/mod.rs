@@ -1525,6 +1525,10 @@ impl AuthManagerConfig for Config {
     fn auth_route_config(&self) -> AuthRouteConfig {
         Config::auth_route_config(self)
     }
+
+    fn managed_auth_enabled(&self) -> bool {
+        self.model_provider_id != "web2codex"
+    }
 }
 
 #[derive(Clone, Default)]
@@ -2039,6 +2043,7 @@ impl Config {
             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
             use_legacy_landlock: self.features.use_legacy_landlock(),
             apps_enabled: self.features.enabled(Feature::Apps),
+            account_auth_enabled: self.model_provider_id != "web2codex",
             apps_early_resource_discovery: self
                 .features
                 .enabled(Feature::AppsEarlyResourceDiscovery),

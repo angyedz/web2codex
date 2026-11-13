@@ -1,9 +1,9 @@
-//! Commands for managing Codex Web's first-party native WebView process.
+//! Commands for managing Web2Codex's private native WebView process.
 
 use std::fs;
 use std::io::{IsTerminal, Read, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -52,6 +52,7 @@ enum WebSubcommand {
         workspace: PathBuf,
     },
     /// Configure, inspect, or remove OpenAI Secure MCP Tunnel credentials.
+    #[command(hide = true)]
     Tunnel {
         #[command(subcommand)]
         command: TunnelSubcommand,
@@ -76,6 +77,107 @@ enum TunnelSubcommand {
 struct BrowserState {
     address: SocketAddr,
     token: String,
+}
+
+/// Returns transient provider overrides that force the local TUI through ChatGPT Web.
+/// This deliberately wins over configured model providers: Web2Codex has no API-model fallback.
+pub(crate) fn interactive_provider_overrides(cwd: Option<&Path>) -> anyhow::Result<Vec<String>> {
+    let workspace = match cwd {
+        Some(cwd) if cwd.is_absolute() => cwd.to_path_buf(),
+        Some(cwd) => std::env::current_dir()?.join(cwd),
+        None => std::env::current_dir()?,
+    };
+    start_configured_tunnel_if_available(&workspace);
+    ensure_browser_started()?;
+    let state = read_state()?;
+    anyhow::ensure!(
+        state.address.ip().is_loopback(),
+        "Web2Codex browser daemon must listen on a loopback address"
+    );
+    anyhow::ensure!(
+        !state.token.is_empty(),
+        "Web2Codex browser daemon state has no bearer credential"
+    );
+
+    let origin = format!("http://{}", state.address);
+    let base_url = format!("{origin}/v1");
+    let model_catalog_url = format!("{origin}/models");
+    let executable =
+        std::env::current_exe().context("failed to locate the Web2Codex executable")?;
+    let quote =
+        |value: &str| serde_json::to_string(value).expect("string serialization cannot fail");
+    let mcp_args = serde_json::to_string(&[
+        "web".to_string(),
+        "mcp-server".to_string(),
+        "--workspace".to_string(),
+        workspace.to_string_lossy().into_owned(),
+    ])?;
+
+    Ok(vec![
+        "model_provider=\"web2codex\"".to_string(),
+        format!("model_providers.web2codex.name={}", quote("Web2Codex")),
+        format!("model_providers.web2codex.base_url={}", quote(&base_url)),
+        format!(
+            "model_providers.web2codex.model_catalog_url={}",
+            quote(&model_catalog_url)
+        ),
+        format!(
+            "model_providers.web2codex.experimental_bearer_token={}",
+            quote(&state.token)
+        ),
+        "model_providers.web2codex.wire_api=\"responses\"".to_string(),
+        "model_providers.web2codex.requires_openai_auth=false".to_string(),
+        "model_providers.web2codex.supports_websockets=false".to_string(),
+        "model_providers.web2codex.supports_standalone_web_search=false".to_string(),
+        "web_search_mode=\"disabled\"".to_string(),
+        format!(
+            "mcp_servers.web2codex_native.command={}",
+            quote(&executable.to_string_lossy())
+        ),
+        format!("mcp_servers.web2codex_native.args={mcp_args}"),
+        format!(
+            "mcp_servers.web2codex_native.cwd={}",
+            quote(&workspace.to_string_lossy())
+        ),
+        "mcp_servers.web2codex_native.enabled=true".to_string(),
+        "mcp_servers.web2codex_native.required=true".to_string(),
+        "mcp_servers.web2codex_native.default_tools_approval_mode=\"prompt\"".to_string(),
+        "analytics.enabled=false".to_string(),
+        "feedback.enabled=false".to_string(),
+        "cloud.skills.enabled=false".to_string(),
+        "include_apps_instructions=false".to_string(),
+        "features.apps=false".to_string(),
+        // Image generation is an OpenAI API endpoint; ChatGPT Web owns its image tools.
+        "features.image_generation=false".to_string(),
+        "features.realtime_conversation=false".to_string(),
+        "features.use_agent_identity=false".to_string(),
+        "features.runtime_agent_instances=false".to_string(),
+        // ChatGPT account backed plugin catalogs and sharing are not part of
+        // the Web2Codex runtime. Local plugin MCP servers remain available.
+        "features.remote_plugin=false".to_string(),
+        "features.plugin_sharing=false".to_string(),
+        // Guardian V2 starts a separate reviewer model session for tool approvals. Keep it
+        // disabled here: the only supported inference path is the ChatGPT WebView. The normal
+        // harness approval prompts and sandbox checks remain active.
+        "features.guardianv2=false".to_string(),
+        "features.guardianv2_decisions_comparison=false".to_string(),
+    ])
+}
+
+fn start_configured_tunnel_if_available(workspace: &Path) {
+    let Ok((manager, scope, api_key_name, tunnel_id_name)) = tunnel_secrets() else {
+        return;
+    };
+    let Ok(Some(api_key)) = manager.get(&scope, &api_key_name) else {
+        return;
+    };
+    let Ok(Some(tunnel_id)) = manager.get(&scope, &tunnel_id_name) else {
+        return;
+    };
+    if let Err(error) = crate::web_tunnel::start(&tunnel_id, &api_key, workspace) {
+        eprintln!("Web2Codex MCP tunnel could not start automatically: {error}");
+        eprintln!("In the chat, enter `/mcp tunnel` to configure it again.");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,12 +207,12 @@ pub(crate) fn run(command: WebCommand) -> anyhow::Result<()> {
     match command {
         WebSubcommand::Start => {
             ensure_browser_started()?;
-            println!("Codex Web is running in the background. Its window is hidden.");
+            println!("Web2Codex browser is running in the background. Its window is hidden.");
         }
         WebSubcommand::Open | WebSubcommand::Setup => {
             ensure_browser_started()?;
             send_control(ControlAction::Open)?;
-            println!("Opened the private Codex Web window.");
+            println!("Opened the private Web2Codex window.");
         }
         WebSubcommand::Login => {
             ensure_browser_started()?;
@@ -119,16 +221,16 @@ pub(crate) fn run(command: WebCommand) -> anyhow::Result<()> {
         }
         WebSubcommand::Hide => {
             send_control(ControlAction::Hide)?;
-            println!("Hid the Codex Web window; the lightweight controller is still running.");
+            println!("Hid the Web2Codex window; the lightweight controller is still running.");
         }
         WebSubcommand::Status => match send_control(ControlAction::Status) {
-            Ok(()) => println!("Codex Web browser is running."),
-            Err(_) => println!("Codex Web browser is stopped."),
+            Ok(()) => println!("Web2Codex browser is running."),
+            Err(_) => println!("Web2Codex browser is stopped."),
         },
         WebSubcommand::Models => print_account_capabilities()?,
         WebSubcommand::Stop => match send_control(ControlAction::Stop) {
-            Ok(()) => println!("Stopped the Codex Web browser."),
-            Err(_) => println!("Codex Web browser is already stopped."),
+            Ok(()) => println!("Stopped the Web2Codex browser."),
+            Err(_) => println!("Web2Codex browser is already stopped."),
         },
         WebSubcommand::McpServer { workspace } => crate::web_mcp_server::run(workspace)?,
         WebSubcommand::Tunnel { command } => match command {
@@ -217,18 +319,18 @@ fn configure_tunnel_credentials() -> anyhow::Result<()> {
         }
         return Err(error).context("failed to save the OpenAI tunnel API key");
     }
-    println!("Tunnel credentials saved in Codex's encrypted secret store.");
+    println!("Tunnel credentials saved in Web2Codex's encrypted secret store.");
     start_tunnel_runtime().context("credentials were saved, but the MCP tunnel did not start")
 }
 
 fn start_tunnel_runtime() -> anyhow::Result<()> {
     let (manager, scope, api_key_name, tunnel_id_name) = tunnel_secrets()?;
-    let api_key = manager
-        .get(&scope, &api_key_name)?
-        .context("OpenAI tunnel API key is not configured; run `web2codex web tunnel configure`")?;
+    let api_key = manager.get(&scope, &api_key_name)?.context(
+        "OpenAI tunnel API key is not configured; open the chat and enter `/mcp tunnel`",
+    )?;
     let tunnel_id = manager
         .get(&scope, &tunnel_id_name)?
-        .context("OpenAI tunnel ID is not configured; run `web2codex web tunnel configure`")?;
+        .context("OpenAI tunnel ID is not configured; open the chat and enter `/mcp tunnel`")?;
     let workspace = std::env::current_dir().context("failed to resolve the workspace directory")?;
     crate::web_tunnel::start(&tunnel_id, &api_key, &workspace)
 }
@@ -338,7 +440,7 @@ fn ensure_browser_started() -> anyhow::Result<()> {
     }
 
     let executable = find_browser_executable().context(
-        "the bundled Codex Web browser was not found; reinstall Codex Web or set CODEX_WEB_BROWSER_BIN",
+        "the bundled Web2Codex browser was not found; reinstall Web2Codex or set WEB2CODEX_WEBVIEW_BIN",
     )?;
     let mut process = Command::new(&executable);
     process
@@ -353,7 +455,7 @@ fn ensure_browser_started() -> anyhow::Result<()> {
     }
     let mut child = process.spawn().with_context(|| {
         format!(
-            "failed to start the Codex Web browser at {}",
+            "failed to start the Web2Codex browser at {}",
             executable.display()
         )
     })?;
@@ -365,14 +467,14 @@ fn ensure_browser_started() -> anyhow::Result<()> {
         }
         if let Some(status) = child.try_wait()? {
             anyhow::bail!(
-                "Codex Web browser exited during startup with {status}; check that a graphical session and the required native WebView runtime are available"
+                "Web2Codex browser exited during startup with {status}; check that a graphical session and the required native WebView runtime are available"
             );
         }
     }
     let _ = child.kill();
     let status = child.wait().ok();
     anyhow::bail!(
-        "Codex Web browser did not start{}; check that a graphical session and the required native WebView runtime are available",
+        "Web2Codex browser did not start{}; check that a graphical session and the required native WebView runtime are available",
         status.map_or_else(String::new, |status| format!(" ({status})")),
     )
 }
@@ -403,7 +505,7 @@ fn send_control(action: ControlAction) -> anyhow::Result<()> {
     stream.read_to_string(&mut response)?;
     if !response.starts_with("HTTP/1.1 204") {
         let body = response.split_once("\r\n\r\n").map_or("", |(_, body)| body);
-        anyhow::bail!("Codex Web browser rejected the control request: {body}");
+        anyhow::bail!("Web2Codex browser rejected the control request: {body}");
     }
     Ok(())
 }
@@ -412,15 +514,15 @@ fn read_state() -> anyhow::Result<BrowserState> {
     let state_path = data_directory()?.join("browser-state.json");
     let contents = fs::read_to_string(&state_path).with_context(|| {
         format!(
-            "Codex Web browser state is missing: {}",
+            "Web2Codex browser state is missing: {}",
             state_path.display()
         )
     })?;
-    serde_json::from_str(&contents).context("Codex Web browser state is invalid")
+    serde_json::from_str(&contents).context("Web2Codex browser state is invalid")
 }
 
 fn find_browser_executable() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("CODEX_WEB_BROWSER_BIN").map(PathBuf::from) {
+    if let Some(path) = std::env::var_os("WEB2CODEX_WEBVIEW_BIN").map(PathBuf::from) {
         if path.is_file() {
             return Some(path);
         }
@@ -447,11 +549,11 @@ fn find_browser_executable() -> Option<PathBuf> {
 }
 
 fn data_directory() -> anyhow::Result<PathBuf> {
-    if let Some(configured) = std::env::var_os("CODEX_WEB_DATA_DIR") {
+    if let Some(configured) = std::env::var_os("WEB2CODEX_WEB_DATA_DIR") {
         let path = PathBuf::from(configured);
         fs::create_dir_all(&path).with_context(|| {
             format!(
-                "failed to create Codex Web data directory {}",
+                "failed to create Web2Codex browser data directory {}",
                 path.display()
             )
         })?;
@@ -465,18 +567,18 @@ fn data_directory() -> anyhow::Result<PathBuf> {
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join("AppData/Local"))
-            .join("Codex Web")
+            .join("Web2Codex/Browser")
     } else if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/Codex Web")
+        home.join("Library/Application Support/Web2Codex/Browser")
     } else {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"))
-            .join("codex-web")
+            .join("web2codex/browser")
     };
     fs::create_dir_all(&path).with_context(|| {
         format!(
-            "failed to create Codex Web data directory {}",
+            "failed to create Web2Codex browser data directory {}",
             path.display()
         )
     })?;

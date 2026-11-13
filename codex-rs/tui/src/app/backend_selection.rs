@@ -2,9 +2,6 @@
 
 use super::backend_sessions::BackendSessions;
 use super::backend_sessions::SessionSlot;
-use super::cloud_switch_wait::ClipboardHandoff;
-use super::cloud_switch_wait::finish_failed_cloud_switch;
-use super::cloud_switch_wait::wait_for_cloud_switch;
 use super::resume_preparation::ResumeSource;
 use super::session_lifecycle::PreparedFreshSession;
 use super::session_lifecycle::ThreadAttachPresentation;
@@ -20,7 +17,6 @@ pub(super) enum NewBackendSession {
 /// belong to the executor and must never determine where this preference is saved.
 pub(crate) struct BackendPreferenceContext {
     pub(crate) local_cwd: Option<PathBuf>,
-    auth: codex_login::AuthConfig,
     project_root_markers: Vec<String>,
 }
 
@@ -38,7 +34,6 @@ impl BackendPreferenceContext {
             .unwrap_or_else(codex_config::default_project_root_markers);
         Self {
             local_cwd,
-            auth: config.auth_config(),
             project_root_markers,
         }
     }
@@ -52,28 +47,9 @@ impl BackendPreferenceContext {
         )
         .await
         .ok()?;
-        let auth = self
-            .auth
-            .load_auth(/*enable_codex_api_key_env*/ false)
-            .await
-            .ok()?;
-        let user = if let Some(id) = auth
-            .as_ref()
-            .and_then(codex_login::CodexAuth::get_chatgpt_user_id)
-        {
-            format!("chatgpt:{id}")
-        } else if auth
-            .as_ref()
-            .is_some_and(codex_login::CodexAuth::is_chatgpt_auth)
-        {
-            return None;
-        } else {
-            // A local profile without an account is already private to its CODEX_HOME.
-            "local".to_string()
-        };
         Some((
             codex_config::loader::project_trust_key(project.as_path()),
-            user,
+            "local".to_string(),
         ))
     }
 }
@@ -149,9 +125,6 @@ impl App {
             .get(&owner)
             .cloned()
             .ok_or("Connection settings are unavailable.")?;
-        if settings.target == AppServerTarget::Cloud && self.chat_widget.thread_id().is_some() {
-            self.remember_attached_host_project(backends.session_at(outgoing_slot));
-        }
         let preference = if matches!(session, NewBackendSession::CarryDraft)
             && let Some(key) = backends.preference_key(slot)
         {
@@ -163,31 +136,18 @@ impl App {
             None
         };
         let user_config_path = self.local_settings.user_config_path.clone();
-        let responsive_cloud_switch = settings.target == AppServerTarget::Cloud
-            && matches!(session, NewBackendSession::CarryDraft);
-        let (name, mut draft) = match session {
+        let (name, draft) = match session {
             NewBackendSession::Fresh { name } => (name, None),
             NewBackendSession::CarryDraft => (
                 self.chat_widget.thread_name(),
-                (!responsive_cloud_switch).then(|| self.chat_widget.composer_draft_snapshot()),
+                Some(self.chat_widget.composer_draft_snapshot()),
             ),
         };
         let destination = backends.session_at_mut(slot);
-        let clipboard_after_bootstrap = if destination.remote_cwd_override().is_some() {
-            // An explicit remote directory can open the trust prompt after bootstrap.
-            ClipboardHandoff::SettleBeforeNextView
-        } else {
-            ClipboardHandoff::ContinueEditing
-        };
         let bootstrap = destination
             .bootstrap_for_new_thread(&settings.config)
             .map_err(|error| format!("Failed to prepare the new conversation: {error}"));
-        let bootstrap = if responsive_cloud_switch {
-            let events = tui.event_stream();
-            wait_for_cloud_switch(self, tui, bootstrap, events, clipboard_after_bootstrap).await
-        } else {
-            bootstrap.await
-        }?;
+        let bootstrap = bootstrap.await?;
         let destination_cwd = settings.config.cwd.to_path_buf();
         if let Err(control) = self
             .confirm_directory_trust_for_target(
@@ -206,25 +166,15 @@ impl App {
             )
             .await
         {
-            if responsive_cloud_switch {
-                let events = tui.event_stream();
-                finish_failed_cloud_switch(self, tui, events).await;
-            }
             if matches!(control, AppRunControl::Exit(_)) {
                 self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
             }
             return Ok(());
         }
         let (config, local_settings) = self
-            .load_new_session_config_from(
-                destination,
-                &settings,
-                destination_cwd,
-                responsive_cloud_switch.then_some(&mut *tui),
-            )
+            .load_new_session_config_from(destination, &settings, destination_cwd)
             .await
             .map_err(|error| format!("Failed to read new session defaults: {error}"))?;
-        let host_project_cwd = self.backend_preference_context.local_cwd.clone();
         let start = destination
             .start_thread_with_session_start_source(
                 &local_settings,
@@ -232,31 +182,11 @@ impl App {
                 /*session_start_source*/ None,
                 /*remote_cwd_override*/ None,
                 /*selected_profile*/ None,
-                host_project_cwd.as_deref(),
             )
             .map_err(|error| format!("Failed to start the new conversation: {error}"));
-        let started = if responsive_cloud_switch {
-            let events = tui.event_stream();
-            wait_for_cloud_switch(
-                self,
-                tui,
-                start,
-                events,
-                ClipboardHandoff::SettleBeforeNextView,
-            )
-            .await
-        } else {
-            start.await
-        }?;
-        if responsive_cloud_switch {
-            draft = Some(self.chat_widget.composer_draft_snapshot());
-        }
+        let started = start.await?;
         // Clear before switching so a terminal error leaves the outgoing conversation usable.
         if let Err(error) = tui.clear_for_thread_switch() {
-            if responsive_cloud_switch {
-                let events = tui.event_stream();
-                finish_failed_cloud_switch(self, tui, events).await;
-            }
             return Err(format!("Failed to open the new conversation: {error}"));
         }
         let destination_thread = started.session.thread_id;
@@ -297,11 +227,7 @@ impl App {
             self.local_settings.tui.notification_settings.condition,
         );
         if let Some(draft) = draft {
-            if responsive_cloud_switch {
-                self.chat_widget.restore_cloud_switch_draft(draft);
-            } else {
-                self.chat_widget.restore_startup_draft(draft);
-            }
+            self.chat_widget.restore_startup_draft(draft);
             if let Some(thread_id) = displayed_thread
                 && !outgoing_has_queue
                 && self.current_displayed_thread_id() == Some(destination_thread)
@@ -404,9 +330,6 @@ impl App {
                 && self.agents_overview.has_more(destination_id);
             state.restart_history_search();
         }
-        self.rate_limit_hard_stop_generation = self.rate_limit_hard_stop_generation.wrapping_add(1);
-        self.rate_limit_refresh_state.invalidate_recovery();
-        self.account_email_request_id = None;
         self.file_search.on_user_query(String::new());
         self.bind_backend_workspace(destination, cwd);
         self.model_catalog = Arc::new(
@@ -415,13 +338,10 @@ impl App {
                 .with_collaboration_modes(bootstrap.collaboration_modes),
         );
         self.feedback_audience = bootstrap.feedback_audience;
-        self.chat_widget.requires_openai_auth = bootstrap.requires_openai_auth;
-        self.chat_widget.invalidate_security_setup();
+        self.chat_widget.requires_openai_auth = false;
         self.chat_widget.update_account_state(
-            bootstrap.status_account_display,
-            bootstrap.plan_type,
-            bootstrap.has_chatgpt_account,
-            matches!(bootstrap.auth_mode, Some(TelemetryAuthMode::Chatgpt)),
+            /*status_account_display*/ None, /*plan_type*/ None,
+            /*has_chatgpt_account*/ false, /*has_codex_backend_auth*/ false,
         );
     }
 

@@ -120,12 +120,6 @@ fn resolve_model_command(chat: &ChatWidget, args: &str) -> Result<ModelCommand, 
     if chat.thread_id().is_none() {
         return Err("Session is still starting; try /model again in a moment.".into());
     }
-    if chat.restrict_model_picker_to_luna_reserve() {
-        return Err(
-            "Model arguments are unavailable while using Reserve. Use /model to adjust effort."
-                .into(),
-        );
-    }
     if let Some(message) = chat.model_picker_unavailable() {
         return Err(message);
     }

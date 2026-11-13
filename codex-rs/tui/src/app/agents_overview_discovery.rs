@@ -148,10 +148,6 @@ impl AgentsOverviewDiscovery {
         limit: usize,
     ) -> (Vec<(Thread, bool)>, bool) {
         let [interactive, other] = &mut self.sources;
-        // Cloud does not support filtering its task list to Exec and AppServer threads.
-        if matches!(handle, AppServerRequestHandle::Cloud(_)) {
-            other.exhausted = true;
-        }
         let (left, right) = tokio::join!(
             interactive.fill(handle, Vec::new()),
             other.fill(
@@ -289,9 +285,6 @@ impl App {
         }
         for source in &mut cursor.sources {
             source.page_size = 100;
-        }
-        if matches!(handle, AppServerRequestHandle::Cloud(_)) {
-            cursor.sources[1].exhausted = true;
         }
         let tx = self.app_event_tx.clone();
         search.task = Some(AbortOnDropHandle::new(tokio::spawn(async move {

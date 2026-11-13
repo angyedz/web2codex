@@ -9,19 +9,14 @@ use super::app_server_event_targets::server_request_thread_id;
 use super::app_server_requests::BufferedServerRequest;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
-use crate::app_event::RateLimitRefreshOrigin;
 #[cfg(any(target_os = "windows", test))]
 use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_info::app_info_from_api;
 use crate::app_server_session::AppServerSession;
-use crate::app_server_session::status_account_display_from_auth_mode;
 use codex_app_server_client::AppServerEvent;
-use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
-use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCErrorError;
-use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
@@ -126,48 +121,6 @@ impl App {
                 self.handle_server_request_event(app_server_client, request)
                     .await;
                 self.repaint_agents_overview();
-            }
-            AppServerEvent::ThreadStreamReconnected(thread_id) => {
-                if let Ok(id) = ThreadId::from_string(&thread_id)
-                    && self.current_displayed_thread_id() == Some(id)
-                    && self.chat_widget.thread_id() == Some(id)
-                    && self.chat_widget.thread_stream_disconnected
-                    && let Some(channel) = self.thread_event_channels.get_mut(&id)
-                    && channel
-                        .backend_id
-                        .is_none_or(|owner| owner == app_server_client.backend_id())
-                {
-                    channel.history_may_be_incomplete = true;
-                    self.chat_widget.thread_stream_disconnected = false;
-                    if self.active_turn_id_for_thread(id).await.is_none() {
-                        self.chat_widget.maybe_send_next_queued_input();
-                    }
-                }
-            }
-            AppServerEvent::ThreadStreamDisconnected(error) => {
-                if let Ok(id) = ThreadId::from_string(&error.thread_id)
-                    && self.current_displayed_thread_id() == Some(id)
-                    && self.chat_widget.thread_id() == Some(id)
-                    && self.thread_event_channels.get(&id).is_some_and(|channel| {
-                        channel
-                            .backend_id
-                            .is_none_or(|owner| owner == app_server_client.backend_id())
-                    })
-                    && let AppServerRequestHandle::Cloud(handle) =
-                        app_server_client.request_handle()
-                {
-                    self.chat_widget.thread_stream_disconnected = true;
-                    if !self.chat_widget.is_user_turn_pending_or_running()
-                        && handle.reconnect_idle_thread(&error.thread_id)
-                    {
-                        return;
-                    }
-                }
-                self.handle_server_notification_event(
-                    app_server_client,
-                    ServerNotification::Error(*error),
-                )
-                .await;
             }
             AppServerEvent::Disconnected { message } => {
                 // The request result distinguishes a refused start from a lost reply.
@@ -377,85 +330,6 @@ impl App {
                 }
             }
 
-            ServerNotification::AccountRateLimitsUpdated(notification) => {
-                let workspace_hard_stop = matches!(
-                    notification.rate_limits.rate_limit_reached_type,
-                    Some(
-                        RateLimitReachedType::WorkspaceOwnerCreditsDepleted
-                            | RateLimitReachedType::WorkspaceMemberCreditsDepleted
-                            | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
-                            | RateLimitReachedType::WorkspaceMemberUsageLimitReached
-                    )
-                ) || notification.rate_limits.spend_control_reached
-                    == Some(true);
-                if workspace_hard_stop {
-                    self.rate_limit_hard_stop_generation =
-                        self.rate_limit_hard_stop_generation.wrapping_add(1);
-                }
-                self.chat_widget
-                    .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
-                if workspace_hard_stop && self.chat_widget.has_chatgpt_account() {
-                    // Background inference may publish a hard stop without a foreground Error.
-                    self.refresh_rate_limits(app_server_client, RateLimitRefreshOrigin::Recovery);
-                }
-                return;
-            }
-            ServerNotification::AccountUpdated(notification) => {
-                self.agents_overview
-                    .invalidate_discovery(app_server_client.backend_id(), /*displayed*/ true);
-                self.refresh_changed_agents_overview_threads(app_server_client);
-                self.agents_overview.usage.clear();
-                self.agents_overview.pending_usage = None;
-                self.agents_overview.usage_disabled = false;
-                self.repaint_agents_overview();
-                self.chat_widget.invalidate_security_setup();
-                if let Some(crate::pager_overlay::Overlay::Analytics(view)) = &mut self.overlay {
-                    view.refresh();
-                }
-                if let Some(view) = &mut self.retained_analytics {
-                    view.cancel_loads();
-                }
-                self.rate_limit_hard_stop_generation =
-                    self.rate_limit_hard_stop_generation.wrapping_add(1);
-                self.rate_limit_refresh_state.invalidate_recovery();
-                // Deferred terminal writes must never carry the previous account's billing into
-                // the newly authenticated identity, even when both accounts share one thread.
-                self.last_thread_usage_status_cell = None;
-                self.pending_thread_usage_history_refresh = false;
-                let has_codex_backend_auth = matches!(
-                    notification.auth_mode,
-                    Some(
-                        AuthMode::Chatgpt
-                            | AuthMode::ChatgptAuthTokens
-                            | AuthMode::AgentIdentity
-                            | AuthMode::PersonalAccessToken
-                    )
-                );
-                let account_display = status_account_display_from_auth_mode(
-                    notification.auth_mode,
-                    notification.plan_type,
-                );
-                let has_chatgpt_account = notification
-                    .auth_mode
-                    .is_some_and(AuthMode::has_chatgpt_account);
-                self.account_email_request_id = None;
-                self.chat_widget.update_account_state(
-                    account_display,
-                    notification.plan_type,
-                    has_chatgpt_account,
-                    has_codex_backend_auth,
-                );
-                if self.chat_widget.has_chatgpt_account() {
-                    self.refresh_account_email(app_server_client);
-                    crate::security_setup::prefetch(
-                        &self.config,
-                        app_server_client,
-                        self.app_event_tx.clone(),
-                        self.chat_widget.security_setup_request_id,
-                    );
-                }
-                return;
-            }
             ServerNotification::ExternalAgentConfigImportCompleted(notification) => {
                 let should_report_completion = app_server_client
                     .consume_external_agent_config_import_completion(&notification.import_id);

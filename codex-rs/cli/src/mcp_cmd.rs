@@ -249,32 +249,41 @@ impl McpCli {
 
         match subcommand {
             McpSubcommand::List(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = load_web2codex_config(&config_overrides, loader_overrides).await?;
                 run_list(&config, args).await?;
             }
             McpSubcommand::Get(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = load_web2codex_config(&config_overrides, loader_overrides).await?;
                 run_get(&config, args).await?;
             }
             McpSubcommand::Add(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = load_web2codex_config(&config_overrides, loader_overrides).await?;
                 run_add(&config, args).await?;
             }
             McpSubcommand::Remove(args) => {
                 run_remove(&config_overrides, args).await?;
             }
             McpSubcommand::Login(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = load_web2codex_config(&config_overrides, loader_overrides).await?;
                 run_login(&config, args).await?;
             }
             McpSubcommand::Logout(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = load_web2codex_config(&config_overrides, loader_overrides).await?;
                 run_logout(&config, args).await?;
             }
         }
 
         Ok(())
     }
+}
+
+async fn load_web2codex_config(
+    config_overrides: &CliConfigOverrides,
+    loader_overrides: LoaderOverrides,
+) -> Result<Config> {
+    let mut config = cloud_config::load_config(config_overrides, loader_overrides).await?;
+    config.model_provider_id = "web2codex".to_string();
+    Ok(config)
 }
 
 async fn validate_profile_v2_migration(
@@ -535,7 +544,7 @@ async fn run_remove(config_overrides: &CliConfigOverrides, remove_args: RemoveAr
 async fn load_mcp_manager(config: &Config) -> Result<McpManager> {
     let plugins_manager = Arc::new(plugins_manager_for_config(
         config,
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await?,
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?,
     ));
     Ok(McpManager::new(plugins_manager))
 }
@@ -637,7 +646,7 @@ async fn run_logout(config: &Config, logout_args: LogoutArgs) -> Result<()> {
 
     if matches!(server.auth, McpServerAuth::EmaAuth) {
         let auth_manager =
-            AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await?;
+            AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
         let auth = auth_manager.auth().await;
         let scope = ema_auth_scope(auth.as_ref())
             .context("Sign in to your Codex account before removing enterprise authorization")?;
@@ -690,7 +699,7 @@ async fn run_logout(config: &Config, logout_args: LogoutArgs) -> Result<()> {
 async fn run_list(config: &Config, list_args: ListArgs) -> Result<()> {
     let mcp_manager = load_mcp_manager(config).await?;
     let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await?;
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
     let auth = auth_manager.auth().await;
     let mcp_servers = mcp_manager.configured_servers(config).await;
     let runtime_config = mcp_manager.runtime_config(config).await;

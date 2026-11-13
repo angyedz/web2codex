@@ -5,7 +5,6 @@ use super::AppServerStartedThread;
 use super::HistoryHydrationScope;
 use super::ResumeModelSettings;
 use super::ThreadHistorySupport;
-use super::ThreadSettingsOwner;
 use super::bootstrap_request_error;
 use super::is_history_pagination_unsupported;
 use super::started_thread_from_resume_response;
@@ -157,11 +156,9 @@ impl AppServerSession {
         model_settings: ResumeModelSettings,
         permission_overrides: crate::resume_permissions::ResumePermissions,
     ) -> Result<AppServerStartedThread> {
-        if self.thread_params_mode().settings_owner() == ThreadSettingsOwner::Client {
-            self.thread_tool_transport()
-                .check_namespace(&self.request_handle, &config.cwd)
-                .await?;
-        }
+        self.thread_tool_transport()
+            .check_namespace(&self.request_handle, &config.cwd)
+            .await?;
         let session_config = if matches!(
             model_settings,
             ResumeModelSettings::RestoreFromThread
@@ -180,15 +177,11 @@ impl AppServerSession {
             model_settings,
             permission_overrides,
         );
-        if self.thread_params_mode().settings_owner() == ThreadSettingsOwner::Client
-            && model_settings == ResumeModelSettings::OverrideFromCurrentConfig
-        {
+        if model_settings == ResumeModelSettings::OverrideFromCurrentConfig {
             params.model_provider = self.explicit_model_provider(&config);
         }
-        if self.thread_params_mode().settings_owner() == ThreadSettingsOwner::Client {
-            self.thread_tool_transport()
-                .configure_mcp(&mut params.config);
-        }
+        self.thread_tool_transport()
+            .configure_mcp(&mut params.config);
         let paginated = self.history_support == ThreadHistorySupport::Paginated;
         let cached_legacy = paginated
             && self

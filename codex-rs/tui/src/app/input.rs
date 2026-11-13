@@ -4,6 +4,8 @@
 //! entry, Ctrl-L clear, external editor launch, agent navigation shortcuts, and legacy Vim
 //! Escape recovery for the active composer or command-center rename editor.
 
+use std::process::Stdio;
+
 use super::*;
 use crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
 use crate::keymap::KeymapContextSet;
@@ -384,6 +386,38 @@ impl App {
                         "Failed to open editor: {err}",
                     )));
             }
+        }
+        tui.frame_requester().schedule_frame();
+    }
+
+    pub(super) async fn launch_mcp_tunnel_setup(&mut self, tui: &mut tui::Tui) {
+        let cwd = self.chat_widget.config_ref().cwd.as_path().to_path_buf();
+        let result = tui
+            .with_restored(tui::TerminalHandoff::KeepScreen, || async move {
+                let executable = std::env::current_exe()?;
+                tokio::process::Command::new(executable)
+                    .args(["web", "tunnel", "configure"])
+                    .current_dir(cwd)
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .status()
+                    .await
+            })
+            .await;
+
+        match result {
+            Ok(status) if status.success() => {}
+            Ok(status) => self
+                .chat_widget
+                .add_to_history(history_cell::new_error_event(format!(
+                    "MCP tunnel setup exited with status {status}."
+                ))),
+            Err(error) => self
+                .chat_widget
+                .add_to_history(history_cell::new_error_event(format!(
+                    "Could not start the MCP tunnel setup: {error}"
+                ))),
         }
         tui.frame_requester().schedule_frame();
     }

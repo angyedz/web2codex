@@ -5,6 +5,7 @@ use codex_protocol::auth::KnownPlan;
 
 pub(crate) enum SubscriptionDisplay {
     Status,
+    #[cfg(test)]
     Analytics,
 }
 
@@ -20,21 +21,29 @@ impl SubscriptionDisplay {
             (PlanType::Team | PlanType::SelfServeBusinessUsageBased, _) => "Business",
             (PlanType::Business, Self::Status) => "Enterprise",
             (PlanType::SelfServeBusinessProLite, Self::Status) => "Business Premium",
+            #[cfg(test)]
             (PlanType::Business | PlanType::SelfServeBusinessProLite, Self::Analytics) => {
                 "Business"
             }
             (PlanType::EnterpriseCbpAutomation, Self::Status) => "Enterprise (Automation)",
+            #[cfg(test)]
             (PlanType::EnterpriseCbpAutomation, Self::Analytics)
             | (PlanType::Enterprise | PlanType::Ent26 | PlanType::EnterpriseCbpUsageBased, _) => {
+                "Enterprise"
+            }
+            #[cfg(not(test))]
+            (PlanType::Enterprise | PlanType::Ent26 | PlanType::EnterpriseCbpUsageBased, _) => {
                 "Enterprise"
             }
             (PlanType::Edu, Self::Status) => "Edu",
             (PlanType::EduPlus, Self::Status) => "Edu Plus",
             (PlanType::EduPro, Self::Status) => "Edu Pro",
+            #[cfg(test)]
             (PlanType::Edu | PlanType::EduPlus | PlanType::EduPro, Self::Analytics) => "Education",
             (PlanType::Sci, _) => KnownPlan::Sci.display_name(),
             (PlanType::SciPlus, _) => KnownPlan::SciPlus.display_name(),
             (PlanType::Unknown, Self::Status) => "Unknown",
+            #[cfg(test)]
             (PlanType::Unknown, Self::Analytics) => "Account",
         }
     }

@@ -38,8 +38,8 @@ jobs:
       CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       TARGET: ${{ matrix.target }}
-      # Keep the small ARM macOS runner serial; use two Cargo jobs elsewhere to shorten builds.
-      CARGO_BUILD_JOBS: ${{ matrix.runner == 'macos-15' && '1' || '2' }}
+      # The ARM macOS runner has three CPUs; the other matrix runners have four.
+      CARGO_BUILD_JOBS: ${{ matrix.runner == 'macos-15' && '2' || '4' }}
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       CARGO_PROFILE_RELEASE_LTO: "false"
@@ -50,7 +50,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          toolchain: 1.95.0
           target: ${{ matrix.target }}
 
       - name: Install GNU target for the Linux WebView

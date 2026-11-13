@@ -312,6 +312,7 @@ impl ClipboardWorker {
     }
 
     /// The original budget follows the read until its owner consumes the result.
+    #[cfg(test)]
     pub(crate) fn text_read_deadline(&self, request: &Arc<()>) -> Option<Instant> {
         let request = Arc::downgrade(request);
         self.pending_read

@@ -113,7 +113,6 @@ pub use codex_features::Features;
 pub use codex_history::InitialHistory;
 pub use codex_history::latest_dynamic_tools;
 pub use codex_home::CodexHomeUserInstructionsProvider;
-pub use codex_image_generation_extension::install as install_image_generation_extension;
 pub use codex_login::AuthHeaders;
 pub use codex_login::AuthManager;
 pub use codex_login::CodexAuth;

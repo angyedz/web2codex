@@ -25,6 +25,12 @@ pub(super) fn decisions_sampler(
     input: &ThreadStartInput<'_, Config>,
     auth_manager: &Arc<AuthManager>,
 ) -> Option<DecisionsSampler> {
+    // Web2Codex talks to ChatGPT through the private WebView provider. Keep the
+    // comparison-only classifier off this request path; it uses the OpenAI API.
+    if input.config.model_provider_id == "web2codex" {
+        return None;
+    }
+
     use codex_agent_identity::ChatGptEnvironment;
     let auth_context = input.thread_store.get::<ProviderAuthContext>();
     let result = decisions_api_key(

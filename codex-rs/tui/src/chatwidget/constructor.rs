@@ -134,7 +134,6 @@ impl ChatWidget {
             has_codex_backend_auth,
             model_catalog,
             model_popup_request_id: None,
-            cloud_picker_selection: None,
             permission_popup_pending: false,
             permission_popup_request_id: None,
             permission_discovery: None,
@@ -158,15 +157,6 @@ impl ChatWidget {
             token_info: None,
             token_usage_pending: false,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
-            refreshing_status_outputs: Vec::new(),
-            next_status_refresh_request_id: 0,
-            pending_rate_limit_reset_request_id: None,
-            pending_rate_limit_reset_idempotency_key: None,
-            rate_limit_reset_picker_request_id: None,
-            pending_rate_limit_reset_hint_request_id: None,
-            pending_rate_limit_reset_hint: None,
-            available_rate_limit_reset_credits: None,
-            next_rate_limit_reset_request_id: 0,
             plan_type: initial_plan_type,
             codex_rate_limit_reached_type: None,
             codex_spend_control_reached: None,
@@ -174,10 +164,6 @@ impl ChatWidget {
             clock_format: crate::clock_format::ClockFormat::system(),
             usage_notice_state: usage_notice::UsageNoticeState::default(),
             backend_banner_state: backend_banners::BackendBannerState::default(),
-            security_setup_request_id: uuid::Uuid::new_v4(),
-            security_setup_presented: false,
-            security_setup_identity: None,
-            security_setup_dismissed: false,
             automatic_model_switch_state: backend_banners::AutomaticModelSwitchState::default(),
             backend_banner_notice_model: None,
             luna_reserve_notice_account_id: None,
@@ -185,7 +171,6 @@ impl ChatWidget {
             composer_images: None,
             rendered_selection: Default::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
-            add_credits_nudge_email_in_flight: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             plan_stream_controller: None,
@@ -311,7 +296,6 @@ impl ChatWidget {
             widget.local_settings.codex_home.as_path(),
             widget.local_settings.history.persistence,
         );
-        widget.prefetch_rate_limits();
         if let Some(keymap) = runtime_keymap {
             widget.bottom_pane.set_keymap_bindings(&keymap);
         }
@@ -339,9 +323,7 @@ impl ChatWidget {
         widget
             .bottom_pane
             .set_connectors_enabled(widget.connectors_enabled());
-        widget
-            .bottom_pane
-            .set_token_activity_command_enabled(widget.has_codex_backend_auth);
+        widget.bottom_pane.set_usage_command_enabled(true);
         widget.refresh_status_surfaces();
 
         widget

@@ -545,8 +545,8 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub fn set_token_activity_command_enabled(&mut self, enabled: bool) {
-        self.composer.set_token_activity_command_enabled(enabled);
+    pub fn set_usage_command_enabled(&mut self, enabled: bool) {
+        self.composer.set_usage_command_enabled(enabled);
         self.request_redraw();
     }
 
@@ -2626,12 +2626,6 @@ impl BottomPane {
 
     pub(crate) fn set_status_line(&mut self, status_line: Option<footer_content::FooterContent>) {
         if self.composer.set_status_line(status_line) {
-            self.request_redraw();
-        }
-    }
-
-    pub(crate) fn set_luna_reserve_active(&mut self, active: bool) {
-        if self.composer.set_luna_reserve_active(active) {
             self.request_redraw();
         }
     }

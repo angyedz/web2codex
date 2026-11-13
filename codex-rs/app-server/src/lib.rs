@@ -99,10 +99,8 @@ pub use codex_agent_message_board_host::delete_agent_message_boards;
 pub use codex_agent_message_board_host::install_agent_message_board;
 
 mod analytics_utils;
-mod app_info;
 mod app_server_tracing;
 mod attestation;
-mod auth_mode;
 mod bespoke_event_handling;
 mod code_mode_host;
 mod codex_home_metrics;
@@ -123,11 +121,9 @@ mod effective_plugin_change;
 mod error_code;
 mod extensions;
 mod external_agent_migration;
-mod external_auth;
 mod filters;
 mod fs_watch;
 mod fuzzy_file_search;
-mod gateway_oauth_notifications;
 mod image_url;
 pub mod in_process;
 mod log_write_warning;
@@ -153,7 +149,6 @@ mod thread_state;
 mod thread_status;
 mod transport;
 mod turn_admission;
-mod turn_cost_worker;
 mod user_verification;
 mod user_verification_response;
 
@@ -486,8 +481,6 @@ pub enum PluginStartupTasks {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerRuntimeOptions {
-    /// Optional host-owned frozen cloud skill catalog and resources, loaded once at startup.
-    pub cloud_skills_snapshot: Option<std::path::PathBuf>,
     pub code_mode_host_transport: CodeModeHostTransport,
     pub plugin_startup_tasks: PluginStartupTasks,
     pub remote_control_startup_mode: RemoteControlStartupMode,
@@ -498,7 +491,6 @@ pub struct AppServerRuntimeOptions {
 impl Default for AppServerRuntimeOptions {
     fn default() -> Self {
         Self {
-            cloud_skills_snapshot: None,
             code_mode_host_transport: CodeModeHostTransport::Local,
             plugin_startup_tasks: PluginStartupTasks::Start,
             remote_control_startup_mode: RemoteControlStartupMode::ResolvePersisted,
@@ -520,18 +512,6 @@ pub async fn run_main_with_transport_options(
     auth: WebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<AppServerExit> {
-    let cloud_skill_provider = match runtime_options.cloud_skills_snapshot {
-        Some(path) => {
-            let provider = tokio::task::spawn_blocking(move || {
-                codex_skills_extension::FrozenCloudSkillProvider::from_file(&path)
-            })
-            .await
-            .map_err(std::io::Error::other)?
-            .map_err(|err| std::io::Error::new(ErrorKind::InvalidInput, err))?;
-            Some(Arc::new(provider) as Arc<dyn codex_skills_extension::SkillProvider>)
-        }
-        None => None,
-    };
     #[cfg(target_os = "windows")]
     let _registered_core = codex_windows_sandbox::registered_core_requested();
     let managed_daemon = matches!(&transport, AppServerTransport::UnixSocket { .. })
@@ -573,38 +553,21 @@ pub async fn run_main_with_transport_options(
         Arc::new(NoopThreadConfigLoader),
     );
     let startup = config_manager
-        .load_managed_startup_config(startup_cwd.clone())
+        .load_startup_config(startup_cwd.clone())
         .await?;
     let mut config_warnings = Vec::new();
-    let mut plugin_startup_config = PluginStartupConfig::Current;
-    let config = match startup.config {
-        Ok(config) => config,
-        Err(err) if is_unsupported_untrusted_approval_policy_error(&err) => {
-            return Err(err);
-        }
-        Err(err) => {
-            if strict_config {
-                return Err(err);
-            }
-
-            let message = config_warning_from_error("Invalid configuration; using defaults.", &err);
-            config_warnings.push(message);
-            plugin_startup_config = PluginStartupConfig::Defaults;
-            config_manager.load_default_config().await.map_err(|e| {
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("error loading default config after config error: {e}"),
-                )
-            })?
-        }
+    let plugin_startup_config = if startup.used_defaults {
+        PluginStartupConfig::Defaults
+    } else {
+        PluginStartupConfig::Current
     };
+    let config = startup.config;
     config.validate_windows_mxc_requirement()?;
     config.auth_config().validate()?;
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
             .await
             .map_err(std::io::Error::other)?;
-    config_manager.update_managed_config_loader(auth_manager.clone(), &config);
     config_manager
         .sync_default_client_residency_requirement()
         .await;
@@ -792,12 +755,13 @@ pub async fn run_main_with_transport_options(
             None => error!("{}", warning.summary),
         }
     }
-    let remote_control_policy = if config
-        .config_layer_stack
-        .requirements()
-        .allow_remote_control
-        .as_ref()
-        .is_some_and(|requirement| !requirement.value)
+    let remote_control_policy = if config.model_provider_id == "web2codex"
+        || config
+            .config_layer_stack
+            .requirements()
+            .allow_remote_control
+            .as_ref()
+            .is_some_and(|requirement| !requirement.value)
     {
         RemoteControlPolicy::DisabledByRequirements
     } else {
@@ -1028,7 +992,6 @@ pub async fn run_main_with_transport_options(
         let outbound_control_tx = outbound_control_tx;
         let (startup_warnings_tx, mut startup_warnings_rx) = mpsc::unbounded_channel();
         let mut processor = MessageProcessor::new(MessageProcessorArgs {
-            cloud_skill_provider,
             outgoing: outgoing_message_sender,
             analytics_events_client,
             arg0_paths,

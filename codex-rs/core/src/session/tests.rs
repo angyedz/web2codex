@@ -67,10 +67,8 @@ use core_test_support::test_codex::TurnInputRequest as ExternalTurnInputRequest;
 
 use codex_features::Feature;
 use codex_file_system::FileSystemSandboxContext;
-use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
-use codex_http_client::RouteAwareClientPool;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::create_model_provider;
@@ -6932,11 +6930,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         exec_policy,
         auth_manager: auth_manager.clone(),
         runtime_auth: Default::default(),
-        openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
-            config.http_client_factory(),
-            ClientRouteClass::Api,
-        )
-        .with_legacy_custom_ca_fallback(),
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
         git_root_discovery: Arc::default(),
@@ -9276,11 +9269,6 @@ where
         exec_policy,
         auth_manager: Arc::clone(&auth_manager),
         runtime_auth: Default::default(),
-        openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
-            config.http_client_factory(),
-            ClientRouteClass::Api,
-        )
-        .with_legacy_custom_ca_fallback(),
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
         git_root_discovery: Arc::default(),

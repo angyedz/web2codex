@@ -1,4 +1,4 @@
-//! MCP tools exposed to ChatGPT Web through OpenAI Secure MCP Tunnel.
+//! MCP tools exposed to ChatGPT Web through the configured secure tunnel.
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -11,7 +11,6 @@ use codex_mcp::SandboxState;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
-use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -57,11 +56,11 @@ pub(crate) fn run(workspace: PathBuf) -> anyhow::Result<()> {
         let service = WebMcpServer { workspace }
             .serve(rmcp::transport::stdio())
             .await
-            .context("failed to start Codex Web MCP server")?;
+            .context("failed to start Web2Codex MCP server")?;
         service
             .waiting()
             .await
-            .context("Codex Web MCP server stopped")?;
+            .context("Web2Codex MCP server stopped")?;
         Ok(())
     })
 }
@@ -73,7 +72,7 @@ struct WebMcpServer {
 impl ServerHandler for WebMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("codex-web", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("web2codex", env!("CARGO_PKG_VERSION")))
     }
 
     async fn list_tools(
@@ -83,14 +82,14 @@ impl ServerHandler for WebMcpServer {
     ) -> Result<ListToolsResult, ErrorData> {
         if request.is_some_and(|request| request.cursor.is_some()) {
             return Err(ErrorData::invalid_params(
-                "Codex Web tools do not use pagination cursors",
+                "Web2Codex tools do not use pagination cursors",
                 None,
             ));
         }
         let schemas = [
             (
                 "get_workspace",
-                "Return the absolute root directory for this Codex Web workspace.",
+                "Return the absolute root directory for this Web2Codex workspace.",
                 json_schema(
                     serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
                 ),
@@ -162,7 +161,7 @@ impl ServerHandler for WebMcpServer {
                     .await
             }
             _ => {
-                return Err(ErrorData::invalid_params("Unknown Codex Web tool", None));
+                return Err(ErrorData::invalid_params("Unknown Web2Codex tool", None));
             }
         };
         let response = match result {
@@ -313,7 +312,7 @@ impl WebMcpServer {
         }
 
         let command_temp_dir = tempfile::Builder::new()
-            .prefix("codex-web-mcp-")
+            .prefix("web2codex-mcp-")
             .tempdir()
             .map_err(|error| {
                 format!("Could not create a private command temp directory: {error}")

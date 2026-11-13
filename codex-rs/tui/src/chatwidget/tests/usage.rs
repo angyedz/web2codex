@@ -24,11 +24,14 @@ async fn usage_command_opens_analytics_without_rate_limit_picker() {
     assert!(chat.bottom_pane.no_modal_or_popup_active());
 
     for (argument, expected) in [
-        ("daily", crate::analytics::TokenActivityView::Daily),
-        ("weekly", crate::analytics::TokenActivityView::Weekly),
+        ("daily", crate::chatwidget::local_usage::UsagePeriod::Daily),
+        (
+            "weekly",
+            crate::chatwidget::local_usage::UsagePeriod::Weekly,
+        ),
         (
             "cumulative",
-            crate::analytics::TokenActivityView::Cumulative,
+            crate::chatwidget::local_usage::UsagePeriod::Cumulative,
         ),
     ] {
         chat.dispatch_command_with_args(SlashCommand::Usage, argument.to_string(), Vec::new());

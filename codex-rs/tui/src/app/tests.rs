@@ -10,8 +10,6 @@ mod mcp_login_tests;
 
 #[path = "tests/math_interruption_tests.rs"]
 mod math_interruption_tests;
-#[path = "tests/security_setup_tests.rs"]
-mod security_setup_tests;
 
 #[path = "tests/advanced_reasoning_tests.rs"]
 mod advanced_reasoning_tests;
@@ -8962,7 +8960,6 @@ async fn make_test_app() -> Box<App> {
         last_thread_usage_status_cell: None,
         pending_thread_usage_history_refresh: false,
         overlay: None,
-        retained_analytics: None,
         deferred_history_lines: Vec::new(),
         has_emitted_history_lines: false,
         transcript_reflow: TranscriptReflowState::default(),
@@ -9041,7 +9038,6 @@ async fn make_test_app() -> Box<App> {
         pending_managed_worktree_attach: None,
         startup_protected_input_boundary: false,
         startup_pending_protected_request: false,
-        account_email_request_id: None,
         rate_limit_hard_stop_generation: 0,
         rate_limit_refresh_state: Default::default(),
         pending_mcp_login_start: None,
@@ -9104,7 +9100,6 @@ pub(super) async fn make_test_app_with_channels() -> (
             last_thread_usage_status_cell: None,
             pending_thread_usage_history_refresh: false,
             overlay: None,
-            retained_analytics: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
             transcript_reflow: TranscriptReflowState::default(),
@@ -9183,7 +9178,6 @@ pub(super) async fn make_test_app_with_channels() -> (
             pending_managed_worktree_attach: None,
             startup_protected_input_boundary: false,
             startup_pending_protected_request: false,
-            account_email_request_id: None,
             rate_limit_hard_stop_generation: 0,
             rate_limit_refresh_state: Default::default(),
             pending_mcp_login_start: None,

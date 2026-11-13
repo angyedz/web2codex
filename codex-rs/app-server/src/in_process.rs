@@ -90,6 +90,7 @@ use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
+use codex_login::AuthManager;
 use codex_protocol::protocol::SessionSource;
 pub use codex_rollout::StateDbHandle;
 pub use codex_state::log_db::LogDbLayer;
@@ -168,8 +169,6 @@ pub struct InProcessStartArgs {
     pub config_warnings: Vec<ConfigWarningNotification>,
     /// Session source stamped into thread/session metadata.
     pub session_source: SessionSource,
-    /// Whether serving auth should honor `CODEX_API_KEY`; workspace policy still uses stored auth.
-    pub enable_codex_api_key_env: bool,
     /// Initialize params used for initial handshake.
     pub initialize: InitializeParams,
     /// Capacity used for all runtime queues (clamped to at least 1).
@@ -460,7 +459,7 @@ async fn run_outbound_router(
     }
 }
 
-async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
     let config_manager = ConfigManager::new(
         args.config.codex_home.to_path_buf(),
         args.cli_overrides,
@@ -474,12 +473,12 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
     // Keep the caller's project context independent of any fallback policy config.
     let startup_cwd =
         (!args.config.config_layer_stack.is_projectless()).then(|| args.config.cwd.to_path_buf());
-    let auth_manager = bootstrap::configure(
-        &config_manager,
-        &mut args.config,
-        args.enable_codex_api_key_env,
+    let auth_manager = AuthManager::shared_from_config(
+        args.config.as_ref(),
+        /*enable_codex_api_key_env*/ false,
     )
-    .await?;
+    .await
+    .map_err(IoError::other)?;
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
@@ -545,7 +544,6 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
         let mut processor_handle = tokio::spawn(async move {
             let (startup_warnings_tx, mut startup_warnings_rx) = mpsc::unbounded_channel();
             let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
-                cloud_skill_provider: None,
                 outgoing: Arc::clone(&processor_outgoing),
                 analytics_events_client,
                 arg0_paths: args.arg0_paths,
@@ -962,7 +960,6 @@ mod tests {
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
             config_warnings: Vec::new(),
             session_source,
-            enable_codex_api_key_env: false,
             initialize: InitializeParams {
                 client_info: ClientInfo {
                     name: "codex-in-process-test".to_string(),

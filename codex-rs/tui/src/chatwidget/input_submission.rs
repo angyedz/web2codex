@@ -301,20 +301,15 @@ impl ChatWidget {
             }));
         }
 
-        use crate::app_command::CloudSubmissionIntent;
-        let (cloud_submission, source) = match source {
+        use crate::app_command::UserSubmissionIntent;
+        let (submission_intent, source) = match source {
             UserMessageSource::DirectEnter => (
-                CloudSubmissionIntent::StartOrSteer,
+                UserSubmissionIntent::StartOrSteer,
                 UserMessageSource::Prompt,
             ),
-            UserMessageSource::Prompt => (CloudSubmissionIntent::StartIfIdle, source),
-            UserMessageSource::QuestionAnswer => (
-                CloudSubmissionIntent::QuestionAnswer {
-                    during_turn: !render_in_history,
-                },
-                source,
-            ),
-            UserMessageSource::SafetyRecourse => (CloudSubmissionIntent::UseKnownTurn, source),
+            UserMessageSource::Prompt => (UserSubmissionIntent::StartIfIdle, source),
+            UserMessageSource::QuestionAnswer => (UserSubmissionIntent::UseKnownTurn, source),
+            UserMessageSource::SafetyRecourse => (UserSubmissionIntent::UseKnownTurn, source),
         };
         if !text.is_empty() {
             items.push(UserInput::Text {
@@ -502,7 +497,7 @@ impl ChatWidget {
             } else {
                 "user"
             },
-            cloud_submission,
+            submission_intent,
             client_user_message_id.clone(),
             items,
             self.config.cwd.to_path_buf(),

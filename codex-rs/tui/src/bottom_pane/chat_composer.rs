@@ -647,7 +647,6 @@ pub(crate) struct ChatComposer {
     voice_strip: Option<VoiceStrip>,
     effort_status_line_transition: Option<EffortStatusLineTransition>,
     effort_observed: bool,
-    luna_reserve_active: bool,
     attachments: AttachmentState,
     placeholder_text: String,
     blocks_direct_input: bool,
@@ -666,7 +665,7 @@ pub(crate) struct ChatComposer {
     config: ChatComposerConfig,
     connectors_enabled: bool,
     plugins_command_enabled: bool,
-    token_activity_command_enabled: bool,
+    usage_command_enabled: bool,
     service_tier_commands_enabled: bool,
     service_tier_commands: Vec<ServiceTierCommand>,
     mentions_v2_enabled: bool,
@@ -837,7 +836,6 @@ impl ChatComposer {
             voice_strip: None,
             effort_status_line_transition: None,
             effort_observed: false,
-            luna_reserve_active: false,
             attachments: AttachmentState::default(),
             placeholder_text,
             blocks_direct_input: false,
@@ -852,7 +850,7 @@ impl ChatComposer {
             config,
             connectors_enabled: false,
             plugins_command_enabled: false,
-            token_activity_command_enabled: false,
+            usage_command_enabled: false,
             service_tier_commands_enabled: false,
             service_tier_commands: Vec::new(),
             mentions_v2_enabled: false,
@@ -1004,10 +1002,8 @@ impl ChatComposer {
         self.update_slash_command_catalog(|composer| composer.plugins_command_enabled = enabled);
     }
 
-    pub fn set_token_activity_command_enabled(&mut self, enabled: bool) {
-        self.update_slash_command_catalog(|composer| {
-            composer.token_activity_command_enabled = enabled
-        });
+    pub fn set_usage_command_enabled(&mut self, enabled: bool) {
+        self.update_slash_command_catalog(|composer| composer.usage_command_enabled = enabled);
     }
 
     pub fn set_mentions_v2_enabled(&mut self, enabled: bool) {
@@ -4640,15 +4636,7 @@ impl Renderable for ChatComposer {
     }
 }
 
-impl ChatComposer {
-    pub(crate) fn set_luna_reserve_active(&mut self, active: bool) -> bool {
-        if self.luna_reserve_active == active {
-            return false;
-        }
-        self.luna_reserve_active = active;
-        true
-    }
-}
+impl ChatComposer {}
 
 impl ChatComposer {
     pub(crate) fn render_with_mask(&self, area: Rect, buf: &mut Buffer, mask_char: Option<char>) {
@@ -4879,11 +4867,6 @@ impl ChatComposer {
             let prompt = if self.draft.input_enabled {
                 if self.draft.is_bash_mode {
                     Span::from("!").light_red().bold()
-                } else if self.luna_reserve_active {
-                    // Reserve keeps one arrow at every reasoning effort; only its foreground changes.
-                    "›"
-                        .fg(crate::terminal_palette::best_color((246, 197, 67)))
-                        .bold()
                 } else if let Some(tier) = self.effort_tier {
                     let charge = self
                         .effort_ignition

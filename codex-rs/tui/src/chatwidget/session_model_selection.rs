@@ -4,7 +4,6 @@
 use super::*;
 use crate::bottom_pane::SelectionSecondaryAction;
 use crate::keymap::ListAction;
-use crate::model_catalog::LUNA_RESERVE_MODEL;
 
 /// A final Astra selection whose model transition must be checked while the app applies it.
 #[derive(Debug)]
@@ -59,10 +58,6 @@ impl ChatWidget {
         model: String,
         effort: Option<ReasoningEffortConfig>,
     ) -> Option<SelectionSecondaryAction> {
-        // Reserve selections are already session-only.
-        if model == LUNA_RESERVE_MODEL {
-            return None;
-        }
         let key = key_hint::plain(KeyCode::Char('s'));
         let keymap = self.bottom_pane.list_keymap();
         let mut hints = Vec::new();

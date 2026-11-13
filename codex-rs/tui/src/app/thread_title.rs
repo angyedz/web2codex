@@ -9,7 +9,6 @@ use super::thread_events::ThreadBufferedEvent;
 use crate::app_event::AppEvent;
 use crate::app_event::ThreadTitleDestination;
 use crate::app_server_session::AppServerSession;
-use crate::app_server_session::ThreadSettingsOwner;
 use crate::temporary_structured_request::TemporaryStructuredThreadOptions;
 use crate::temporary_structured_request::TemporaryThreadKind;
 use crate::temporary_structured_request::run_temporary_structured_turn;
@@ -71,13 +70,6 @@ impl App {
         destination: ThreadTitleDestination,
         source_text: &str,
     ) {
-        if app_server.thread_params_mode().settings_owner() == ThreadSettingsOwner::Server {
-            if let ThreadTitleDestination::RenameSuggestion { request_id } = destination {
-                self.chat_widget
-                    .apply_thread_name_suggestion(thread_id, request_id, /*suggestion*/ None);
-            }
-            return;
-        }
         let std::collections::hash_map::Entry::Vacant(entry) =
             self.pending_thread_titles.entry((thread_id, destination))
         else {

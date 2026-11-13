@@ -7,8 +7,6 @@ members = [
     "agent-message-board-host",
     "agent-identity",
     "agent-roles",
-    "backend-client",
-    "cloud-client",
     "bwrap",
     "build-info",
     "ansi-escape",
@@ -26,17 +24,12 @@ members = [
     "feedback",
     "features",
     "install-context",
-    "codex-backend-openapi-models",
     "code-mode",
     "code-mode-host",
     "code-mode-protocol",
     "code-mode-runtime",
     "plugin-host",
     "codex-home",
-    "cloud-config",
-    "cloud-tasks",
-    "cloud-tasks-client",
-    "cloud-tasks-mock-client",
     "cli",
     "web-browser",
     "collaboration-mode-templates",
@@ -62,7 +55,6 @@ members = [
     "file-system",
     "exec-server-protocol",
     "exec-server",
-    "exec-server-cli",
     "exec-server/tests/support",
     "execpolicy",
     "ext/agent",
@@ -71,7 +63,6 @@ members = [
     "ext/extension-api",
     "ext/multi-env-copy-file",
     "ext/goal",
-    "ext/git-attribution",
     "ext/guardian-reviewer",
     "ext/guardian-v2",
     "ext/guardian-v3",
@@ -88,7 +79,6 @@ members = [
     "file-search",
     "file-watcher",
     "linux-sandbox",
-    "lmstudio",
     "login",
     "codex-mcp",
     "memories/read",
@@ -100,7 +90,6 @@ members = [
     "mxc-sandbox",
     "models-manager",
     "network-proxy",
-    "ollama",
     "process-hardening",
     "realtime-webrtc",
     "voice-host",
@@ -110,14 +99,12 @@ members = [
     "rollout",
     "rollout-trace",
     "rmcp-client",
-    "responses-api-proxy",
     "runtime-agent-instance",
     "response-debug-context",
     "sandboxing",
     "stdio-to-uds",
     "otel",
     "otel-trace-websocket",
-    "tcp-tunnel",
     "tui",
     "user-verification",
     "tools",
@@ -152,7 +139,6 @@ members = [
     "utils/model-facing-id",
     "utils/sleep-inhibitor",
     "utils/approval-presets",
-    "utils/oss",
     "utils/output-truncation",
     "utils/path-utils",
     "utils/plugins",
@@ -171,6 +157,10 @@ members = [
     "plugin",
     "model-provider",
 ]
+# A plain `cargo build` should build only the runnable Web2Codex app and its
+# private browser. The remaining workspace crates are support libraries and
+# specialized tools that should be built only when explicitly requested.
+default-members = ["cli", "web-browser"]
 resolver = "2"
 
 [workspace.package]
@@ -204,14 +194,9 @@ codex-app-server-test-client = { path = "app-server-test-client" }
 codex-apply-patch = { path = "apply-patch" }
 codex-arg0 = { path = "arg0" }
 codex-async-utils = { path = "async-utils" }
-codex-backend-client = { path = "backend-client" }
 codex-build-info = { path = "build-info" }
-codex-chatgpt = { path = "chatgpt" }
 codex-client = { path = "codex-client" }
 codex-collaboration-mode-templates = { path = "collaboration-mode-templates" }
-codex-cloud-config = { path = "cloud-config" }
-codex-cloud-tasks-client = { path = "cloud-tasks-client" }
-codex-cloud-tasks-mock-client = { path = "cloud-tasks-mock-client" }
 codex-code-mode = { path = "code-mode" }
 codex-code-mode-protocol = { path = "code-mode-protocol" }
 codex-code-mode-runtime = { path = "code-mode-runtime" }
@@ -240,14 +225,12 @@ codex-exec = { path = "exec" }
 codex-file-system = { path = "file-system" }
 codex-exec-server-protocol = { path = "exec-server-protocol" }
 codex-exec-server = { path = "exec-server" }
-codex-exec-server-cli = { path = "exec-server-cli" }
 codex-exec-server-test-support = { path = "exec-server/tests/support" }
 codex-execpolicy = { path = "execpolicy" }
 codex-extension-api = { path = "ext/extension-api" }
 codex-extension-items = { path = "ext/items" }
 codex-multi-env-copy-file = { path = "ext/multi-env-copy-file" }
 codex-goal-extension = { path = "ext/goal" }
-codex-git-attribution = { path = "ext/git-attribution" }
 codex-guardian-reviewer = { path = "ext/guardian-reviewer" }
 codex-guardian-v2 = { path = "ext/guardian-v2" }
 codex-guardian-v3 = { path = "ext/guardian-v3" }
@@ -266,7 +249,6 @@ codex-hooks = { path = "hooks" }
 codex-history = { path = "history" }
 codex-keyring-store = { path = "keyring-store" }
 codex-linux-sandbox = { path = "linux-sandbox" }
-codex-lmstudio = { path = "lmstudio" }
 codex-login = { path = "login" }
 codex-mermaid = { path = "mermaid" }
 codex-message-history = { path = "message-history" }
@@ -280,7 +262,6 @@ codex-model-provider-info = { path = "model-provider-info" }
 codex-models-manager = { path = "models-manager" }
 codex-mxc-sandbox = { path = "mxc-sandbox" }
 codex-network-proxy = { path = "network-proxy" }
-codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
 codex-otel-trace-websocket = { path = "otel-trace-websocket" }
 codex-plugin = { path = "plugin" }
@@ -290,7 +271,6 @@ codex-protocol = { path = "protocol" }
 codex-protocol-test-support = { path = "protocol/tests/support" }
 codex-prompts = { path = "prompts" }
 codex-queue-extension = { path = "ext/queue" }
-codex-responses-api-proxy = { path = "responses-api-proxy" }
 codex-response-debug-context = { path = "response-debug-context" }
 codex-rmcp-client = { path = "rmcp-client" }
 codex-rollout = { path = "rollout" }
@@ -307,7 +287,6 @@ codex-terminal-detection = { path = "terminal-detection" }
 codex-test-binary-support = { path = "test-binary-support" }
 codex-thread-store = { path = "thread-store" }
 codex-tools = { path = "tools" }
-codex-tcp-tunnel = { path = "tcp-tunnel" }
 codex-tui = { path = "tui" }
 codex-uds = { path = "uds" }
 codex-utils-absolute-path = { path = "utils/absolute-path" }
@@ -325,7 +304,6 @@ codex-utils-home-dir = { path = "utils/home-dir" }
 codex-utils-image = { path = "utils/image" }
 codex-utils-json-to-toml = { path = "utils/json-to-toml" }
 codex-utils-model-facing-id = { path = "utils/model-facing-id" }
-codex-utils-oss = { path = "utils/oss" }
 codex-utils-output-truncation = { path = "utils/output-truncation" }
 codex-utils-path = { path = "utils/path-utils" }
 codex-utils-path-uri = { path = "utils/path-uri" }
@@ -660,6 +638,10 @@ inherits = "dev"
 opt-level = 0
 debug = "none"
 strip = "symbols"
+incremental = false
+# The TUI keeps its directory-trust onboarding in non-debug builds. Match that
+# compile-time behavior while keeping this profile fast and small.
+debug-assertions = false
 
 [profile.release]
 lto = "thin"

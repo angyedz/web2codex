@@ -86,7 +86,6 @@ async fn test_processor(
         /*state_db*/ None,
         /*log_db*/ None,
         skills_watcher,
-        /*turn_cost_worker*/ None,
         Vec::new(),
         Arc::new(SampleResponseRegistry::default()),
     );

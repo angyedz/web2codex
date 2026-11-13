@@ -2290,6 +2290,11 @@ pub trait AuthManagerConfig {
 
     /// Returns route-selection settings for auth-owned clients.
     fn auth_route_config(&self) -> AuthRouteConfig;
+
+    /// Whether this runtime should load the user's primary account credentials.
+    fn managed_auth_enabled(&self) -> bool {
+        true
+    }
 }
 
 /// Runtime storage and network policy shared by independent credential managers.
@@ -2452,6 +2457,14 @@ impl AuthManager {
             Some(Arc::new(FixedApiKeyAuth(auth))),
             runtime,
             /*owns_network_policy*/ false,
+        )
+    }
+
+    /// Create a manager without reading or refreshing ambient account credentials.
+    pub fn unauthenticated(runtime: AuthRuntimeConfig) -> Arc<Self> {
+        Self::from_cached_auth(
+            /*auth*/ None, /*external_auth*/ None, runtime,
+            /*owns_network_policy*/ true,
         )
     }
 
@@ -3360,6 +3373,12 @@ impl AuthManager {
         config: &impl AuthManagerConfig,
         enable_codex_api_key_env: bool,
     ) -> Result<Arc<Self>, AuthManagerInitializationError> {
+        if !config.managed_auth_enabled() {
+            return Ok(Self::unauthenticated(AuthRuntimeConfig {
+                codex_home: config.codex_home(),
+                auth_route_config: config.auth_route_config(),
+            }));
+        }
         Self::shared_from_auth_config(auth_config_from(config), enable_codex_api_key_env).await
     }
 
@@ -3382,6 +3401,12 @@ impl AuthManager {
         enable_codex_api_key_env: bool,
         allowed_auth_modes: Vec<AuthMode>,
     ) -> Result<Arc<Self>, AuthManagerInitializationError> {
+        if !config.managed_auth_enabled() {
+            return Ok(Self::unauthenticated(AuthRuntimeConfig {
+                codex_home: config.codex_home(),
+                auth_route_config: config.auth_route_config(),
+            }));
+        }
         Self::shared_from_auth_config_with_auth_modes(
             auth_config_from(config),
             enable_codex_api_key_env,

@@ -50,7 +50,6 @@ use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::ThreadResumeTarget;
 use crate::request_processors::TurnRequestProcessor;
 use crate::request_processors::WindowsSandboxRequestProcessor;
-use crate::request_processors::account_processor::handle_gcp_setup;
 use crate::request_processors::read_server_diagnostics;
 use crate::request_serialization::QueuedInitializedRequest;
 use crate::request_serialization::RequestSerializationQueueKey;
@@ -61,7 +60,6 @@ use crate::thread_state::ConnectionCapabilities;
 use crate::thread_state::ThreadStateManager;
 use crate::transport::AppServerTransport;
 use crate::transport::RemoteControlHandle;
-use crate::turn_cost_worker::TurnCostWorker;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::AppServerRpcTransport;
 use codex_app_server_protocol::ClientNotification;
@@ -152,10 +150,10 @@ fn reject_removed_permission_profile(request: &JSONRPCRequest) -> Result<(), JSO
 pub(crate) struct MessageProcessor {
     pub(crate) turn_admission: TurnAdmission,
     user_verification: Arc<crate::user_verification::Service>,
+    config_manager: ConfigManager,
     outgoing: Arc<OutgoingMessageSender>,
     startup_warnings: StartupWarnings,
     models_refresh_worker: ModelsRefreshWorker,
-    turn_cost_worker: Option<TurnCostWorker>,
     skills_watcher: Arc<SkillsWatcher>,
     account_processor: Arc<AccountRequestProcessor>,
     apps_processor: AppsRequestProcessor,
@@ -260,7 +258,6 @@ impl ConnectionSessionState {
 }
 
 pub(crate) struct MessageProcessorArgs {
-    pub(crate) cloud_skill_provider: Option<Arc<dyn codex_skills_extension::SkillProvider>>,
     pub(crate) outgoing: Arc<OutgoingMessageSender>,
     pub(crate) analytics_events_client: AnalyticsEventsClient,
     pub(crate) arg0_paths: Arg0DispatchPaths,
@@ -291,7 +288,6 @@ impl MessageProcessor {
     /// `Sender` so handlers can enqueue messages to be written to stdout.
     pub(crate) fn new(args: MessageProcessorArgs) -> Self {
         let MessageProcessorArgs {
-            cloud_skill_provider,
             outgoing,
             analytics_events_client,
             arg0_paths,
@@ -399,9 +395,6 @@ impl MessageProcessor {
                         goal_service: Arc::clone(&goal_service),
                         environment_manager: Arc::clone(&environment_manager_for_extensions),
                         executor_skill_provider: Arc::clone(&executor_skill_provider),
-                        cloud_skill_provider: cloud_skill_provider.clone(),
-                        git_attribution_base_url: config.chatgpt_base_url.clone(),
-                        http_client_factory: config.http_client_factory(),
                         queue_service: queue_service.clone(),
                         turn_start_admission: Some(Arc::clone(&turn_start_admission)),
                     },
@@ -440,11 +433,6 @@ impl MessageProcessor {
             Arc::clone(&thread_manager),
         ));
         let models_refresh_worker = crate::models_refresh_worker::spawn(&model_catalog);
-        let turn_cost_worker = TurnCostWorker::spawn(
-            Arc::clone(&config),
-            Arc::clone(&auth_manager),
-            runtime_auth.map(|runtime| (runtime, config.runtime_auth_mode)),
-        );
         thread_manager
             .plugins_manager()
             .set_analytics_events_client(analytics_events_client.clone());
@@ -478,10 +466,7 @@ impl MessageProcessor {
         let account_processor = AccountRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
-            outgoing.clone(),
-            Arc::clone(&config),
             config_manager.clone(),
-            Arc::clone(&model_catalog),
         );
         let apps_processor = AppsRequestProcessor::new(
             Arc::clone(&thread_manager),
@@ -574,7 +559,6 @@ impl MessageProcessor {
             state_db.clone(),
             log_db,
             Arc::clone(&skills_watcher),
-            turn_cost_worker.as_ref().map(TurnCostWorker::handle),
             config_warnings.clone(),
             sample_responses,
         );
@@ -588,7 +572,6 @@ impl MessageProcessor {
             thread_state_manager,
             thread_watch_manager,
             Arc::clone(&skills_watcher),
-            turn_cost_worker.as_ref().map(TurnCostWorker::handle),
         );
         if let Some(startup_config) = plugin_startup_tasks {
             let reload_config = match startup_config {
@@ -639,18 +622,18 @@ impl MessageProcessor {
         let windows_sandbox_processor = WindowsSandboxRequestProcessor::new(
             outgoing.clone(),
             Arc::clone(&config),
-            config_manager,
+            config_manager.clone(),
         );
 
         Self {
             turn_admission,
             user_verification,
+            config_manager,
             outgoing,
             startup_warnings: StartupWarnings {
                 config: config_warnings,
             },
             models_refresh_worker,
-            turn_cost_worker,
             skills_watcher,
             account_processor,
             apps_processor,
@@ -680,7 +663,6 @@ impl MessageProcessor {
     }
 
     pub(crate) fn clear_runtime_references(&self) {
-        self.account_processor.clear_external_auth();
         self.apps_processor.shutdown();
         self.models_refresh_worker.shutdown();
         self.skills_watcher.shutdown();
@@ -877,8 +859,6 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         request_attestation: bool,
     ) {
-        self.account_processor
-            .notify_workspace_routing_to_connection(connection_id);
         self.thread_processor
             .connection_initialized(
                 connection_id,
@@ -915,9 +895,6 @@ impl MessageProcessor {
 
     pub(crate) async fn drain_background_tasks(&self) {
         self.models_refresh_worker.shutdown();
-        if let Some(worker) = &self.turn_cost_worker {
-            worker.shutdown();
-        }
         self.thread_processor.drain_background_tasks().await;
     }
 
@@ -940,8 +917,6 @@ impl MessageProcessor {
     ) {
         session_state.disconnect.cancel();
         session_state.rpc_gate.close().await;
-        self.account_processor
-            .gateway_connection_closed(connection_id);
         self.request_serialization_queues.discard_closed().await;
         self.outgoing
             .disconnect_user_verification_connection(connection_id)
@@ -1875,103 +1850,30 @@ impl MessageProcessor {
                     .windows_sandbox_setup_start(&request_id, params)
                     .await
             }
-            ClientRequest::LoginAccount { params, .. } => {
-                self.account_processor
-                    .login_account(request_id.clone(), params)
-                    .await
-            }
-            ClientRequest::BedrockDiscover { params, .. } => {
-                self.account_processor.bedrock_discover(params).await
-            }
-            ClientRequest::BedrockSetup { params, .. } => {
-                self.account_processor.bedrock_setup(params).await
-            }
-            ClientRequest::GcpSetup { params, .. } => {
-                handle_gcp_setup(&self.account_processor, params).await
-            }
-            ClientRequest::BedrockCheckGovCloudRequirements { .. } => {
-                self.account_processor
-                    .bedrock_check_gov_cloud_requirements()
-                    .await
-            }
-            ClientRequest::GatewayOAuthRead { params, .. } => Box::pin(
-                self.account_processor
-                    .gateway_oauth_read(params.unwrap_or_default()),
-            )
-            .await
-            .map(|response| Some(response.into())),
-            ClientRequest::GatewayOAuthLogin { params, .. } => {
-                if session
-                    .opted_out_notification_methods()
-                    .contains("account/gatewayOAuth/changed")
-                {
-                    Err(invalid_request(
-                        "Gateway login requires account/gatewayOAuth/changed notifications",
-                    ))
-                } else {
-                    Box::pin(self.account_processor.gateway_oauth_login(
-                        params.unwrap_or_default(),
-                        connection_id,
-                        &session.rpc_gate,
-                    ))
-                    .await
-                    .map(|response| Some(response.into()))
-                }
-            }
-            ClientRequest::GatewayOAuthCancel { .. } => {
-                Box::pin(self.account_processor.gateway_oauth_cancel(connection_id))
-                    .await
-                    .map(|response| Some(response.into()))
-            }
-            ClientRequest::AccountSessionsList { params, .. } => self
-                .account_processor
-                .list_account_sessions(params)
-                .await
-                .map(|response| Some(ClientResponsePayload::AccountSessionsList(response))),
-            ClientRequest::AccountSessionsSwitch { params, .. } => self
-                .account_processor
-                .switch_account_session(params, &self.thread_processor, &self.turn_admission)
-                .await
-                .map(|response| Some(ClientResponsePayload::AccountSessionsSwitch(response))),
-            ClientRequest::LogoutAccount { .. } => {
-                self.account_processor
-                    .logout_account(request_id.clone())
-                    .await
-            }
-            ClientRequest::CancelLoginAccount { params, .. } => {
-                self.account_processor.cancel_login_account(params).await
-            }
-            ClientRequest::GetAccount { params, .. } => {
-                self.account_processor.get_account(params).await
-            }
-            ClientRequest::GetAuthStatus { params, .. } => {
-                self.account_processor.get_auth_status(params).await
-            }
-            ClientRequest::GetAccountSecuritySetup { .. } => Ok(Some(
-                self.account_processor
-                    .get_account_security_setup()
-                    .await
-                    .into(),
+            ClientRequest::LoginAccount { .. }
+            | ClientRequest::CancelLoginAccount { .. }
+            | ClientRequest::BedrockDiscover { .. }
+            | ClientRequest::BedrockSetup { .. }
+            | ClientRequest::GcpSetup { .. }
+            | ClientRequest::BedrockCheckGovCloudRequirements { .. }
+            | ClientRequest::GatewayOAuthRead { .. }
+            | ClientRequest::GatewayOAuthLogin { .. }
+            | ClientRequest::GatewayOAuthCancel { .. }
+            | ClientRequest::LogoutAccount { .. }
+            | ClientRequest::AccountSessionsList { .. }
+            | ClientRequest::AccountSessionsSwitch { .. } => Err(invalid_request(
+                "Provider sign-in is disabled. Web2Codex uses the private ChatGPT Web browser for model access.",
             )),
-            ClientRequest::GetAccountRateLimits { params, .. } => {
-                self.account_processor.get_account_rate_limits(params).await
-            }
-            ClientRequest::ConsumeAccountRateLimitResetCredit { params, .. } => {
-                self.account_processor
-                    .consume_account_rate_limit_reset_credit(params)
-                    .await
-            }
-            ClientRequest::GetAccountTokenUsage { params, .. } => {
-                self.account_processor.get_account_token_usage(params).await
-            }
-            ClientRequest::GetWorkspaceMessages { .. } => {
-                self.account_processor.get_workspace_messages().await
-            }
-            ClientRequest::SendAddCreditsNudgeEmail { params, .. } => {
-                self.account_processor
-                    .send_add_credits_nudge_email(params)
-                    .await
-            }
+            ClientRequest::GetAccount { .. }
+            | ClientRequest::GetAuthStatus { .. }
+            | ClientRequest::GetAccountSecuritySetup { .. }
+            | ClientRequest::GetAccountRateLimits { .. }
+            | ClientRequest::ConsumeAccountRateLimitResetCredit { .. }
+            | ClientRequest::GetAccountTokenUsage { .. }
+            | ClientRequest::GetWorkspaceMessages { .. }
+            | ClientRequest::SendAddCreditsNudgeEmail { .. } => Err(invalid_request(
+                "ChatGPT account APIs are disabled. Sign-in and model access use the private WebView; usage statistics are local.",
+            )),
             ClientRequest::GitDiffToRemote { params, .. } => {
                 self.git_processor.git_diff_to_remote(params).await
             }
@@ -2063,9 +1965,6 @@ impl MessageProcessor {
 mod message_processor_tracing_tests;
 
 #[cfg(test)]
-#[path = "message_processor_gateway_oauth_tests.rs"]
-mod gateway_oauth_tests;
-
 #[cfg(test)]
 #[path = "message_processor_thread_lifecycle_tests.rs"]
 mod thread_lifecycle_tests;

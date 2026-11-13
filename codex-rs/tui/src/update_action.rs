@@ -10,16 +10,6 @@ use codex_install_context::StandalonePlatform;
 pub enum UpdateAction {
     /// Replace the local daemon after restoring the terminal.
     Daemon(DaemonUpdateSource),
-    /// Update via `npm install -g @openai/codex@latest`.
-    NpmGlobalLatest,
-    /// Update via `bun install -g @openai/codex@latest`.
-    BunGlobalLatest,
-    /// Update via `vp install -g @openai/codex@latest`.
-    VitePlusGlobalLatest,
-    /// Update via `pnpm add -g @openai/codex@latest`.
-    PnpmGlobalLatest,
-    /// Update via `brew upgrade codex`.
-    BrewUpgrade,
     /// Update via the latest GitHub Release's Unix installer.
     StandaloneUnix,
     /// Update via the latest GitHub Release's Windows installer.
@@ -30,34 +20,23 @@ impl UpdateAction {
     #[cfg(any(not(debug_assertions), test))]
     pub(crate) fn from_install_context(context: &InstallContext) -> Option<Self> {
         match &context.method {
-            InstallMethod::Npm => Some(UpdateAction::NpmGlobalLatest),
-            InstallMethod::Bun => Some(UpdateAction::BunGlobalLatest),
-            InstallMethod::VitePlus => Some(UpdateAction::VitePlusGlobalLatest),
-            InstallMethod::Pnpm => Some(UpdateAction::PnpmGlobalLatest),
-            InstallMethod::Brew => Some(UpdateAction::BrewUpgrade),
             InstallMethod::Standalone { platform, .. } => Some(match platform {
                 StandalonePlatform::Unix => UpdateAction::StandaloneUnix,
                 StandalonePlatform::Windows => UpdateAction::StandaloneWindows,
             }),
-            InstallMethod::Other => None,
+            InstallMethod::Npm
+            | InstallMethod::Bun
+            | InstallMethod::VitePlus
+            | InstallMethod::Pnpm
+            | InstallMethod::Brew
+            | InstallMethod::Other => None,
         }
     }
 
     /// Returns the command and arguments for invoking the update.
     pub fn command_args(self) -> (&'static str, Vec<String>) {
         match self {
-            UpdateAction::Daemon(source) => ("codex", owned_args(source.command_args())),
-            UpdateAction::NpmGlobalLatest => {
-                ("npm", owned_args(&["install", "-g", "@openai/codex"]))
-            }
-            UpdateAction::BunGlobalLatest => {
-                ("bun", owned_args(&["install", "-g", "@openai/codex"]))
-            }
-            UpdateAction::VitePlusGlobalLatest => {
-                ("vp", owned_args(&["install", "-g", "@openai/codex"]))
-            }
-            UpdateAction::PnpmGlobalLatest => ("pnpm", owned_args(&["add", "-g", "@openai/codex"])),
-            UpdateAction::BrewUpgrade => ("brew", owned_args(&["upgrade", "--cask", "codex"])),
+            UpdateAction::Daemon(source) => ("web2codex", owned_args(source.command_args())),
             UpdateAction::StandaloneUnix => (
                 "sh",
                 vec![
@@ -101,7 +80,7 @@ fn owned_args(args: &[&str]) -> Vec<String> {
 fn latest_release_installer_url(asset: &str) -> String {
     format!(
         "https://github.com/{}/releases/latest/download/{asset}",
-        option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("openai/codex")
+        option_env!("CODEX_GITHUB_REPOSITORY").unwrap_or("angyedz/web2codex")
     )
 }
 
@@ -129,34 +108,21 @@ mod tests {
             }),
             None
         );
-        assert_eq!(
-            UpdateAction::from_install_context(&InstallContext {
-                method: InstallMethod::Npm,
-                package_layout: None,
-            }),
-            Some(UpdateAction::NpmGlobalLatest)
-        );
-        assert_eq!(
-            UpdateAction::from_install_context(&InstallContext {
-                method: InstallMethod::Bun,
-                package_layout: None,
-            }),
-            Some(UpdateAction::BunGlobalLatest)
-        );
-        assert_eq!(
-            UpdateAction::from_install_context(&InstallContext {
-                method: InstallMethod::Pnpm,
-                package_layout: None,
-            }),
-            Some(UpdateAction::PnpmGlobalLatest)
-        );
-        assert_eq!(
-            UpdateAction::from_install_context(&InstallContext {
-                method: InstallMethod::Brew,
-                package_layout: None,
-            }),
-            Some(UpdateAction::BrewUpgrade)
-        );
+        for method in [
+            InstallMethod::Npm,
+            InstallMethod::Bun,
+            InstallMethod::VitePlus,
+            InstallMethod::Pnpm,
+            InstallMethod::Brew,
+        ] {
+            assert_eq!(
+                UpdateAction::from_install_context(&InstallContext {
+                    method,
+                    package_layout: None,
+                }),
+                None
+            );
+        }
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext {
                 method: InstallMethod::Standalone {

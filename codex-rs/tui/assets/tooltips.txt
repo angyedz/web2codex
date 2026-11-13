@@ -35,7 +35,7 @@ When goals are enabled, use **/goal** to set or inspect the objective for a long
 Use **/agents** to open the agent command center.
 Use **/subagents** to switch between this session’s subagents.
 Use **/export** to save your conversation as Markdown.
-Use **/usage** to view token usage statistics. Account limits and reset credits are not shown there.
+Use **/usage** to view local request and character statistics. Exact token counts, account limits, and reset credits are not available there.
 Use **/title** to choose what appears in your terminal’s title.
 Use **/theme** to choose a syntax highlighting theme.
 When plugins are enabled, use **/plugins** to browse plugins.

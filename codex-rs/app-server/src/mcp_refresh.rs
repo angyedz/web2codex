@@ -551,7 +551,6 @@ enabled = false
                         sample_responses: Arc::new(
                             crate::thread_sample::SampleResponseRegistry::default(),
                         ),
-                        cloud_skill_provider: None,
                         event_sink: Arc::new(NoopExtensionEventSink),
                         auth_manager: auth_manager.clone(),
                         state_db: Some(state_db.clone()),
@@ -560,8 +559,6 @@ enabled = false
                         goal_service: Arc::new(codex_goal_extension::GoalService::new()),
                         environment_manager: Arc::clone(&environment_manager),
                         executor_skill_provider: Arc::clone(&executor_skill_provider),
-                        git_attribution_base_url: good_config.chatgpt_base_url.clone(),
-                        http_client_factory: good_config.http_client_factory(),
                         queue_service: None,
                         turn_start_admission: None,
                     },

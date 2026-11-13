@@ -56,6 +56,11 @@ impl FeedbackRequestProcessor {
         &self,
         params: FeedbackUploadParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if self.config.model_provider_id == "web2codex" {
+            return Err(invalid_request(
+                "feedback upload is unavailable with the ChatGPT Web provider",
+            ));
+        }
         if !self.config.feedback_enabled {
             return Err(invalid_request(
                 "sending feedback is disabled by configuration",

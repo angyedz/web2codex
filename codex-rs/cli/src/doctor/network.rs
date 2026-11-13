@@ -50,7 +50,7 @@ pub(super) async fn checks(
     config_check.duration_ms = config_duration.as_millis().try_into().unwrap_or(u64::MAX);
     progress.finish("config", config_check.status);
     let auth_manager = codex_login::AuthManager::shared_from_config(
-        &config, /*enable_codex_api_key_env*/ true,
+        &config, /*enable_codex_api_key_env*/ false,
     )
     .await
     .ok();

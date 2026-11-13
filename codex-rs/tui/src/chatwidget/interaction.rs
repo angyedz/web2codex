@@ -618,6 +618,7 @@ impl ChatWidget {
         self.finish_paste_burst_tick(frame_requester, flushed)
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_handoff_paste_tick(&mut self, frame_requester: FrameRequester) -> bool {
         let flushed = self.bottom_pane.flush_handoff_paste_if_due();
         self.finish_paste_burst_tick(frame_requester, flushed)

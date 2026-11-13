@@ -799,7 +799,7 @@ async fn queued_start_rejection_restores_the_draft() -> Result<()> {
         );
         let op = next_user_turn_op(&mut ops);
         let Op::UserTurn {
-            cloud_submission: crate::app_command::CloudSubmissionIntent::StartIfIdle,
+            submission_intent: crate::app_command::UserSubmissionIntent::StartIfIdle,
             client_user_message_id,
             items,
             ..

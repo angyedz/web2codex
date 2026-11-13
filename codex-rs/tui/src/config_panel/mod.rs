@@ -411,13 +411,6 @@ fn settings(tui: &Tui, status: ConfigPanelStatus) -> Vec<ConfigSetting> {
             value: ConfigEditor::ResumeDirectory.value(tui, status),
         },
         ConfigSetting {
-            section: ConfigSection::Sessions,
-            label: "Model providers",
-            description: "Choose the default provider for new chats on the connected server",
-            keywords: "provider gateway endpoint model default",
-            value: ConfigEditor::ModelProviders.value(tui, status),
-        },
-        ConfigSetting {
             section: ConfigSection::TextSelection,
             label: "Copy on select",
             description: "Copy transcript, footer, and composer selections on release; Auto follows terminal defaults",

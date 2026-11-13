@@ -30,7 +30,6 @@ impl ChatWidget {
 
     pub(crate) fn dismiss_stale_model_picker(&mut self) {
         self.model_popup_request_id = None;
-        self.cloud_picker_selection = None;
         let had_popup = !self.no_modal_or_popup_active();
         for id in [
             MODEL_LOADING_VIEW_ID,
