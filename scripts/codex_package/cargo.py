@@ -13,6 +13,17 @@ from .v8 import resolve_codex_v8_cargo_env
 
 CODEX_RS_ROOT = REPO_ROOT / "codex-rs"
 
+CARGO_PACKAGE_BY_BINARY = {
+    "codex": "codex-cli",
+    "web2codex": "codex-cli",
+    "codex-app-server": "codex-app-server",
+    "codex-code-mode-host": "codex-code-mode-host",
+    "exec-server": "codex-app-server",
+    "bwrap": "codex-bwrap",
+    "codex-command-runner": "codex-windows-sandbox",
+    "codex-windows-sandbox-setup": "codex-windows-sandbox",
+}
+
 
 @dataclass(frozen=True)
 class SourceBuildOutputs:
@@ -64,6 +75,9 @@ def build_source_binaries(
             "--profile",
             profile,
         ]
+        packages = dict.fromkeys(CARGO_PACKAGE_BY_BINARY[binary] for binary in binaries)
+        for package in packages:
+            cmd.extend(["--package", package])
         for binary in binaries:
             cmd.extend(["--bin", binary])
 
@@ -99,7 +113,7 @@ def build_source_binaries(
         exec_server_bin=(
             exec_server_bin.resolve()
             if exec_server_bin is not None
-            else output_dir / f"codex-exec-server{spec.exe_suffix}"
+            else output_dir / f"exec-server{spec.exe_suffix}"
         ),
         bwrap_bin=resolve_output_path(
             bwrap_bin,
@@ -135,7 +149,7 @@ def source_binaries_for_target(
     if build_code_mode_host:
         binaries.append("codex-code-mode-host")
     if build_exec_server:
-        binaries.append("codex-exec-server")
+        binaries.append("exec-server")
     if build_bwrap:
         binaries.append("bwrap")
     if build_codex_command_runner:
