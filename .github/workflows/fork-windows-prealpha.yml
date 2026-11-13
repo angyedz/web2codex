@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: web2codex-prealpha-windows-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   windows-x64:
@@ -67,8 +67,8 @@ jobs:
         with:
           workspaces: codex-rs -> target
 
-      - name: Compile the CLI and private WebView browser
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-cli --bin web2codex -p codex-web-browser --bin codex-web-browser
+      - name: Compile the CLI, WebView, and packaged harness helpers
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-cli --bin web2codex -p codex-web-browser --bin codex-web-browser -p codex-code-mode-host --bin codex-code-mode-host -p codex-app-server --bin exec-server -p codex-windows-sandbox --bin codex-command-runner --bin codex-windows-sandbox-setup
 
       - name: Verify native MCP bridge
         run: cargo test --locked --release --target x86_64-pc-windows-msvc -p codex-web-browser --bin codex-web-browser
@@ -84,6 +84,10 @@ jobs:
             --cargo-profile release `
             --package-dir $package `
             --entrypoint-bin "target/$env:TARGET/release/web2codex.exe" `
+            --code-mode-host-bin "target/$env:TARGET/release/codex-code-mode-host.exe" `
+            --exec-server-bin "target/$env:TARGET/release/exec-server.exe" `
+            --codex-command-runner-bin "target/$env:TARGET/release/codex-command-runner.exe" `
+            --codex-windows-sandbox-setup-bin "target/$env:TARGET/release/codex-windows-sandbox-setup.exe" `
             --web-browser-bin "target/$env:TARGET/release/codex-web-browser.exe" `
             --force
           if ($LASTEXITCODE -ne 0) { throw "Failed to assemble the complete Windows harness package" }
