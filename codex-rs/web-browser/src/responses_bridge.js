@@ -84,21 +84,9 @@
     await sleep(300);
   };
 
-  const modelControl = () => [...document.querySelectorAll('button[data-testid="model-switcher-dropdown-button"]')].filter(visible);
   const ensureRequestedModel = async requested => {
-    const matches = modelControl();
-    if (matches.length !== 1) throw new Error("ChatGPT model picker is unavailable or ambiguous");
-    const control = matches[0];
-    const target = normalize(requested);
-    if (normalize(label(control)) === target) return;
-    control.click();
-    const option = await waitFor(() => {
-      const options = [...document.querySelectorAll('[role="menu"] [role="menuitem"], [role="menu"] [role="menuitemradio"], [role="listbox"] [role="option"], [data-model-id]')]
-        .filter(visible).filter(option => normalize(label(option)) === target);
-      return options.length === 1 ? options[0] : null;
-    }, 5000, `ChatGPT does not expose one exact picker choice for ${requested}`);
-    option.click();
-    await waitFor(() => modelControl().some(control => normalize(label(control)) === target), 5000, `ChatGPT did not confirm model ${requested}`);
+    if (!window.__web2codexModelPicker) throw new Error("ChatGPT model picker is unavailable");
+    await window.__web2codexModelPicker.select(requested);
   };
 
   // ChatGPT's connector consent only forwards calls to this local harness.
