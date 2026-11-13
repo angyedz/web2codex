@@ -344,6 +344,9 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
                 "slug": label.clone(),
                 "display_name": label.clone(),
                 "description": "Detected in the signed-in ChatGPT Web model picker.",
+                // The Codex catalog parser requires an instruction template.
+                // Native tool descriptions and schemas are supplied via MCP.
+                "base_instructions": "You are a coding agent. Follow the user's instructions and report your work clearly.",
                 "supported_reasoning_levels": [],
                 "shell_type": "unified_exec",
                 "tool_mode": "direct",
