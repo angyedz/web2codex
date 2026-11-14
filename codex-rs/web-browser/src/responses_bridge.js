@@ -124,6 +124,9 @@
       await ensurePersonalizedTemporaryChat();
       await ensureRequestedModel(request.model);
       await ensureRequestedEffort(request.reasoning_effort);
+      // Model and reasoning menus can re-render the composer. Never type into
+      // the element captured before those selections.
+      composer = await waitFor(findComposer, 10000, "ChatGPT composer did not return after selecting the model");
       composer = await attachConnector(composer);
       const baseline = assistantMessages().length;
       replaceText(composer, request.prompt, true);
@@ -140,6 +143,8 @@
       let text = "";
       let lastChange = Date.now();
       let revision = -1;
+      const startDeadline = Date.now() + 120000;
+      let responseStarted = false;
       // Tool rounds and approvals can outlive a single HTTP response. Observe
       // this same ChatGPT response until the native completion fence accepts it.
       while (!window.__web2codexCompleted) {
@@ -151,6 +156,8 @@
         if (state && state.revision !== revision) { revision = state.revision; lastChange = Date.now(); }
         const current = responseText(baseline);
         if (current !== text) { text = current; lastChange = Date.now(); }
+        if (current || stopVisible() || (state && (state.pending_tools > 0 || state.completed_tools > 0))) responseStarted = true;
+        if (!responseStarted && Date.now() >= startDeadline) throw new Error("ChatGPT did not start responding within two minutes. Check the Web2Codex window and connector; the prompt was not retried.");
         if (state && (text || state.completed_tools > 0) && state.pending_tools === 0 && state.quiet_ms >= 2500 && Date.now() - lastChange >= 2500 && !stopVisible() && !approvalVisible()) {
           sendNative({ type: "responses-result", text, tool_revision: revision });
         }
