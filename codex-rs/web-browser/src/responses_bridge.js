@@ -94,6 +94,49 @@
     await window.__web2codexModelPicker.setEffort(requested);
   };
 
+  const attachFiles = async (composer, attachments) => {
+    if (!attachments?.length) return composer;
+    let form = composer.closest("form") || document;
+    const accepts = (input, attachment) => {
+      const accept = (input.getAttribute("accept") || "").split(",").map(value => value.trim().toLowerCase()).filter(Boolean);
+      if (!accept.length) return true;
+      const extension = attachment.name.split(".").pop()?.toLowerCase();
+      return accept.some(value => value === attachment.mime.toLowerCase() || value === `.${extension}` ||
+        (value.endsWith("/*") && attachment.mime.toLowerCase().startsWith(value.slice(0, -1))));
+    };
+    const fileInput = root => [...root.querySelectorAll('input[type="file"]')].find(input => attachments.every(attachment => accepts(input, attachment))) || null;
+    let input = fileInput(form);
+    if (!input) {
+      const add = [...form.querySelectorAll("button")].find(button => visible(button) && (
+        /attach|upload/i.test(button.getAttribute("data-testid") || "") ||
+        /attach|upload|add files|прикреп|добавить файлы/i.test(label(button))));
+      if (add) add.click();
+      input = await waitFor(() => fileInput(document), 5000, "ChatGPT file upload control was not found; the prompt was not sent");
+    }
+    const transfer = new DataTransfer();
+    for (const attachment of attachments) {
+      const comma = attachment.data_url.indexOf(",");
+      if (comma < 0) throw new Error("Invalid media attachment; the prompt was not sent");
+      let decoded;
+      try { decoded = atob(attachment.data_url.slice(comma + 1)); }
+      catch { throw new Error("Invalid media attachment encoding; the prompt was not sent"); }
+      const bytes = Uint8Array.from(decoded, character => character.charCodeAt(0));
+      transfer.items.add(new File([bytes], attachment.name, { type: attachment.mime }));
+    }
+    input.files = transfer.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => {
+      const current = findComposer();
+      form = current?.closest("form") || document;
+      const cards = [...form.querySelectorAll('[role="group"], .composer-attachment-surface[aria-label]')];
+      return attachments.every(attachment => cards.some(card => visible(card) && label(card) === attachment.name && !card.querySelector('[aria-busy="true"], [data-state="loading"], .animate-spin')));
+    }, 60000, "ChatGPT did not confirm the file attachments; the prompt was not sent");
+    const current = findComposer();
+    if (!current || !connectorSelected(current)) throw new Error("The connector disappeared while attaching images; the prompt was not sent");
+    return current;
+  };
+
   // ChatGPT's connector consent only forwards calls to this local harness.
   // Execution still passes through Codex's own approvals and sandbox.
   const allowConnectorOnce = () => {
@@ -133,6 +176,7 @@
       if (!connectorSelected(composer)) throw new Error("The connector pill disappeared; the prompt was not sent");
       const tail = request.prompt.replace(/\s+/g, " ").trim().slice(-120);
       if (!(composer.innerText || composer.value || "").replace(/\s+/g, " ").includes(tail)) throw new Error("ChatGPT did not preserve the prompt text");
+      composer = await attachFiles(composer, request.attachments);
       const submit = await waitFor(() => {
         const form = findComposer()?.closest("form");
         return [...(form || document).querySelectorAll('button[data-testid="send-button"], button[data-testid="composer-send-button"], button[type="submit"]')]
@@ -141,6 +185,7 @@
       submit.click();
 
       let text = "";
+      let streamedText = "";
       let lastChange = Date.now();
       let revision = -1;
       const startDeadline = Date.now() + 120000;
@@ -155,7 +200,16 @@
         if (state && !state.active) return;
         if (state && state.revision !== revision) { revision = state.revision; lastChange = Date.now(); }
         const current = responseText(baseline);
-        if (current !== text) { text = current; lastChange = Date.now(); }
+        if (current !== text) {
+          text = current;
+          lastChange = Date.now();
+          if (!current.startsWith(streamedText)) throw new Error("ChatGPT revised text that was already streamed; the response was stopped to avoid inconsistent output");
+          const delta = current.slice(streamedText.length);
+          if (delta) {
+            streamedText = current;
+            sendNative({ type: "responses-text", delta });
+          }
+        }
         if (current || stopVisible() || (state && (state.pending_tools > 0 || state.completed_tools > 0))) responseStarted = true;
         if (!responseStarted && Date.now() >= startDeadline) throw new Error("ChatGPT did not start responding within two minutes. Check the Web2Codex window and connector; the prompt was not retried.");
         if (state && (text || state.completed_tools > 0) && state.pending_tools === 0 && state.quiet_ms >= 2500 && Date.now() - lastChange >= 2500 && !stopVisible() && !approvalVisible()) {

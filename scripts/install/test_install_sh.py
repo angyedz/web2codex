@@ -21,6 +21,25 @@ MISMATCH_VERSION = "0.145.0"
 
 
 class InstallShTest(unittest.TestCase):
+    def test_default_install_uses_web2codex_alias_and_separate_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata = create_package_release(root, command_name="web2codex")
+            result, _ = run_installer_in(
+                root, VERSION, metadata_json=metadata, archive_path=archive,
+                checksum_path=checksum, force_macos=True, command_name=None,
+                use_default_home=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            alias = root / "install-bin" / "web2codex"
+            self.assertTrue(alias.is_symlink())
+            self.assertEqual(
+                os.readlink(alias),
+                str(root / "home/.web2codex/packages/standalone/current/bin/web2codex"),
+            )
+            self.assertFalse((root / "install-bin" / "codex").exists())
+            self.assertFalse((root / "codex-home").exists())
+
     def test_metadata_fetch_failure_is_not_reported_as_missing_assets(self) -> None:
         result, requests = run_installer(VERSION, metadata_failure=True)
 
@@ -28,8 +47,8 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/openai/codex/releases/tags/"
-                f"rust-v{VERSION}"
+                "https://api.github.com/repos/angyedz/web2codex/releases/tags/"
+                f"codex-web-v{VERSION}"
             ],
         )
         self.assertIn(
@@ -45,10 +64,10 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/openai/codex/releases/tags/"
-                f"rust-v{VERSION}",
-                "https://github.com/openai/codex/releases/download/"
-                f"rust-v{VERSION}/codex-package_SHA256SUMS",
+                "https://api.github.com/repos/angyedz/web2codex/releases/tags/"
+                f"codex-web-v{VERSION}",
+                "https://github.com/angyedz/web2codex/releases/download/"
+                f"codex-web-v{VERSION}/codex-package_SHA256SUMS",
             ],
         )
         self.assertIn(f"Resolved version: {VERSION}", result.stdout)
@@ -61,10 +80,10 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/openai/codex/releases/tags/"
-                f"rust-v{version}",
-                "https://github.com/openai/codex/releases/download/"
-                f"rust-v{version}/codex-package_SHA256SUMS",
+                "https://api.github.com/repos/angyedz/web2codex/releases/tags/"
+                f"codex-web-v{version}",
+                "https://github.com/angyedz/web2codex/releases/download/"
+                f"codex-web-v{version}/codex-package_SHA256SUMS",
             ],
         )
         self.assertIn(f"Resolved version: {version}", result.stdout)
@@ -76,9 +95,9 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/openai/codex/releases/latest",
-                "https://github.com/openai/codex/releases/download/"
-                f"rust-v{VERSION}/codex-package_SHA256SUMS",
+                "https://api.github.com/repos/angyedz/web2codex/releases/latest",
+                "https://github.com/angyedz/web2codex/releases/download/"
+                f"codex-web-v{VERSION}/codex-package_SHA256SUMS",
             ],
         )
         self.assertIn(f"Resolved version: {VERSION}", result.stdout)
@@ -92,9 +111,9 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/openai/codex/releases/latest",
-                "https://github.com/openai/codex/releases/download/"
-                f"rust-v{VERSION}/codex-package_SHA256SUMS",
+                "https://api.github.com/repos/angyedz/web2codex/releases/latest",
+                "https://github.com/angyedz/web2codex/releases/download/"
+                f"codex-web-v{VERSION}/codex-package_SHA256SUMS",
             ],
         )
         self.assertIn(f"Resolved version: {VERSION}", result.stdout)
@@ -153,7 +172,7 @@ class InstallShTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(
-                "Leaving the existing npm-managed Codex installed", result.stderr
+                "Leaving the existing npm-managed Codex untouched", result.stderr
             )
 
     def test_releases_latest_installs_verified_package_by_default(self) -> None:
@@ -175,9 +194,11 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(
                 requests,
                 [
-                    "https://releases.openai.com/codex/channels/latest",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
+                    "https://api.github.com/repos/angyedz/web2codex/releases/latest",
+                    "https://github.com/angyedz/web2codex/releases/download/"
+                    f"codex-web-v{VERSION}/codex-package_SHA256SUMS",
+                    "https://github.com/angyedz/web2codex/releases/download/"
+                    f"codex-web-v{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
                 ],
             )
 
@@ -646,272 +667,45 @@ class InstallShTest(unittest.TestCase):
                 (root / "codex-home/packages/standalone/auto-update-version").exists()
             )
 
-    def test_releases_unusable_metadata_falls_back_to_github(self) -> None:
-        unusable_metadata = {
+    def test_rejects_unusable_github_metadata(self) -> None:
+        invalid = {
             "html": "<html>proxy error</html>",
             "empty": "",
             "malformed_json": '{"tag_name":',
             "missing_tag": json.dumps({"assets": []}),
-            "missing_assets": json.dumps(
-                {"tag_name": f"rust-v{VERSION}", "assets": []}
-            ),
-            "invalid_checksum_digest": json.dumps(
-                {
-                    "tag_name": f"rust-v{VERSION}",
-                    "assets": [
-                        {
-                            "name": "codex-package-aarch64-apple-darwin.tar.gz",
-                            "digest": "sha256:" + "a" * 64,
-                        },
-                        {
-                            "name": "codex-package_SHA256SUMS",
-                            "digest": "sha256:" + "z" * 64,
-                        },
-                    ],
-                }
-            ),
-            "invalid_version": json.dumps({"tag_name": "rust-vinvalid"}),
+            "missing_assets": json.dumps({"tag_name": f"codex-web-v{VERSION}", "assets": []}),
+            "invalid_version": json.dumps({"tag_name": "codex-web-vinvalid"}),
         }
+        for name, metadata in invalid.items():
+            with self.subTest(metadata=name), tempfile.TemporaryDirectory() as temp_dir:
+                result, requests = run_installer_in(
+                    Path(temp_dir), "latest", metadata_json=metadata, force_macos=True
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(
+                    requests,
+                    ["https://api.github.com/repos/angyedz/web2codex/releases/latest"],
+                )
 
-        for name, releases_metadata_json in unusable_metadata.items():
-            with self.subTest(metadata=name):
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    root = Path(temp_dir)
-                    archive_path, checksum_path, metadata_json = create_package_release(
-                        root
-                    )
-
-                    result, requests = run_installer_in(
-                        root,
-                        "latest",
-                        metadata_json=metadata_json,
-                        releases_metadata_json=releases_metadata_json,
-                        archive_path=archive_path,
-                        checksum_path=checksum_path,
-                        force_macos=True,
-                        use_mirror=None,
-                    )
-
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(
-                        requests,
-                        [
-                            "https://releases.openai.com/codex/channels/latest",
-                            "https://api.github.com/repos/openai/codex/releases/latest",
-                            "https://github.com/openai/codex/releases/download/"
-                            f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                            "https://github.com/openai/codex/releases/download/"
-                            f"rust-v{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                        ],
-                    )
-                    self.assertIn("falling back to GitHub Releases", result.stderr)
-
-    def test_releases_exact_metadata_version_mismatch_falls_back_to_github(
-        self,
-    ) -> None:
+    def test_rejects_corrupt_github_checksum(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive_path, checksum_path, metadata_json = create_package_release(root)
-            releases_metadata = json.loads(metadata_json)
-            releases_metadata["tag_name"] = f"rust-v{MISMATCH_VERSION}"
-
+            archive, checksum, metadata = create_package_release(root)
             result, requests = run_installer_in(
-                root,
-                VERSION,
-                metadata_json=metadata_json,
-                releases_metadata_json=json.dumps(releases_metadata),
-                archive_path=archive_path,
-                checksum_path=checksum_path,
-                force_macos=True,
-                use_mirror=None,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                requests,
-                [
-                    f"https://releases.openai.com/codex/releases/{VERSION}/release.json",
-                    "https://api.github.com/repos/openai/codex/releases/tags/"
-                    f"rust-v{VERSION}",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                ],
-            )
-            self.assertIn("falling back to GitHub Releases", result.stderr)
-
-    def test_releases_asset_download_falls_back_to_github(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            archive_path, checksum_path, metadata_json = create_package_release(root)
-
-            result, requests = run_installer_in(
-                root,
-                "latest",
-                metadata_json=metadata_json,
-                archive_path=archive_path,
-                checksum_path=checksum_path,
-                force_macos=True,
-                use_mirror=None,
-                releases_mode="asset_fallback",
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                requests,
-                [
-                    "https://releases.openai.com/codex/channels/latest",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                ],
-            )
-            self.assertIn("retrying from GitHub Releases", result.stderr)
-
-    def test_releases_corrupt_assets_fall_back_to_github(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            archive_path, checksum_path, metadata_json = create_package_release(root)
-
-            result, requests = run_installer_in(
-                root,
-                "latest",
-                metadata_json=metadata_json,
-                archive_path=archive_path,
-                checksum_path=checksum_path,
-                force_macos=True,
-                use_mirror=None,
-                releases_mode="corrupt_assets",
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                requests,
-                [
-                    "https://releases.openai.com/codex/channels/latest",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                ],
-            )
-            self.assertIn("checksum did not match expected digest", result.stderr)
-            self.assertIn("retrying from GitHub Releases", result.stderr)
-
-    def test_releases_wrong_checksum_digest_uses_github_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            archive_path, checksum_path, metadata_json = create_package_release(root)
-            mirror_metadata = json.loads(metadata_json)
-            for release_asset in mirror_metadata["assets"]:
-                if release_asset["name"] == "codex-package_SHA256SUMS":
-                    release_asset["digest"] = "sha256:" + "0" * 64
-
-            result, requests = run_installer_in(
-                root,
-                "latest",
-                metadata_json=metadata_json,
-                releases_metadata_json=json.dumps(mirror_metadata),
-                archive_path=archive_path,
-                checksum_path=checksum_path,
-                force_macos=True,
-                use_mirror=None,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                requests,
-                [
-                    "https://releases.openai.com/codex/channels/latest",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    "https://api.github.com/repos/openai/codex/releases/tags/"
-                    f"rust-v{VERSION}",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                ],
-            )
-            self.assertIn("checksum did not match expected digest", result.stderr)
-
-    def test_releases_incomplete_checksum_manifest_falls_back_to_github(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            archive_path, checksum_path, metadata_json = create_package_release(root)
-            mirror_checksum_path = root / "mirror-SHA256SUMS"
-            mirror_checksum_path.write_text(
-                f"{'a' * 64}  codex-package-other-platform.tar.gz\n",
-                encoding="utf-8",
-            )
-            mirror_metadata = json.loads(metadata_json)
-            for release_asset in mirror_metadata["assets"]:
-                if release_asset["name"] == "codex-package_SHA256SUMS":
-                    release_asset["digest"] = (
-                        "sha256:"
-                        + hashlib.sha256(mirror_checksum_path.read_bytes()).hexdigest()
-                    )
-
-            result, requests = run_installer_in(
-                root,
-                "latest",
-                metadata_json=metadata_json,
-                releases_metadata_json=json.dumps(mirror_metadata),
-                archive_path=archive_path,
-                checksum_path=checksum_path,
-                releases_checksum_path=mirror_checksum_path,
-                force_macos=True,
-                use_mirror=None,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                requests,
-                [
-                    "https://releases.openai.com/codex/channels/latest",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    "https://api.github.com/repos/openai/codex/releases/tags/"
-                    f"rust-v{VERSION}",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                ],
-            )
-            self.assertIn("retrying from GitHub Releases", result.stderr)
-
-    def test_releases_corrupt_github_fallback_still_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            archive_path, checksum_path, metadata_json = create_package_release(root)
-
-            result, requests = run_installer_in(
-                root,
-                "latest",
-                metadata_json=metadata_json,
-                archive_path=archive_path,
-                checksum_path=checksum_path,
-                force_macos=True,
-                use_mirror=None,
+                root, "latest", metadata_json=metadata, archive_path=archive,
+                checksum_path=checksum, force_macos=True,
                 releases_mode="corrupt_checksum_and_github",
             )
-
             self.assertNotEqual(result.returncode, 0)
+            self.assertIn("checksum did not match expected digest", result.stderr)
             self.assertEqual(
                 requests,
                 [
-                    "https://releases.openai.com/codex/channels/latest",
-                    f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    "https://api.github.com/repos/openai/codex/releases/tags/"
-                    f"rust-v{VERSION}",
+                    "https://api.github.com/repos/angyedz/web2codex/releases/latest",
+                    "https://github.com/angyedz/web2codex/releases/download/"
+                    f"codex-web-v{VERSION}/codex-package_SHA256SUMS",
                 ],
             )
-            self.assertIn("checksum did not match expected digest", result.stderr)
 
     def test_releases_exact_rejects_wrong_binary_version(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -935,9 +729,12 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(
                 requests,
                 [
-                    f"https://releases.openai.com/codex/releases/{MISMATCH_VERSION}/release.json",
-                    f"https://releases.openai.com/codex/releases/{MISMATCH_VERSION}/codex-package_SHA256SUMS",
-                    f"https://releases.openai.com/codex/releases/{MISMATCH_VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
+                    "https://api.github.com/repos/angyedz/web2codex/releases/tags/"
+                    f"codex-web-v{MISMATCH_VERSION}",
+                    "https://github.com/angyedz/web2codex/releases/download/"
+                    f"codex-web-v{MISMATCH_VERSION}/codex-package_SHA256SUMS",
+                    "https://github.com/angyedz/web2codex/releases/download/"
+                    f"codex-web-v{MISMATCH_VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
                 ],
             )
             self.assertIn(
@@ -965,11 +762,10 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(
                 first_requests,
                 [
-                    f"https://releases.openai.com/codex/releases/{VERSION}/release.json",
-                    "https://api.github.com/repos/openai/codex/releases/tags/"
-                    f"rust-v{VERSION}",
-                    "https://github.com/openai/codex/releases/download/"
-                    f"rust-v{VERSION}/codex-npm-darwin-arm64-{VERSION}.tgz",
+                    "https://api.github.com/repos/angyedz/web2codex/releases/tags/"
+                    f"codex-web-v{VERSION}",
+                    "https://github.com/angyedz/web2codex/releases/download/"
+                    f"codex-web-v{VERSION}/codex-npm-darwin-arm64-{VERSION}.tgz",
                 ],
             )
 
@@ -987,9 +783,8 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(
                 second_requests,
                 [
-                    f"https://releases.openai.com/codex/releases/{VERSION}/release.json",
-                    "https://api.github.com/repos/openai/codex/releases/tags/"
-                    f"rust-v{VERSION}",
+                    "https://api.github.com/repos/angyedz/web2codex/releases/tags/"
+                    f"codex-web-v{VERSION}",
                 ],
             )
             self.assertNotIn("Downloading Codex CLI", second_result.stdout)
@@ -1032,6 +827,8 @@ def run_installer_in(
     fail_ps: bool = False,
     daemon_only: bool = False,
     manual_update: bool = False,
+    command_name: str | None = "codex",
+    use_default_home: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bin_dir = root / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1098,7 +895,7 @@ def run_installer_in(
                   exit 22
                 fi
                 ;;
-              https://github.com/openai/codex/releases/download/*/codex-package_SHA256SUMS)
+              https://github.com/angyedz/web2codex/releases/download/*/codex-package_SHA256SUMS)
                 if [ "$CODEX_TEST_RELEASES_MODE" = "corrupt_checksum_and_github" ]; then
                   printf '<html>proxy error</html>\n' >"$output"
                   exit 0
@@ -1109,14 +906,14 @@ def run_installer_in(
                   exit 22
                 fi
                 ;;
-              https://github.com/openai/codex/releases/download/*/codex-package-*.tar.gz)
+              https://github.com/angyedz/web2codex/releases/download/*/codex-package-*.tar.gz)
                 if [ -n "$CODEX_TEST_ARCHIVE_PATH" ]; then
                   cp "$CODEX_TEST_ARCHIVE_PATH" "$output"
                 else
                   exit 22
                 fi
                 ;;
-              https://github.com/openai/codex/releases/download/*/codex-npm-*.tgz)
+              https://github.com/angyedz/web2codex/releases/download/*/codex-npm-*.tgz)
                 if [ -n "$CODEX_TEST_LEGACY_ARCHIVE_PATH" ]; then
                   cp "$CODEX_TEST_LEGACY_ARCHIVE_PATH" "$output"
                 else
@@ -1162,10 +959,8 @@ def run_installer_in(
     env = os.environ.copy()
     env.update(
         {
-            "CODEX_HOME": str(root / "codex-home"),
+            "WEB2CODEX_HOME": str(root / "codex-home"),
             "CODEX_INSTALL_DIR": str(root / "install-bin"),
-            # Keep these upstream-layout fixtures on the generic Codex alias.
-            "CODEX_COMMAND_NAME": "codex",
             "CODEX_NON_INTERACTIVE": "1",
             "CODEX_RELEASE": release,
             "CODEX_INSTALL_DAEMON_ONLY": "1" if daemon_only else "0",
@@ -1193,6 +988,13 @@ def run_installer_in(
             "SHELL": "/bin/sh",
         }
     )
+    if command_name is None:
+        env.pop("CODEX_COMMAND_NAME", None)
+    else:
+        env["CODEX_COMMAND_NAME"] = command_name
+    if use_default_home:
+        env.pop("WEB2CODEX_HOME", None)
+        env["CODEX_HOME"] = str(root / "codex-home")
     env["CODEX_INSTALL_IF_CURRENT"] = "1" if manual_update else "0"
     if update_guard_from_release is None:
         env.pop("CODEX_INSTALL_IF_LATEST", None)
@@ -1238,11 +1040,12 @@ def create_package_release(
     binary_version: str = VERSION,
     target: str = "aarch64-apple-darwin",
     include_exec_server: bool = False,
+    command_name: str = "codex",
 ) -> tuple[Path, Path, str]:
     package_dir = root / "package"
     (package_dir / "bin").mkdir(parents=True)
     (package_dir / "codex-path").mkdir()
-    metadata = {"version": binary_version, "target": target, "entrypoint": "bin/codex"}
+    metadata = {"version": binary_version, "target": target, "entrypoint": f"bin/{command_name}"}
     if include_exec_server:
         metadata["execServer"] = "bin/codex-exec-server"
         write_executable(package_dir / "bin/codex-exec-server", "#!/bin/sh\nexit 0\n")
@@ -1251,7 +1054,7 @@ def create_package_release(
         encoding="utf-8",
     )
     write_executable(
-        package_dir / "bin" / "codex",
+        package_dir / "bin" / command_name,
         f"#!/bin/sh\nprintf 'codex-cli {binary_version}\\n'\n",
     )
     write_executable(
@@ -1282,7 +1085,7 @@ def create_package_release(
                     "digest": f"sha256:{checksum_digest}",
                 },
             ],
-            "tag_name": f"rust-v{metadata_version}",
+            "tag_name": f"codex-web-v{metadata_version}",
         },
         indent=2,
     )
@@ -1309,7 +1112,7 @@ def create_legacy_release(root: Path) -> tuple[Path, str]:
     metadata_json = json.dumps(
         {
             "assets": [{"name": asset, "digest": f"sha256:{archive_digest}"}],
-            "tag_name": f"rust-v{VERSION}",
+            "tag_name": f"codex-web-v{VERSION}",
         },
         indent=2,
     )
@@ -1344,7 +1147,7 @@ def release_metadata(*, compact: bool = False, reorder: bool = False) -> str:
     )
     separators = (",", ":") if compact else None
     return json.dumps(
-        {"assets": assets, "body": "braces: { } [ ]", "tag_name": f"rust-v{VERSION}"},
+        {"assets": assets, "body": "braces: { } [ ]", "tag_name": f"codex-web-v{VERSION}"},
         indent=None if compact else 2,
         separators=separators,
     )
@@ -1375,7 +1178,7 @@ def legacy_release_metadata_with_decoys() -> str:
                 f'fake: {{"name":"codex-package_SHA256SUMS","digest":"{fake_digest}"}}'
             ),
             "assets": assets,
-            "tag_name": f"rust-v{VERSION}",
+            "tag_name": f"codex-web-v{VERSION}",
         },
         separators=(",", ":"),
     )

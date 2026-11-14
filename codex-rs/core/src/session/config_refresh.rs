@@ -175,6 +175,18 @@ impl Session {
                 self.services
                     .executed_tool_calls
                     .refresh(&next_config.features);
+                // Context profiles are user configuration. Refresh these two model
+                // metadata overrides for future turns in existing sessions so /context
+                // takes effect without restarting the harness.
+                let model_limits = config.to_models_manager_config();
+                state
+                    .session_configuration
+                    .model_info_overrides
+                    .context_window = model_limits.model_context_window;
+                state
+                    .session_configuration
+                    .model_info_overrides
+                    .auto_compact_token_limit = model_limits.model_auto_compact_token_limit;
             }
             let previous_config = notify_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));

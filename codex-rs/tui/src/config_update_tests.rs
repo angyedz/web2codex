@@ -10,6 +10,26 @@ use pretty_assertions::assert_eq;
 use std::path::Path;
 
 #[test]
+fn project_trust_uses_the_root_of_web2codex_config_on_each_platform() {
+    assert_eq!(
+        project_root_from_config_folder("/work/project/.web2codex"),
+        Some("/work/project")
+    );
+    assert_eq!(
+        project_root_from_config_folder("C:\\work\\project\\.web2codex"),
+        Some("C:\\work\\project")
+    );
+    assert_eq!(
+        project_root_from_config_folder("/work/project/.codex"),
+        Some("/work/project")
+    );
+    assert_eq!(
+        project_root_from_config_folder("/work/project/.web2codex-extra"),
+        None
+    );
+}
+
+#[test]
 fn app_scoped_key_path_quotes_dotted_app_ids() {
     assert_eq!(
         app_scoped_key_path("plugin.linear", "enabled"),

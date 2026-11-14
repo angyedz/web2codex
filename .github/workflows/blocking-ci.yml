@@ -15,6 +15,11 @@ jobs:
     uses: ./.github/workflows/fork-cross-platform.yml
     secrets: inherit
 
+  fork-windows-prealpha:
+    name: Fork Windows pre-alpha
+    uses: ./.github/workflows/fork-windows-prealpha.yml
+    secrets: inherit
+
   cargo-deny:
     name: cargo-deny
     uses: ./.github/workflows/cargo-deny.yml
@@ -39,6 +44,7 @@ jobs:
       - cargo-deny
       - codespell
       - fork-cross-platform
+      - fork-windows-prealpha
       - repo-checks
     runs-on: ubuntu-24.04
     steps:

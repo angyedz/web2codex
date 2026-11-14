@@ -3,15 +3,6 @@ name: Web2Codex Windows pre-alpha
 on:
   workflow_call:
   workflow_dispatch:
-  push:
-    paths:
-      - ".github/workflows/fork-windows-prealpha.yml"
-      - ".github/workflows/fork-cross-platform.yml"
-      - ".github/actions/setup-rusty-v8/**"
-      - "codex-rs/**"
-      - "scripts/build_codex_package.py"
-      - "scripts/codex_package/**"
-      - "scripts/install/install.ps1"
 
 permissions:
   contents: read
@@ -58,14 +49,17 @@ jobs:
           "CARGO_HOME=$cargoHome" >> $env:GITHUB_ENV
           git config --global core.longpaths true
 
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+        with:
+          workspaces: codex-rs -> target
+
       - name: Configure verified Rusty V8 artifacts
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
-        with:
-          workspaces: codex-rs -> target
+      - name: Verify browser automation scripts
+        run: node --test web-browser/tests/*.test.cjs
 
       - name: Compile the CLI, WebView, and packaged harness helpers
         run: cargo build --locked --release --target x86_64-pc-windows-msvc -p codex-cli --bin web2codex -p codex-web-browser --bin codex-web-browser -p codex-code-mode-host --bin codex-code-mode-host -p codex-app-server --bin exec-server -p codex-windows-sandbox --bin codex-command-runner --bin codex-windows-sandbox-setup

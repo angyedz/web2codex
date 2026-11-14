@@ -24,6 +24,10 @@ Create a custom connector in ChatGPT named **Web2Codex**, using **Connection: Tu
 
 Tool search results extend the registry on the next Codex request. Native text, structured MCP results, and inline image/audio content return through the connector. The bridge does not download media URLs. Text emitted by ChatGPT is always text: there is no sentinel parser and no request to format answers as JSON.
 
+For the local bridge, failed native tool results carry a private transport marker so the connector can preserve the MCP `isError` flag. The marker is removed before the result reaches ChatGPT and is not used to parse model responses.
+
+Inline PNG, JPEG, WebP, and GIF images plus WAV, MP3, M4A, AAC, OGG, WebM, and FLAC audio in user messages are attached to the ChatGPT composer. Media returned by native MCP tools is attached to the next Temporary Chat as well. The entire request is limited to 32 MiB, and remote media URLs are rejected with an explicit error. The browser waits for attachment cards before sending the prompt. Whether ChatGPT accepts a given audio format depends on its current Web upload support and has not yet been verified in a signed-in session.
+
 The native catalog enables Codex terminal sessions and freeform patches because the bridge implements those call types. This describes harness functionality; it does not infer ChatGPT account entitlements from a model label.
 
 ## Cancellation and deadlines
@@ -42,7 +46,7 @@ The broker and request-parser tests cover repeated native tool rounds in one bro
 
 ```sh
 cargo test --locked --manifest-path codex-rs/Cargo.toml -p codex-web-browser
-node --check codex-rs/web-browser/src/responses_bridge.js
+node --test codex-rs/web-browser/tests/*.test.cjs
 ```
 
-These checks do not sign in to ChatGPT, start a real tunnel, or verify account-specific browser selectors. A signed-in test with the configured connector is still required before calling this a verified application release. Completed prose is currently buffered until the web response settles; the terminal receives native tool events as they occur.
+These checks do not sign in to ChatGPT, start a real tunnel, or verify account-specific browser selectors. A signed-in test with the configured connector is still required before calling this a verified application release. Streaming Responses requests receive assistant text as it appears in the ChatGPT page; non-streaming requests receive the completed response. Text before an MCP call is included alongside that call in the same Responses output.

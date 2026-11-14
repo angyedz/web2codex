@@ -42,6 +42,23 @@ async fn usage_command_opens_analytics_without_rate_limit_picker() {
     }
 }
 
+#[tokio::test]
+async fn context_command_selects_global_context_profiles() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    for (tier, context_window) in [
+        ("stable", 200_000),
+        ("expanded", 270_000),
+        ("unstable", 400_000),
+    ] {
+        chat.dispatch_command_with_args(SlashCommand::Context, tier.to_string(), Vec::new());
+        assert_matches!(
+            rx.try_recv(),
+            Ok(AppEvent::PersistModelContextWindow { tier: selected_tier, context_window: selected_window })
+                if selected_tier.eq_ignore_ascii_case(tier) && selected_window == context_window
+        );
+    }
+}
+
 fn reset_credits(available_count: i64) -> RateLimitResetCreditsSummary {
     RateLimitResetCreditsSummary {
         available_count,

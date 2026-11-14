@@ -2671,6 +2671,57 @@ impl App {
                     }
                 }
             }
+            AppEvent::PersistModelContextWindow {
+                tier,
+                context_window,
+            } => {
+                let edits = vec![
+                    crate::config_update::replace_config_value(
+                        "model_context_window",
+                        serde_json::json!(context_window),
+                    ),
+                    // Clear explicit limits so Codex derives its automatic compact
+                    // threshold from this window (90% of the selected context size).
+                    crate::config_update::clear_config_value("model_auto_compact_token_limit"),
+                    crate::config_update::replace_config_value(
+                        "model_auto_compact_token_limit_scope",
+                        serde_json::json!("total"),
+                    ),
+                ];
+                match self
+                    .persist_model_defaults(
+                        app_server.request_handle(),
+                        edits,
+                        "default context window",
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        self.config.model_context_window = Some(context_window);
+                        self.config.model_auto_compact_token_limit = None;
+                        self.config.model_auto_compact_token_limit_scope = Default::default();
+                        self.chat_widget.config.model_context_window = Some(context_window);
+                        self.chat_widget.config.model_auto_compact_token_limit = None;
+                        self.chat_widget.config.model_auto_compact_token_limit_scope =
+                            Default::default();
+                        self.refresh_status_line();
+                        self.chat_widget.add_info_message(
+                            format!(
+                                "Context level set to {tier} ({context_window} tokens). Automatic compaction begins around {} tokens for all models, starting with the next turn.",
+                                context_window.saturating_mul(9) / 10
+                            ),
+                            /*hint*/ None,
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "failed to persist context window profile");
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to save context window: {}",
+                            format_config_error(&err)
+                        ));
+                    }
+                }
+            }
             AppEvent::UpdateAskForApprovalPolicy(policy) => {
                 if self.reject_pending_permission_change() {
                     return Ok(AppRunControl::Continue);

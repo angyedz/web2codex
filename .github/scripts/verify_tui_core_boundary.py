@@ -42,7 +42,7 @@ def main() -> int:
 
 
 def manifest_failures() -> list[str]:
-    manifest = tomllib.loads(TUI_MANIFEST.read_text())
+    manifest = tomllib.loads(TUI_MANIFEST.read_text(encoding="utf-8"))
     failures = []
     for section_name, dependencies in dependency_sections(manifest):
         if FORBIDDEN_PACKAGE in dependencies:
@@ -74,7 +74,7 @@ def dependency_sections(manifest: dict) -> list[tuple[str, dict]]:
 def source_failures() -> list[str]:
     failures = []
     for path in sorted(TUI_ROOT.glob("**/*.rs")):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), start=1):
             if any(pattern.search(line) for pattern in FORBIDDEN_SOURCE_PATTERNS):
                 failures.append(

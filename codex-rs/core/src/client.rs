@@ -87,6 +87,8 @@ use codex_protocol::auth::AuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -1291,6 +1293,9 @@ impl ModelClient {
                 item.clear_tool_result_metadata();
             }
         }
+        if self.state.provider.info().name == "Web2Codex" {
+            mark_web2codex_failed_tool_outputs(&mut input);
+        }
         let client_metadata = responses_metadata.client_metadata(include_internal);
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
@@ -1594,6 +1599,36 @@ impl ModelClient {
             );
         }
         headers
+    }
+}
+
+// FunctionCallOutputPayload keeps success as local metadata and normally omits it
+// from the wire. The local Web2Codex bridge needs that flag to return MCP isError.
+// This marker stays inside the local transport and is stripped by the bridge.
+fn mark_web2codex_failed_tool_outputs(input: &mut [ResponseItem]) {
+    const MARKER: &str = "web2codex://tool-result/failed/v1";
+    for item in input {
+        let output = match item {
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => output,
+            _ => continue,
+        };
+        if output.success != Some(false) {
+            continue;
+        }
+        let marker = FunctionCallOutputContentItem::InputText {
+            text: MARKER.into(),
+        };
+        match &mut output.body {
+            FunctionCallOutputBody::Text(text) => {
+                let text = std::mem::take(text);
+                output.body = FunctionCallOutputBody::ContentItems(vec![
+                    marker,
+                    FunctionCallOutputContentItem::InputText { text },
+                ]);
+            }
+            FunctionCallOutputBody::ContentItems(items) => items.insert(0, marker),
+        }
     }
 }
 

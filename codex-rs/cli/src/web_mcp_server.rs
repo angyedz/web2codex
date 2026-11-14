@@ -132,7 +132,7 @@ fn connector_tools() -> Vec<Tool> {
     let definitions = [
         (
             "codex_tool_inventory",
-            "Discover the exact tools available in the active Codex harness, including terminal sessions, apply_patch, plans, subagents, and configured MCP tools. Schemas are returned through this connector. Use query and pagination to find tools; refresh after native tool search.",
+            "Discover tools available in the active harness, including configured external MCP tools. Schemas are returned through this connector. Use query and pagination. If an expected tool is absent, invoke an available discovery_tools entry using codex_tool_call, then query the inventory again for the discovered tools.",
             json!({
                 "type":"object", "properties": {
                     "turn_token":capability.clone(), "query":{"type":"string","maxLength":500},

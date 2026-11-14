@@ -742,6 +742,12 @@ fn legacy_workspace_write_projection_preserves_symbolic_project_root() {
             ),
             FileSystemSandboxEntry::skip_missing_path(
                 FileSystemPath::Special {
+                    value: FileSystemSpecialPath::project_roots(Some(".web2codex".into())),
+                },
+                FileSystemAccessMode::Read,
+            ),
+            FileSystemSandboxEntry::skip_missing_path(
+                FileSystemPath::Special {
                     value: FileSystemSpecialPath::project_roots(Some(".aws".into())),
                 },
                 FileSystemAccessMode::Read,
@@ -774,7 +780,7 @@ fn legacy_current_working_directory_special_path_deserializes_as_project_roots()
 #[cfg(unix)]
 #[test]
 fn writable_roots_skip_default_metadata_when_explicit_user_rule_exists() {
-    for name in [".codex", ".aws"] {
+    for name in [".codex", ".web2codex", ".aws"] {
         let cwd = TempDir::new().expect("tempdir");
         let expected_root = AbsolutePathBuf::from_absolute_path(
             cwd.path().canonicalize().expect("canonicalize cwd"),
@@ -830,6 +836,7 @@ fn filesystem_policy_blocks_protected_metadata_path_writes_by_default() {
     let dot_git_config = cwd.path().join(".git").join("config");
     let dot_agents_config = cwd.path().join(".agents").join("config");
     let dot_codex_config = cwd.path().join(".codex").join("config.toml");
+    let dot_web2codex_config = cwd.path().join(".web2codex").join("config.toml");
     let dot_aws_config = cwd.path().join(".aws").join("config");
     let root = AbsolutePathBuf::from_absolute_path(cwd.path()).expect("absolute cwd");
     let file_system_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
@@ -841,6 +848,7 @@ fn filesystem_policy_blocks_protected_metadata_path_writes_by_default() {
     assert!(!file_system_policy.can_write_local_path_with_cwd(&dot_git_config, cwd.path()));
     assert!(!file_system_policy.can_write_local_path_with_cwd(&dot_agents_config, cwd.path()));
     assert!(!file_system_policy.can_write_local_path_with_cwd(&dot_codex_config, cwd.path()));
+    assert!(!file_system_policy.can_write_local_path_with_cwd(&dot_web2codex_config, cwd.path()));
     assert!(!file_system_policy.can_write_local_path_with_cwd(&dot_aws_config, cwd.path()));
 
     let writable_roots = file_system_policy.get_writable_roots_with_cwd(cwd.path());
@@ -851,12 +859,14 @@ fn filesystem_policy_blocks_protected_metadata_path_writes_by_default() {
             ".git".to_string(),
             ".agents".to_string(),
             ".codex".to_string(),
+            ".web2codex".to_string(),
             ".aws".to_string(),
         ]
     );
     assert!(!writable_roots[0].is_path_writable(&dot_git_config));
     assert!(!writable_roots[0].is_path_writable(&dot_agents_config));
     assert!(!writable_roots[0].is_path_writable(&dot_codex_config));
+    assert!(!writable_roots[0].is_path_writable(&dot_web2codex_config));
     assert!(!writable_roots[0].is_path_writable(&dot_aws_config));
 }
 

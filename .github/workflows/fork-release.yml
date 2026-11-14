@@ -93,6 +93,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Build the native WebView browser
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -100,14 +101,10 @@ jobs:
           if [[ "$TARGET" == *-unknown-linux-musl ]]; then
             browser_target="${TARGET%-musl}-gnu"
           fi
-          browser_suffix=""
-          if [[ "$TARGET" == *-windows-msvc ]]; then
-            browser_suffix=".exe"
-          fi
           cargo build --locked --release --manifest-path codex-rs/Cargo.toml \
             --target "$browser_target" -p codex-web-browser --bin codex-web-browser
-          browser_bin="$RUNNER_TEMP/codex-web-browser$browser_suffix"
-          cp "codex-rs/target/$browser_target/release/codex-web-browser$browser_suffix" "$browser_bin"
+          browser_bin="$RUNNER_TEMP/codex-web-browser"
+          cp "codex-rs/target/$browser_target/release/codex-web-browser" "$browser_bin"
           if [[ "$TARGET" == *-unknown-linux-musl ]]; then
             cargo clean --manifest-path codex-rs/Cargo.toml --target "$browser_target"
           fi
@@ -146,6 +143,24 @@ jobs:
           if [[ "$TARGET" == *-windows-msvc ]]; then
             browser_suffix=".exe"
           fi
+          output_dir="codex-rs/target/$TARGET/release"
+          cargo_args=(
+            --locked --release --manifest-path codex-rs/Cargo.toml --target "$TARGET"
+            -p codex-cli --bin web2codex
+            -p codex-code-mode-host --bin codex-code-mode-host
+            -p codex-app-server --bin exec-server
+          )
+          if [[ "$TARGET" == *-unknown-linux-musl ]]; then
+            cargo_args+=(-p codex-bwrap --bin bwrap)
+            browser_bin="$RUNNER_TEMP/codex-web-browser"
+          else
+            cargo_args+=(-p codex-web-browser --bin codex-web-browser)
+            browser_bin="$output_dir/codex-web-browser$browser_suffix"
+          fi
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            cargo_args+=(-p codex-windows-sandbox --bin codex-command-runner --bin codex-windows-sandbox-setup)
+          fi
+          cargo build "${cargo_args[@]}"
           package_args=(
             --target "$TARGET"
             --variant web2codex
@@ -153,18 +168,25 @@ jobs:
             --cargo-profile release
             --package-dir "$RUNNER_TEMP/codex-package-$TARGET"
             --archive-output "$RUNNER_TEMP/codex-package-$TARGET.tar.gz"
-            --web-browser-bin "$RUNNER_TEMP/codex-web-browser$browser_suffix"
+            --entrypoint-bin "$output_dir/web2codex$browser_suffix"
+            --code-mode-host-bin "$output_dir/codex-code-mode-host$browser_suffix"
+            --exec-server-bin "$output_dir/exec-server$browser_suffix"
+            --web-browser-bin "$browser_bin"
             --force
           )
           if [[ "$TARGET" == *-unknown-linux-musl ]]; then
-            bwrap_path="codex-rs/target/$TARGET/release/bwrap"
-            cargo build --locked --release --manifest-path codex-rs/Cargo.toml \
-              --target "$TARGET" --bin bwrap
+            bwrap_path="$output_dir/bwrap"
             strip --strip-debug --strip-unneeded "$bwrap_path"
             bwrap_sha256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
             echo "CODEX_BWRAP_SHA256=$bwrap_sha256" >> "$GITHUB_ENV"
             export CODEX_BWRAP_SHA256="$bwrap_sha256"
             package_args+=(--bwrap-bin "$bwrap_path")
+          fi
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            package_args+=(
+              --codex-command-runner-bin "$output_dir/codex-command-runner.exe"
+              --codex-windows-sandbox-setup-bin "$output_dir/codex-windows-sandbox-setup.exe"
+            )
           fi
           python scripts/build_codex_package.py "${package_args[@]}"
 

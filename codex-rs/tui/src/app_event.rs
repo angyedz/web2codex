@@ -1404,6 +1404,12 @@ pub(crate) enum AppEvent {
         service_tier: Option<String>,
     },
 
+    /// Persist a global Web2Codex context-window profile.
+    PersistModelContextWindow {
+        tier: String,
+        context_window: i64,
+    },
+
     /// Persist the current thread's Daybreak preference and the new-thread default.
     PersistDaybreakSelection {
         thread_id: ThreadId,

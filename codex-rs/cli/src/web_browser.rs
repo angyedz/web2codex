@@ -137,6 +137,11 @@ pub(crate) fn interactive_provider_overrides(cwd: Option<&Path>) -> anyhow::Resu
         "features.realtime_conversation=false".to_string(),
         "features.use_agent_identity=false".to_string(),
         "features.runtime_agent_instances=false".to_string(),
+        // Local Codex subagents are part of the harness. Their model requests use
+        // independent hidden Temporary Chats and the same Web2Codex MCP tunnel.
+        "features.multi_agent_v2=true".to_string(),
+        // A Web2Codex context profile applies to every model, including child agents.
+        "features.subagent_default_context_limits=false".to_string(),
         // ChatGPT account backed plugin catalogs and sharing are not part of
         // the Web2Codex runtime. Local plugin MCP servers remain available.
         "features.remote_plugin=false".to_string(),
@@ -240,7 +245,7 @@ fn configure_tunnel_on_first_launch() -> anyhow::Result<()> {
 fn read_account_capabilities(path: &Path) -> Option<AccountCapabilities> {
     let contents = fs::read(path).ok()?;
     let capabilities = serde_json::from_slice::<AccountCapabilities>(&contents).ok()?;
-    (capabilities.probe_version == 3).then_some(capabilities)
+    (capabilities.probe_version == 4).then_some(capabilities)
 }
 
 fn start_configured_tunnel_if_available(workspace: &Path) {
@@ -345,7 +350,7 @@ fn print_account_capabilities() -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    if capabilities.probe_version != 3 {
+    if capabilities.probe_version != 4 {
         println!("ChatGPT Web picker snapshot: unknown (scan format is unsupported).");
         println!("Open ChatGPT with `web2codex web open` to refresh the scan.");
         return Ok(());

@@ -12,6 +12,7 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use super::mark_web2codex_failed_tool_outputs;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
@@ -25,6 +26,37 @@ use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
 use codex_api::ResponseEvent;
 use codex_api::TransportError;
+
+#[test]
+fn web2codex_marks_failed_tool_outputs_without_changing_successes() {
+    use codex_protocol::models::{
+        FunctionCallOutputBody, FunctionCallOutputPayload, ResponseInputItem, ResponseItem,
+    };
+    let mut items = vec![
+        ResponseItem::from(ResponseInputItem::FunctionCallOutput {
+            call_id: "failed".into(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text("failed result".into()),
+                success: Some(false),
+            },
+        }),
+        ResponseItem::from(ResponseInputItem::FunctionCallOutput {
+            call_id: "succeeded".into(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text("success result".into()),
+                success: Some(true),
+            },
+        }),
+    ];
+    mark_web2codex_failed_tool_outputs(&mut items);
+    let serialized = serde_json::to_value(&items).unwrap();
+    assert_eq!(
+        serialized[0]["output"][0]["text"],
+        "web2codex://tool-result/failed/v1"
+    );
+    assert_eq!(serialized[0]["output"][1]["text"], "failed result");
+    assert_eq!(serialized[1]["output"], "success result");
+}
 use codex_features::RuntimeAuthMode;
 use codex_history::HistoryInitialization;
 use codex_http_client::HttpClientFactory;

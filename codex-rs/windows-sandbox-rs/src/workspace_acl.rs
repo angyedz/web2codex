@@ -11,7 +11,9 @@ pub fn is_command_cwd_root(root: &Path, canonical_command_cwd: &Path) -> bool {
 /// # Safety
 /// Caller must ensure `psid` is a valid SID pointer.
 pub unsafe fn protect_workspace_codex_dir(cwd: &Path, psid: *mut c_void) -> Result<bool> {
-    protect_workspace_subdir(cwd, psid, ".codex")
+    let codex = protect_workspace_subdir(cwd, psid, ".codex")?;
+    let web2codex = protect_workspace_subdir(cwd, psid, ".web2codex")?;
+    Ok(codex || web2codex)
 }
 
 /// # Safety

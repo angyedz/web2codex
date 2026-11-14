@@ -177,6 +177,14 @@ pub(super) fn handle(
         event_proxy,
         keep_turn: false,
     };
+    if let Err(message) = broker.begin_response(&observer.token) {
+        let _ = write_json_response(
+            stream,
+            "409 Conflict",
+            &json_error("bridge_error", "turn_resume_failed", &message),
+        );
+        return;
+    }
     if fresh {
         // Only connector selection and a turn capability are added to the text.
         // Tool definitions are available exclusively through the MCP connector.
@@ -190,6 +198,7 @@ pub(super) fn handle(
                 model: parsed.model.clone(),
                 reasoning_effort: parsed.reasoning_effort.clone(),
                 prompt,
+                attachments: parsed.attachments.clone(),
             })
             .is_err()
         {
@@ -206,6 +215,9 @@ pub(super) fn handle(
         }
     }
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
+    let message_item_id = format!("msg_{}", Uuid::new_v4().simple());
+    let mut message_started = false;
+    let mut streamed_text = String::new();
     if parsed.stream {
         if write_sse_header(stream).is_err() {
             return;
@@ -220,9 +232,32 @@ pub(super) fn handle(
         }
         match broker.next_event(&observer.token) {
             Ok(Some(event)) => {
+                if let Some(delta) = event.text_delta.as_deref() {
+                    if parsed.stream
+                        && write_text_delta(
+                            stream,
+                            &message_item_id,
+                            delta,
+                            &mut message_started,
+                            &mut streamed_text,
+                        )
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
                 let end_turn = event.end_turn;
                 let result = if parsed.stream {
-                    write_completion(stream, &response_id, &parsed.model, event)
+                    write_completion(
+                        stream,
+                        &response_id,
+                        &parsed.model,
+                        &event,
+                        &message_item_id,
+                        &mut message_started,
+                        &mut streamed_text,
+                    )
                 } else {
                     write_json_response(
                         stream,
@@ -230,7 +265,7 @@ pub(super) fn handle(
                         &completed_response_object(
                             &response_id,
                             &parsed.model,
-                            event.item,
+                            response_output_items(&event, &message_item_id),
                             event.end_turn,
                         ),
                     )
@@ -294,40 +329,126 @@ fn write_completion(
     stream: &mut TcpStream,
     response_id: &str,
     model: &str,
-    event: NativeEvent,
+    event: &NativeEvent,
+    message_item_id: &str,
+    message_started: &mut bool,
+    streamed_text: &mut String,
 ) -> std::io::Result<()> {
-    let item = event.item;
-    write_sse_event(
-        stream,
-        &json!({"type":"response.output_item.added", "output_index":0, "item": response_item_for_added(&item)}),
-    )?;
-    if let Some(text) = item.pointer("/content/0/text").and_then(Value::as_str) {
+    let output_items = response_output_items(event, message_item_id);
+    for (output_index, item) in output_items.iter().enumerate() {
+        if item["type"] == "message" {
+            if !*message_started {
+                write_sse_event(
+                    stream,
+                    &json!({"type":"response.output_item.added", "output_index":output_index, "item":response_item_for_added(item)}),
+                )?;
+                write_sse_event(
+                    stream,
+                    &json!({"type":"response.content_part.added", "item_id":item["id"], "output_index":output_index, "content_index":0, "part":{"type":"output_text", "text":"", "annotations":[]}}),
+                )?;
+                *message_started = true;
+            }
+            let text = item
+                .pointer("/content/0/text")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let Some(suffix) = text.strip_prefix(streamed_text.as_str()) else {
+                let _ = write_sse_error(
+                    stream,
+                    "chatgpt_stream_revised",
+                    "ChatGPT changed text after it was sent to the client",
+                );
+                let _ = finish_sse(stream);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "ChatGPT revised streamed response text",
+                ));
+            };
+            if !suffix.is_empty() {
+                write_text_delta(
+                    stream,
+                    message_item_id,
+                    suffix,
+                    message_started,
+                    streamed_text,
+                )?;
+            }
+            write_sse_event(
+                stream,
+                &json!({"type":"response.output_text.done", "item_id":item["id"], "output_index":output_index, "content_index":0, "text":text}),
+            )?;
+            write_sse_event(
+                stream,
+                &json!({"type":"response.content_part.done", "item_id":item["id"], "output_index":output_index, "content_index":0, "part":item["content"][0]}),
+            )?;
+        } else {
+            write_sse_event(
+                stream,
+                &json!({"type":"response.output_item.added", "output_index":output_index, "item":response_item_for_added(item)}),
+            )?;
+        }
         write_sse_event(
             stream,
-            &json!({"type":"response.content_part.added", "item_id":item["id"], "output_index":0, "content_index":0, "part":{"type":"output_text", "text":"", "annotations":[]}}),
-        )?;
-        write_sse_event(
-            stream,
-            &json!({"type":"response.output_text.delta", "item_id":item["id"], "output_index":0, "content_index":0, "delta":text}),
-        )?;
-        write_sse_event(
-            stream,
-            &json!({"type":"response.output_text.done", "item_id":item["id"], "output_index":0, "content_index":0, "text":text}),
-        )?;
-        write_sse_event(
-            stream,
-            &json!({"type":"response.content_part.done", "item_id":item["id"], "output_index":0, "content_index":0, "part":item["content"][0]}),
+            &json!({"type":"response.output_item.done", "output_index":output_index, "item":item}),
         )?;
     }
     write_sse_event(
         stream,
-        &json!({"type":"response.output_item.done", "output_index":0, "item":item}),
-    )?;
-    write_sse_event(
-        stream,
-        &json!({"type":"response.completed", "response":completed_response_object(response_id, model, item, event.end_turn)}),
+        &json!({"type":"response.completed", "response":completed_response_object(response_id, model, output_items, event.end_turn)}),
     )?;
     finish_sse(stream)
+}
+
+fn write_text_delta(
+    stream: &mut TcpStream,
+    message_item_id: &str,
+    delta: &str,
+    message_started: &mut bool,
+    streamed_text: &mut String,
+) -> std::io::Result<()> {
+    if delta.is_empty() {
+        return Ok(());
+    }
+    if !*message_started {
+        let item = message_item(message_item_id, "");
+        write_sse_event(
+            stream,
+            &json!({"type":"response.output_item.added", "output_index":0, "item":response_item_for_added(&item)}),
+        )?;
+        write_sse_event(
+            stream,
+            &json!({"type":"response.content_part.added", "item_id":message_item_id, "output_index":0, "content_index":0, "part":{"type":"output_text", "text":"", "annotations":[]}}),
+        )?;
+        *message_started = true;
+    }
+    write_sse_event(
+        stream,
+        &json!({"type":"response.output_text.delta", "item_id":message_item_id, "output_index":0, "content_index":0, "delta":delta}),
+    )?;
+    streamed_text.push_str(delta);
+    Ok(())
+}
+
+fn message_item(message_item_id: &str, text: &str) -> Value {
+    json!({
+        "id": message_item_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": text, "annotations": [] }]
+    })
+}
+
+fn response_output_items(event: &NativeEvent, message_item_id: &str) -> Vec<Value> {
+    let has_message = event.item["type"] == "message" || !event.segment_text.is_empty();
+    let mut output = Vec::with_capacity(2);
+    if has_message {
+        output.push(message_item(message_item_id, &event.segment_text));
+    }
+    if !event.item.is_null() && event.item["type"] != "message" {
+        output.push(event.item.clone());
+    }
+    output
 }
 
 fn finish_sse(stream: &mut TcpStream) -> std::io::Result<()> {

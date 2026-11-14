@@ -103,6 +103,40 @@ impl ChatWidget {
         }
     }
 
+    fn show_context_window_profile(&mut self) {
+        let context_window = self.config.model_context_window.unwrap_or(200_000);
+        let tier = match context_window {
+            200_000 => "Stable",
+            270_000 => "Expanded",
+            400_000 => "Unstable",
+            _ => "Custom",
+        };
+        let compact_at = context_window.saturating_mul(9) / 10;
+        self.add_info_message(
+            format!(
+                "Context level: {tier} ({context_window} tokens). Automatic compaction starts around {compact_at} tokens. Choose with /context stable, /context expanded, or /context unstable."
+            ),
+            /*hint*/ None,
+        );
+    }
+
+    fn select_context_window_profile(&mut self, args: &str) {
+        let selection = match args.trim().to_ascii_lowercase().as_str() {
+            "stable" => Some(("Stable", 200_000)),
+            "expanded" => Some(("Expanded", 270_000)),
+            "unstable" => Some(("Unstable", 400_000)),
+            _ => None,
+        };
+        let Some((tier, context_window)) = selection else {
+            self.add_error_message("Usage: /context [stable|expanded|unstable]".to_string());
+            return;
+        };
+        self.app_event_tx.send(AppEvent::PersistModelContextWindow {
+            tier: tier.to_string(),
+            context_window,
+        });
+    }
+
     fn request_side_conversation(
         &mut self,
         parent_thread_id: ThreadId,
@@ -542,6 +576,7 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::OpenUsageStatistics { view: None });
             }
+            SlashCommand::Context => self.show_context_window_profile(),
             SlashCommand::Ide => {
                 self.handle_ide_command();
             }
@@ -820,6 +855,7 @@ impl ChatWidget {
                     self.add_error_message("Usage: /usage [daily|weekly|cumulative]".to_string())
                 }
             },
+            SlashCommand::Context => self.select_context_window_profile(trimmed),
             SlashCommand::Voice => match trimmed.to_ascii_lowercase().as_str() {
                 "settings" => self.app_event_tx.send(AppEvent::OpenRealtimeSettings),
                 "mute" => self.app_event_tx.send(AppEvent::VoiceControl {

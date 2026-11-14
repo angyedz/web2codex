@@ -16,9 +16,23 @@ fn junction_name_for_path(path: &Path) -> String {
 
 fn junction_root_for_userprofile(userprofile: &str) -> PathBuf {
     PathBuf::from(userprofile)
-        .join(".codex")
+        .join(".web2codex")
         .join(".sandbox")
         .join("cwd")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::junction_root_for_userprofile;
+    use std::path::PathBuf;
+
+    #[test]
+    fn junctions_use_the_web2codex_directory() {
+        assert_eq!(
+            junction_root_for_userprofile(r"C:\Users\Example"),
+            PathBuf::from(r"C:\Users\Example\.web2codex\.sandbox\cwd")
+        );
+    }
 }
 
 pub fn create_cwd_junction(requested_cwd: &Path, log_dir: Option<&Path>) -> Option<PathBuf> {

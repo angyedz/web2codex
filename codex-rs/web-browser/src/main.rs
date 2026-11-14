@@ -32,7 +32,7 @@ use turn_broker::TurnBroker;
 const CHATGPT_SIGN_IN_URL: &str = "https://chatgpt.com/";
 const CHATGPT_TEMPORARY_CHAT_URL: &str = "https://chatgpt.com/?temporary-chat=true";
 const STALE_LOCK_AGE: Duration = Duration::from_secs(30);
-const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
 const MAX_RESPONSE_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PROMPT_TEXT_BYTES: usize = 2 * 1024 * 1024;
@@ -227,6 +227,8 @@ struct BrowserState {
 struct AccountCapabilities {
     probe_version: u8,
     picker_options: Vec<String>,
+    #[serde(default)]
+    reasoning_by_model: BTreeMap<String, Vec<String>>,
     detected_at_unix_seconds: u64,
 }
 
@@ -323,11 +325,12 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
     let Ok(capabilities) = serde_json::from_slice::<AccountCapabilities>(&contents) else {
         return serde_json::json!({ "models": [] });
     };
-    if capabilities.probe_version != 3 {
+    if capabilities.probe_version != 4 {
         return serde_json::json!({ "models": [] });
     }
 
     let mut seen = Vec::new();
+    let reasoning_by_model = capabilities.reasoning_by_model;
     let models = capabilities
         .picker_options
         .into_iter()
@@ -338,6 +341,21 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
                 return None;
             }
             seen.push(label.clone());
+            let levels = reasoning_by_model
+                .get(&label)
+                .into_iter()
+                .flatten()
+                .filter(|effort| matches!(effort.as_str(), "low" | "medium" | "high" | "xhigh" | "max"))
+                .map(|effort| serde_json::json!({
+                    "effort": effort,
+                    "description": "Detected in the ChatGPT Web reasoning control."
+                }))
+                .collect::<Vec<_>>();
+            let default_effort = if levels.iter().any(|level| level["effort"] == "medium") {
+                Some("medium")
+            } else {
+                levels.first().and_then(|level| level["effort"].as_str())
+            };
             Some(serde_json::json!({
                 // The visible picker label is an opaque, account-specific key. The request bridge
                 // checks it against the selected Web model before submitting any prompt.
@@ -346,13 +364,14 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
                 "description": "Detected in the signed-in ChatGPT Web model picker.",
                 // The Codex catalog parser requires an instruction template.
                 // Native tool descriptions and schemas are supplied via MCP.
-                "base_instructions": "You are a coding agent. Follow the user's instructions and report your work clearly.",
-                "default_reasoning_level": "medium",
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "Low reasoning effort in ChatGPT Web."},
-                    {"effort": "medium", "description": "Medium reasoning effort in ChatGPT Web."},
-                    {"effort": "high", "description": "High reasoning effort in ChatGPT Web."}
-                ],
+                "base_instructions": "You are a coding agent. Follow the user's instructions and report your work clearly. Always reply to the user in clear ordinary prose; never return a bare JSON response.",
+                "default_reasoning_level": default_effort,
+                "supported_reasoning_levels": levels,
+                // Every detected ChatGPT Web model receives the same harness-side
+                // context cap. The user can raise it through /context, up to 400k.
+                "context_window": 200_000,
+                "max_context_window": 400_000,
+                "effective_context_window_percent": 100,
                 "shell_type": "unified_exec",
                 "tool_mode": "direct",
                 "visibility": "list",
@@ -360,7 +379,7 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
                 "priority": i32::try_from(priority).unwrap_or(i32::MAX),
                 "availability_nux": null,
                 "upgrade": null,
-                "include_skills_usage_instructions": false,
+                "include_skills_usage_instructions": true,
                 "include_plugin_usage_instructions": false,
                 "include_apps_usage_instructions": false,
                 "supports_reasoning_summary_parameter": false,
@@ -373,7 +392,7 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
                 "truncation_policy": { "mode": "bytes", "limit": 10000 },
                 "supports_image_detail_original": false,
                 "experimental_supported_tools": [],
-                "input_modalities": ["text"],
+                "input_modalities": ["text", "image", "audio"],
                 "supports_search_tool": false,
                 "supports_experimental_context": false,
                 "use_responses_lite": false,
@@ -402,15 +421,20 @@ enum BrowserPage {
 enum BrowserEvent {
     Open(BrowserPage, SyncSender<Result<(), String>>),
     ContinueLogin(AccountTierChoice),
-    AccountCapabilities(AccountCapabilities),
+    AccountCapabilities(AccountCapabilities, bool),
     ResponsesBridgeReady(String),
     ResponsesRequest {
         request_id: String,
         model: String,
         reasoning_effort: Option<String>,
         prompt: String,
+        attachments: Vec<MediaAttachment>,
     },
     ResponsesToolState(String),
+    ResponsesText {
+        request_id: String,
+        delta: String,
+    },
     ResponsesResult {
         request_id: String,
         revision: Option<u64>,
@@ -425,7 +449,15 @@ struct PendingResponsesRequest {
     model: String,
     reasoning_effort: Option<String>,
     prompt: String,
+    attachments: Vec<MediaAttachment>,
     started_at: std::time::Instant,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MediaAttachment {
+    name: String,
+    mime: String,
+    data_url: String,
 }
 
 struct ParsedHttpRequest {
@@ -575,20 +607,20 @@ fn run_event_loop(
                 }
                 browser_page = Some(BrowserPage::SignIn);
             }
-            Event::UserEvent(BrowserEvent::AccountCapabilities(capabilities)) => {
-                if let Err(error) = store_account_capabilities(&account_capabilities_path, capabilities) {
+            Event::UserEvent(BrowserEvent::AccountCapabilities(capabilities, partial)) => {
+                if let Err(error) = store_account_capabilities(&account_capabilities_path, capabilities, partial) {
                     eprintln!("failed to save ChatGPT account capabilities: {error:#}");
                 }
             }
             Event::UserEvent(BrowserEvent::ResponsesBridgeReady(request_id)) => {
                 if let (Some(view), Some(pending)) = (response_views.get(&request_id), pending_responses.get(&request_id)) {
-                    let payload = serde_json::json!({"request_id": request_id, "model": pending.model, "reasoning_effort": pending.reasoning_effort, "prompt": pending.prompt});
+                    let payload = serde_json::json!({"request_id": request_id, "model": pending.model, "reasoning_effort": pending.reasoning_effort, "prompt": pending.prompt, "attachments": pending.attachments});
                     if let Err(error) = view.evaluate_script(&format!("window.__web2codexSend({payload});")) {
                         broker.complete(&request_id, None, Err(format!("Could not send prompt to ChatGPT Web: {error}")));
                     }
                 }
             }
-            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, model, reasoning_effort, prompt }) => {
+            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, model, reasoning_effort, prompt, attachments }) => {
                 if let Err(error) = prepare_profile_directory(&profile_dir) {
                     broker.complete(&request_id, None, Err(error.to_string())); return;
                 }
@@ -597,7 +629,7 @@ fn run_event_loop(
                     Ok(view) => { response_views.insert(request_id.clone(), view); }
                     Err(error) => { broker.complete(&request_id, None, Err(error.to_string())); return; }
                 }
-                pending_responses.insert(request_id, PendingResponsesRequest { model, reasoning_effort, prompt, started_at: std::time::Instant::now() });
+                pending_responses.insert(request_id, PendingResponsesRequest { model, reasoning_effort, prompt, attachments, started_at: std::time::Instant::now() });
             }
             Event::UserEvent(BrowserEvent::ResponsesToolState(request_id)) => {
                 let state = broker.snapshot(&request_id);
@@ -613,6 +645,9 @@ fn run_event_loop(
                 if let Some(view) = response_views.get(&request_id) {
                     let _ = view.evaluate_script(&format!("window.__web2codexToolState={state};"));
                 }
+            }
+            Event::UserEvent(BrowserEvent::ResponsesText { request_id, delta }) => {
+                let _ = broker.append_text(&request_id, delta);
             }
             Event::UserEvent(BrowserEvent::ResponsesResult { request_id, revision, result }) => {
                 let output_characters = result.as_ref().ok().map(|text| text.chars().count());
@@ -679,6 +714,11 @@ fn build_webview(
     let ipc_response_id = response_id.clone();
     let builder = builder
         .with_visible(response_id.is_none())
+        .with_initialization_script(if response_id.is_none() {
+            "window.__web2codexDeepProbe = true;"
+        } else {
+            "window.__web2codexDeepProbe = false;"
+        })
         .with_initialization_script(ACCOUNT_CAPABILITY_PROBE_SCRIPT)
         .with_navigation_handler(move |target| {
             if page != BrowserPage::TemporaryChat {
@@ -723,6 +763,7 @@ fn build_webview(
             match message.get("type").and_then(serde_json::Value::as_str) {
                 Some("responses-bridge-ready")
                 | Some("responses-tool-state")
+                | Some("responses-text")
                 | Some("responses-result") => {
                     let Some(request_id) = ipc_response_id.as_ref() else {
                         return;
@@ -742,6 +783,18 @@ fn build_webview(
                         Some("responses-tool-state") => {
                             let _ = event_proxy
                                 .send_event(BrowserEvent::ResponsesToolState(request_id.clone()));
+                        }
+                        Some("responses-text") => {
+                            if let Some(text) = message
+                                .get("delta")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|text| text.len() <= MAX_RESPONSE_TEXT_BYTES)
+                            {
+                                let _ = event_proxy.send_event(BrowserEvent::ResponsesText {
+                                    request_id: request_id.clone(),
+                                    delta: text.to_owned(),
+                                });
+                            }
                         }
                         _ => {
                             let result = if let Some(text) = message
@@ -776,7 +829,7 @@ fn build_webview(
             if message
                 .get("probe_version")
                 .and_then(serde_json::Value::as_u64)
-                != Some(3)
+                != Some(4)
             {
                 return;
             }
@@ -806,12 +859,37 @@ fn build_webview(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let _ =
-                event_proxy.send_event(BrowserEvent::AccountCapabilities(AccountCapabilities {
-                    probe_version: 3,
+            let reasoning_by_model = message
+                .get("reasoning_by_model")
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flatten()
+                .filter(|(label, _)| picker_options.contains(label))
+                .filter_map(|(label, levels)| {
+                    let levels = levels.as_array()?;
+                    if levels.len() > 5 {
+                        return None;
+                    }
+                    let levels = levels
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .filter(|level| {
+                            matches!(*level, "low" | "medium" | "high" | "xhigh" | "max")
+                        })
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    (!levels.is_empty()).then(|| (label.clone(), levels))
+                })
+                .collect();
+            let _ = event_proxy.send_event(BrowserEvent::AccountCapabilities(
+                AccountCapabilities {
+                    probe_version: 4,
                     picker_options,
+                    reasoning_by_model,
                     detected_at_unix_seconds,
-                }));
+                },
+                ipc_response_id.is_some(),
+            ));
         });
 
     let builder = if page == BrowserPage::TemporaryChat {
@@ -847,8 +925,22 @@ fn store_account_tier(path: &Path, tier: AccountTierChoice) -> anyhow::Result<()
 
 fn store_account_capabilities(
     path: &Path,
-    capabilities: AccountCapabilities,
+    mut capabilities: AccountCapabilities,
+    partial: bool,
 ) -> anyhow::Result<()> {
+    if partial
+        && let Ok(contents) = fs::read(path)
+        && let Ok(previous) = serde_json::from_slice::<AccountCapabilities>(&contents)
+        && previous.probe_version == capabilities.probe_version
+        && previous.picker_options == capabilities.picker_options
+    {
+        for (model, levels) in previous.reasoning_by_model {
+            capabilities
+                .reasoning_by_model
+                .entry(model)
+                .or_insert(levels);
+        }
+    }
     let contents = serde_json::to_vec(&capabilities)?;
     fs::write(path, contents).with_context(|| {
         format!(
@@ -1094,6 +1186,7 @@ struct TextOnlyResponsesRequest {
     model: String,
     reasoning_effort: Option<String>,
     prompt: String,
+    attachments: Vec<MediaAttachment>,
     stream: bool,
     tools: Vec<CallableTool>,
     outputs: Vec<(String, serde_json::Value)>,
@@ -1101,6 +1194,95 @@ struct TextOnlyResponsesRequest {
 }
 
 type RequestParseError = (&'static str, &'static str, &'static str);
+
+fn supported_attachment_extension(kind: &str, mime: &str) -> Option<&'static str> {
+    match (kind, mime) {
+        ("image", "image/png") => Some("png"),
+        ("image", "image/jpeg") => Some("jpg"),
+        ("image", "image/webp") => Some("webp"),
+        ("image", "image/gif") => Some("gif"),
+        ("audio", "audio/wav" | "audio/x-wav") => Some("wav"),
+        ("audio", "audio/mpeg" | "audio/mp3") => Some("mp3"),
+        ("audio", "audio/mp4" | "audio/x-m4a") => Some("m4a"),
+        ("audio", "audio/aac") => Some("aac"),
+        ("audio", "audio/ogg") => Some("ogg"),
+        ("audio", "audio/webm") => Some("webm"),
+        ("audio", "audio/flac" | "audio/x-flac") => Some("flac"),
+        _ => None,
+    }
+}
+
+fn append_data_url_attachment(
+    data_url: Option<&str>,
+    kind: &str,
+    attachments: &mut Vec<MediaAttachment>,
+    text: &mut String,
+) -> Result<(), RequestParseError> {
+    let (status, code, label) = match kind {
+        "image" => (
+            "422 Unprocessable Content",
+            "input_image_unsupported",
+            "image",
+        ),
+        _ => (
+            "422 Unprocessable Content",
+            "input_audio_unsupported",
+            "audio",
+        ),
+    };
+    let unsupported = |message| (status, code, message);
+    let data_url = data_url.ok_or(unsupported(match kind {
+        "image" => "images must contain an inline data URL",
+        _ => "audio must contain an inline data URL",
+    }))?;
+    let (header, data) = data_url
+        .split_once(',')
+        .ok_or(unsupported("attachments must use a base64 data URL"))?;
+    let mime = header
+        .strip_prefix("data:")
+        .and_then(|header| header.strip_suffix(";base64"))
+        .ok_or(unsupported("attachments must use a base64 data URL"))?;
+    let extension = supported_attachment_extension(kind, mime).ok_or(unsupported(match kind {
+        "image" => "use an inline PNG, JPEG, WebP, or GIF image",
+        _ => "use an inline WAV, MP3, M4A, AAC, OGG, WebM, or FLAC audio file",
+    }))?;
+    if data.is_empty() || attachments.len() >= 8 {
+        return Err(unsupported(
+            "provide up to eight non-empty media attachments",
+        ));
+    }
+    let name = format!("web2codex-{label}-{}.{}", attachments.len() + 1, extension);
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(&format!("[Attached {label}: {name}]"));
+    attachments.push(MediaAttachment {
+        name,
+        mime: mime.to_string(),
+        data_url: data_url.to_string(),
+    });
+    Ok(())
+}
+
+fn attach_tool_media(
+    kind: &str,
+    mime: &str,
+    data: &str,
+    attachments: &mut Vec<MediaAttachment>,
+) -> Option<String> {
+    let extension = supported_attachment_extension(kind, mime)?;
+    if data.is_empty() || attachments.len() >= 8 {
+        return None;
+    }
+    let label = if kind == "image" { "image" } else { "audio" };
+    let name = format!("web2codex-{label}-{}.{}", attachments.len() + 1, extension);
+    attachments.push(MediaAttachment {
+        name: name.clone(),
+        mime: mime.to_string(),
+        data_url: format!("data:{mime};base64,{data}"),
+    });
+    Some(format!("[Attached {label}: {name}]"))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CallableToolKind {
@@ -1379,7 +1561,10 @@ fn extend_callable_tools_from_input(
     Ok(())
 }
 
-fn input_content_to_text(content: &serde_json::Value) -> Result<String, RequestParseError> {
+fn input_content_to_text(
+    content: &serde_json::Value,
+    attachments: &mut Vec<MediaAttachment>,
+) -> Result<String, RequestParseError> {
     let unsupported = |code, message| ("422 Unprocessable Content", code, message);
     match content {
         serde_json::Value::String(text) => Ok(text.clone()),
@@ -1404,12 +1589,18 @@ fn input_content_to_text(content: &serde_json::Value) -> Result<String, RequestP
                         }
                         text.push_str(part_text);
                     }
-                    "input_image" | "input_audio" => {
-                        return Err(unsupported(
-                            "input_modality_unsupported",
-                            "this ChatGPT Web bridge currently accepts text context only",
-                        ));
-                    }
+                    "input_image" => append_data_url_attachment(
+                        part.get("image_url").and_then(serde_json::Value::as_str),
+                        "image",
+                        attachments,
+                        &mut text,
+                    )?,
+                    "input_audio" => append_data_url_attachment(
+                        part.get("audio_url").and_then(serde_json::Value::as_str),
+                        "audio",
+                        attachments,
+                        &mut text,
+                    )?,
                     _ => {
                         return Err(unsupported(
                             "input_format_unsupported",
@@ -1427,7 +1618,115 @@ fn input_content_to_text(content: &serde_json::Value) -> Result<String, RequestP
     }
 }
 
-fn responses_input_to_prompt(input: &serde_json::Value) -> Result<String, RequestParseError> {
+fn tool_output_to_context(
+    output: &serde_json::Value,
+    include_media: bool,
+    attachments: &mut Vec<MediaAttachment>,
+) -> String {
+    const FAILED_MARKER: &str = "web2codex://tool-result/failed/v1";
+    let mut preserved = Vec::new();
+    let content = match output {
+        serde_json::Value::Array(parts) => Some(parts.as_slice()),
+        serde_json::Value::Object(object) => object
+            .get("content")
+            .and_then(|content| content.as_array())
+            .map(Vec::as_slice),
+        _ => None,
+    };
+
+    if let Some(content) = content {
+        for part in content {
+            match part.get("type").and_then(serde_json::Value::as_str) {
+                Some("input_text" | "output_text" | "text") => {
+                    if let Some(text) = part
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| *text != FAILED_MARKER)
+                    {
+                        preserved.push(text.to_string());
+                    }
+                }
+                Some("input_image") if include_media => {
+                    let data_url = part.get("image_url").and_then(serde_json::Value::as_str);
+                    let attachment = data_url.and_then(|data_url| {
+                        let (header, data) = data_url.split_once(',')?;
+                        let mime = header.strip_prefix("data:")?.strip_suffix(";base64")?;
+                        attach_tool_media("image", mime, data, attachments)
+                    });
+                    preserved.push(attachment.unwrap_or_else(|| {
+                        "[An earlier tool returned an image that could not be attached to this chat]".to_string()
+                    }));
+                }
+                Some("image") if include_media => {
+                    let mime = part
+                        .get("mimeType")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let data = part
+                        .get("data")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    preserved.push(attach_tool_media("image", mime, data, attachments).unwrap_or_else(|| {
+                        format!("[An earlier tool returned an image that could not be attached to this chat ({mime})]")
+                    }));
+                }
+                Some("input_image" | "image") => {}
+                Some("input_audio") if include_media => {
+                    let data_url = part.get("audio_url").and_then(serde_json::Value::as_str);
+                    let attachment = data_url.and_then(|data_url| {
+                        let (header, data) = data_url.split_once(',')?;
+                        let mime = header.strip_prefix("data:")?.strip_suffix(";base64")?;
+                        attach_tool_media("audio", mime, data, attachments)
+                    });
+                    preserved.push(attachment.unwrap_or_else(|| {
+                        "[An earlier tool returned audio that could not be attached to this chat]".to_string()
+                    }));
+                }
+                Some("audio") if include_media => {
+                    let mime = part
+                        .get("mimeType")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown audio type");
+                    let data = part
+                        .get("data")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    preserved.push(attach_tool_media("audio", mime, data, attachments).unwrap_or_else(|| {
+                        format!("[An earlier tool returned audio that could not be attached to this chat ({mime})]")
+                    }));
+                }
+                Some("input_audio" | "audio") => {}
+                Some(_) => preserved.push(part.to_string()),
+                None => preserved.push(part.to_string()),
+            }
+        }
+    }
+
+    if let serde_json::Value::Object(object) = output {
+        if object.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
+            preserved.insert(0, "The previous MCP tool returned an error.".to_string());
+        }
+        if let Some(structured) = object.get("structuredContent")
+            && !structured.is_null()
+        {
+            preserved.push(structured.to_string());
+        }
+    }
+    if preserved.is_empty() {
+        match output {
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Null => String::new(),
+            _ => output.to_string(),
+        }
+    } else {
+        preserved.join("\n")
+    }
+}
+
+fn responses_input_to_prompt(
+    input: &serde_json::Value,
+    attachments: &mut Vec<MediaAttachment>,
+) -> Result<String, RequestParseError> {
     let unsupported = |code, message| ("422 Unprocessable Content", code, message);
     if let Some(text) = input.as_str() {
         return Ok(text.to_string());
@@ -1440,6 +1739,21 @@ fn responses_input_to_prompt(input: &serde_json::Value) -> Result<String, Reques
     };
 
     let mut sections = Vec::new();
+    // A fresh Temporary Chat needs earlier tool images as well as their text.
+    // In a tool continuation the active ChatGPT response already has them.
+    let new_user_turn = items
+        .iter()
+        .rev()
+        .find(|item| {
+            !matches!(
+                item.get("type").and_then(serde_json::Value::as_str),
+                Some("reasoning" | "additional_tools" | "configuration_update")
+            )
+        })
+        .is_some_and(|item| {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                && item.get("role").and_then(serde_json::Value::as_str) == Some("user")
+        });
     for item in items {
         let Some(kind) = item.get("type").and_then(serde_json::Value::as_str) else {
             return Err(unsupported(
@@ -1470,7 +1784,7 @@ fn responses_input_to_prompt(input: &serde_json::Value) -> Result<String, Reques
                     "input_format_unsupported",
                     "conversation message is missing content",
                 ))?;
-                let text = input_content_to_text(content)?;
+                let text = input_content_to_text(content, attachments)?;
                 if !text.trim().is_empty() {
                     sections.push(format!("{heading}:\n{text}"));
                 }
@@ -1483,7 +1797,7 @@ fn responses_input_to_prompt(input: &serde_json::Value) -> Result<String, Reques
                 let Some(content) = item.get("content") else {
                     continue;
                 };
-                let text = input_content_to_text(content)?;
+                let text = input_content_to_text(content, attachments)?;
                 if !text.trim().is_empty() {
                     sections.push(format!("Agent ({author}):\n{text}"));
                 }
@@ -1493,15 +1807,7 @@ fn responses_input_to_prompt(input: &serde_json::Value) -> Result<String, Reques
                 // results from earlier tool rounds so the next turn retains
                 // the work already done; schemas still travel only via MCP.
                 if let Some(output) = item.get("output") {
-                    let text = match output {
-                        serde_json::Value::String(text) => text.clone(),
-                        serde_json::Value::Array(parts) => parts
-                            .iter()
-                            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        _ => String::new(),
-                    };
+                    let text = tool_output_to_context(output, new_user_turn, attachments);
                     if !text.trim().is_empty() {
                         sections.push(format!("Earlier tool result:\n{text}"));
                     }
@@ -1597,11 +1903,11 @@ fn parse_text_only_responses_request(
         .and_then(serde_json::Value::as_str)
     {
         None | Some("none") => None,
-        Some(effort @ ("low" | "medium" | "high")) => Some(effort.to_owned()),
+        Some(effort @ ("low" | "medium" | "high" | "xhigh" | "max")) => Some(effort.to_owned()),
         Some(_) => {
             return Err(unsupported(
                 "reasoning_effort_unsupported",
-                "ChatGPT Web currently exposes low, medium, and high reasoning effort",
+                "unsupported ChatGPT Web reasoning effort",
             ));
         }
     };
@@ -1634,7 +1940,8 @@ fn parse_text_only_responses_request(
         ));
     }
 
-    let mut prompt = responses_input_to_prompt(input)?;
+    let mut attachments = Vec::new();
+    let mut prompt = responses_input_to_prompt(input, &mut attachments)?;
     if let Some(instructions) = object
         .get("instructions")
         .and_then(serde_json::Value::as_str)
@@ -1661,6 +1968,7 @@ fn parse_text_only_responses_request(
         model,
         reasoning_effort,
         prompt,
+        attachments,
         stream,
         tools,
         outputs,
@@ -1788,7 +2096,7 @@ fn json_error(error_type: &str, code: &str, message: &str) -> serde_json::Value 
 fn completed_response_object(
     response_id: &str,
     model: &str,
-    output_item: serde_json::Value,
+    output_items: Vec<serde_json::Value>,
     end_turn: bool,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -1796,7 +2104,7 @@ fn completed_response_object(
         "object": "response",
         "status": "completed",
         "model": model,
-        "output": [output_item],
+        "output": output_items,
         // The ChatGPT UI does not expose token counts. Leave usage unknown rather than inventing it.
         "usage": null,
         "end_turn": end_turn

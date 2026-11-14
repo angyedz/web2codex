@@ -59,6 +59,7 @@ pub enum SlashCommand {
     #[strum(to_string = "pwd", serialize = "cwd")]
     Pwd,
     Usage,
+    Context,
     DebugConfig,
     Title,
     Statusline,
@@ -121,6 +122,7 @@ impl SlashCommand {
             SlashCommand::Cd => "change the current working directory",
             SlashCommand::Pwd => "show the current working directory",
             SlashCommand::Usage => "view local request and character usage statistics",
+            SlashCommand::Context => "set the context window for all Web2Codex models",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",
             SlashCommand::Statusline => "configure which items appear in the status line",
@@ -188,6 +190,7 @@ impl SlashCommand {
                 | SlashCommand::Cd
                 | SlashCommand::Pwd
                 | SlashCommand::Usage
+                | SlashCommand::Context
                 | SlashCommand::Pets
                 | SlashCommand::Side
                 | SlashCommand::Btw
@@ -210,6 +213,7 @@ impl SlashCommand {
                 | SlashCommand::Warnings
                 | SlashCommand::Pwd
                 | SlashCommand::Usage
+                | SlashCommand::Context
                 | SlashCommand::Ide
                 | SlashCommand::Rename
         )
@@ -236,6 +240,7 @@ impl SlashCommand {
                 | SlashCommand::Warnings
                 | SlashCommand::DebugConfig
                 | SlashCommand::Pwd
+                | SlashCommand::Context
                 | SlashCommand::Rollout
                 | SlashCommand::Copy
                 | SlashCommand::Raw
@@ -285,6 +290,7 @@ impl SlashCommand {
             | SlashCommand::Warnings
             | SlashCommand::Pwd
             | SlashCommand::Usage
+            | SlashCommand::Context
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop

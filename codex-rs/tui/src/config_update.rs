@@ -65,6 +65,13 @@ pub(crate) fn clear_config_value(key_path: impl Into<String>) -> ConfigEdit {
     replace_config_value(key_path, JsonValue::Null)
 }
 
+fn project_root_from_config_folder(path: &str) -> Option<&str> {
+    path.strip_suffix("/.web2codex")
+        .or_else(|| path.strip_suffix("\\.web2codex"))
+        .or_else(|| path.strip_suffix("/.codex"))
+        .or_else(|| path.strip_suffix("\\.codex"))
+}
+
 pub(crate) fn app_scoped_key_path(app_id: &str, key_path: &str) -> String {
     let app_id = serde_json::Value::String(app_id.to_string()).to_string();
     format!("apps.{app_id}.{key_path}")
@@ -324,10 +331,7 @@ pub(crate) async fn read_remote_project_trust(
                 .or_else(|| {
                     disabled_project
                         .and_then(|layer| layer["name"]["dotCodexFolder"].as_str())
-                        .and_then(|path| {
-                            path.strip_suffix("/.codex")
-                                .or_else(|| path.strip_suffix("\\.codex"))
-                        })
+                        .and_then(project_root_from_config_folder)
                 })
         })
         .or_else(|| {

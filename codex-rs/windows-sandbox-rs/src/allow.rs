@@ -321,9 +321,11 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let command_cwd = tmp.path().join("workspace");
         let codex_dir = command_cwd.join(".codex");
+        let web2codex_dir = command_cwd.join(".web2codex");
         let agents_dir = command_cwd.join(".agents");
         let aws_dir = command_cwd.join(".aws");
         let _ = fs::create_dir_all(&codex_dir);
+        let _ = fs::create_dir_all(&web2codex_dir);
         let _ = fs::create_dir_all(&agents_dir);
         let _ = fs::create_dir_all(&aws_dir);
 
@@ -345,6 +347,7 @@ mod tests {
             .collect();
         let expected_deny: HashSet<PathBuf> = [
             dunce::canonicalize(&codex_dir).unwrap(),
+            dunce::canonicalize(&web2codex_dir).unwrap(),
             dunce::canonicalize(&agents_dir).unwrap(),
             dunce::canonicalize(&aws_dir).unwrap(),
         ]

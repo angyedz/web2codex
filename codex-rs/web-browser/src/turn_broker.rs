@@ -32,6 +32,9 @@ struct Turn {
     queue: VecDeque<String>,
     calls: HashMap<String, Invocation>,
     result: Option<Result<String, String>>,
+    text: String,
+    text_cursor: usize,
+    segment_start: usize,
     revision: u64,
     last_activity: Instant,
     completed_tools: u64,
@@ -46,6 +49,8 @@ struct Invocation {
 pub(crate) struct NativeEvent {
     pub(crate) item: Value,
     pub(crate) end_turn: bool,
+    pub(crate) text_delta: Option<String>,
+    pub(crate) segment_text: String,
 }
 
 impl TurnBroker {
@@ -75,6 +80,9 @@ impl TurnBroker {
                 queue: VecDeque::new(),
                 calls: HashMap::new(),
                 result: None,
+                text: String::new(),
+                text_cursor: 0,
+                segment_start: 0,
                 revision: 0,
                 last_activity: Instant::now(),
                 completed_tools: 0,
@@ -131,6 +139,44 @@ impl TurnBroker {
         let request_id = turn.request_id.clone();
         self.changed.notify_all();
         Ok(Some((token, request_id)))
+    }
+
+    pub(crate) fn begin_response(&self, token: &str) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let turn = state
+            .turns
+            .get_mut(token)
+            .ok_or("The ChatGPT turn has been cancelled")?;
+        turn.segment_start = turn.text_cursor;
+        Ok(())
+    }
+
+    pub(crate) fn append_text(&self, request_id: &str, delta: String) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(turn) = state
+            .turns
+            .values_mut()
+            .find(|turn| turn.request_id == request_id)
+        else {
+            return false;
+        };
+        if turn.result.is_some()
+            || delta.is_empty()
+            || turn.text.len().saturating_add(delta.len()) > crate::MAX_RESPONSE_TEXT_BYTES
+        {
+            return false;
+        }
+        turn.text.push_str(&delta);
+        turn.revision += 1;
+        turn.last_activity = Instant::now();
+        self.changed.notify_all();
+        true
     }
 
     pub(crate) fn inventory(&self, request: &Value) -> Result<Value, String> {
@@ -196,7 +242,11 @@ impl TurnBroker {
             "total": matching.len(),
             "next_offset": (offset + tools.len() < matching.len()).then_some(offset + tools.len()),
             "discovery_tools": turn.tools.iter().filter(|tool| tool.kind == CallableToolKind::ToolSearch)
-                .map(|tool| json!({"wire_name": wire_name(tool), "parameters": tool.declaration.get("parameters")})).collect::<Vec<_>>()
+                .map(|tool| {
+                    let mut declaration = tool.declaration.clone();
+                    declaration["wire_name"] = json!(wire_name(tool));
+                    declaration
+                }).collect::<Vec<_>>()
         }))
     }
 
@@ -294,12 +344,36 @@ impl TurnBroker {
             .turns
             .get_mut(token)
             .ok_or("The ChatGPT turn has been cancelled")?;
+        if turn.text_cursor < turn.text.len() {
+            let delta = turn.text[turn.text_cursor..].to_string();
+            turn.text_cursor = turn.text.len();
+            return Ok(Some(NativeEvent {
+                item: Value::Null,
+                end_turn: false,
+                text_delta: Some(delta),
+                segment_text: String::new(),
+            }));
+        }
         if let Some(result) = &turn.result {
             let text = result.clone()?;
+            let segment_text = turn
+                .text
+                .get(turn.segment_start..)
+                .unwrap_or(text.as_str())
+                .to_string();
             let id = format!("msg_{}", Uuid::new_v4().simple());
-            let (item, end_turn) =
-                response_item_for_completion(&id, "", "", BridgeCompletion::Message(text));
-            return Ok(Some(NativeEvent { item, end_turn }));
+            let (item, end_turn) = response_item_for_completion(
+                &id,
+                "",
+                "",
+                BridgeCompletion::Message(segment_text.clone()),
+            );
+            return Ok(Some(NativeEvent {
+                item,
+                end_turn,
+                text_delta: None,
+                segment_text,
+            }));
         }
         while let Some(call_id) = turn.queue.pop_front() {
             if let Some(call) = turn.calls.get_mut(&call_id) {
@@ -307,6 +381,12 @@ impl TurnBroker {
                 return Ok(Some(NativeEvent {
                     item: call.item.clone(),
                     end_turn: false,
+                    text_delta: None,
+                    segment_text: turn
+                        .text
+                        .get(turn.segment_start..)
+                        .unwrap_or_default()
+                        .to_string(),
                 }));
             }
         }
@@ -353,6 +433,23 @@ impl TurnBroker {
                 || turn.last_activity.elapsed() < COMPLETION_QUIET_PERIOD)
         {
             return false;
+        }
+        if let Ok(text) = &result {
+            if text.len() > crate::MAX_RESPONSE_TEXT_BYTES {
+                turn.result = Some(Err("ChatGPT response exceeded the bridge size limit".into()));
+                turn.last_activity = Instant::now();
+                self.changed.notify_all();
+                return true;
+            }
+            if !text.starts_with(&turn.text) {
+                turn.result = Some(Err(
+                    "ChatGPT revised text that was already streamed; the response was stopped to avoid returning inconsistent output".into(),
+                ));
+                turn.last_activity = Instant::now();
+                self.changed.notify_all();
+                return true;
+            }
+            turn.text = text.clone();
         }
         turn.result = Some(result);
         turn.last_activity = Instant::now();
@@ -432,7 +529,8 @@ fn completion_for_call(tool: &CallableTool, request: &Value) -> Result<BridgeCom
             {
                 return Err("Tool arguments are too large".into());
             }
-            if ["write_stdin", "exec_command"].contains(&tool.name.as_str())
+            if tool.namespace == "functions"
+                && ["write_stdin", "exec_command"].contains(&tool.name.as_str())
                 && arguments
                     .get("yield_time_ms")
                     .and_then(Value::as_u64)
@@ -443,7 +541,8 @@ fn completion_for_call(tool: &CallableTool, request: &Value) -> Result<BridgeCom
                         .into(),
                 );
             }
-            if ["wait_agent", "wait"].contains(&tool.name.as_str())
+            if tool.namespace == "functions"
+                && ["wait_agent", "wait"].contains(&tool.name.as_str())
                 && arguments
                     .get("timeout_ms")
                     .and_then(Value::as_u64)
@@ -467,12 +566,21 @@ fn completion_for_call(tool: &CallableTool, request: &Value) -> Result<BridgeCom
 /// Preserve native MCP structured content and inline media without making network
 /// requests for image/audio URLs or silently discarding a tool's result.
 fn mcp_tool_result(output: Value) -> Value {
+    const FAILED_MARKER: &str = "web2codex://tool-result/failed/v1";
     if output.is_object() && output.get("content").is_some_and(Value::is_array) {
         return output;
     }
     let mut content = Vec::new();
+    let mut is_error = false;
     if let Some(parts) = output.as_array() {
-        for part in parts {
+        for (index, part) in parts.iter().enumerate() {
+            if index == 0
+                && part.get("type").and_then(Value::as_str) == Some("input_text")
+                && part.get("text").and_then(Value::as_str) == Some(FAILED_MARKER)
+            {
+                is_error = true;
+                continue;
+            }
             match part.get("type").and_then(Value::as_str) {
                 Some("input_text" | "output_text" | "text") => content.push(json!({"type":"text", "text": part.get("text").and_then(Value::as_str).unwrap_or("")})),
                 Some("input_image" | "input_audio") => {
@@ -487,7 +595,7 @@ fn mcp_tool_result(output: Value) -> Value {
     } else {
         content.push(json!({"type":"text", "text": output.as_str().map(str::to_owned).unwrap_or_else(|| output.to_string())}));
     }
-    json!({"content": content, "isError": false})
+    json!({"content": content, "isError": is_error})
 }
 
 #[cfg(test)]
@@ -502,6 +610,89 @@ mod tests {
             {"type":"custom", "name":"apply_patch", "description":"native patch grammar", "format":{"type":"text"}},
             {"type":"tool_search", "execution":"client", "description":"native discovery", "parameters":{"type":"object", "properties":{"query":{"type":"string"}}}}
         ]))).expect("valid native registry")
+    }
+
+    #[test]
+    fn external_mcp_tools_keep_their_own_wait_arguments() {
+        let tools = crate::parse_callable_tools(Some(&json!([
+            {"type":"namespace", "name":"mcp__external", "tools":[
+                {"type":"function", "name":"wait", "parameters":{"type":"object"}},
+                {"type":"function", "name":"exec_command", "parameters":{"type":"object"}}
+            ]},
+            {"type":"function", "name":"wait", "parameters":{"type":"object"}}
+        ])))
+        .unwrap();
+        for tool in &tools[..2] {
+            assert!(
+                completion_for_call(
+                    tool,
+                    &json!({"arguments":{
+                        "timeout_ms": 120_000, "yield_time_ms": 120_000
+                    }})
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            completion_for_call(&tools[2], &json!({"arguments":{"timeout_ms":120_000}})).is_err()
+        );
+    }
+
+    #[test]
+    fn external_mcp_call_returns_text_and_images_to_the_connector() {
+        let broker = Arc::new(TurnBroker::default());
+        let tools = crate::parse_callable_tools(Some(&json!([
+            {"type":"namespace", "name":"mcp__photos", "tools":[
+                {"type":"function", "name":"inspect", "parameters":{"type":"object"}}
+            ]}
+        ])))
+        .unwrap();
+        let token = broker
+            .begin("external-mcp-turn".into(), tools.clone())
+            .unwrap();
+        let pending = invocation(
+            &broker,
+            &token,
+            "mcp__photos.inspect",
+            json!({"arguments":{"id":7}}),
+        );
+        let event = next_call(&broker, &token);
+        assert_eq!(event.item["namespace"], "mcp__photos");
+        assert_eq!(event.item["name"], "inspect");
+        broker
+            .resume(
+                &[(
+                    event.item["call_id"].as_str().unwrap().into(),
+                    json!([
+                        {"type":"input_text", "text":"photo found"},
+                        {"type":"input_image", "image_url":"data:image/png;base64,aGVsbG8="}
+                    ]),
+                )],
+                &tools,
+            )
+            .unwrap();
+        let result = pending.join().unwrap().unwrap();
+        assert_eq!(result["content"][0]["text"], "photo found");
+        assert_eq!(
+            result["content"][1],
+            json!({"type":"image","mimeType":"image/png","data":"aGVsbG8="})
+        );
+    }
+
+    #[test]
+    fn connector_keeps_structured_mcp_errors_intact() {
+        let error = json!({"isError":true,"content":[{"type":"text","text":"External server failed"}],
+            "structuredContent":{"code":"unavailable"}});
+        assert_eq!(mcp_tool_result(error.clone()), error);
+        let native_error = mcp_tool_result(json!([
+            {"type":"input_text","text":"web2codex://tool-result/failed/v1"},
+            {"type":"input_text","text":"External server failed"}
+        ]));
+        assert_eq!(native_error["isError"], true);
+        assert_eq!(
+            native_error["content"],
+            json!([{"type":"text","text":"External server failed"}])
+        );
     }
 
     fn invocation(
@@ -675,6 +866,17 @@ mod tests {
         let broker = Arc::new(TurnBroker::default());
         let mut tools = registry();
         let token = broker.begin("search".into(), tools.clone()).unwrap();
+        let inventory = broker
+            .inventory(&json!({"turn_token":token, "query":"configured MCP"}))
+            .unwrap();
+        assert_eq!(
+            inventory["discovery_tools"][0]["wire_name"],
+            "functions.tool_search"
+        );
+        assert_eq!(
+            inventory["discovery_tools"][0]["description"],
+            "native discovery"
+        );
         assert!(
             broker
                 .invoke(
@@ -713,6 +915,50 @@ mod tests {
             inventory["tools"][0]["parameters"],
             json!({"type":"object"})
         );
+    }
+
+    #[test]
+    fn streamed_text_is_append_only_and_resumed_responses_start_at_the_new_segment() {
+        let broker = Arc::new(TurnBroker::default());
+        let tools = registry();
+        let token = broker.begin("streamed-turn".into(), tools.clone()).unwrap();
+        broker.begin_response(&token).unwrap();
+        assert!(broker.append_text("streamed-turn", "before tool ".into()));
+        let first_delta = broker.next_event(&token).unwrap().unwrap();
+        assert_eq!(first_delta.text_delta.as_deref(), Some("before tool "));
+
+        let pending = invocation(
+            &broker,
+            &token,
+            "functions.exec_command",
+            json!({"arguments":{"cmd":"inspect"}}),
+        );
+        let tool_call = next_call(&broker, &token);
+        assert_eq!(tool_call.segment_text, "before tool ");
+        let call_id = tool_call.item["call_id"].as_str().unwrap().to_owned();
+        broker
+            .resume(&[(call_id, json!("native result"))], &tools)
+            .unwrap();
+        pending.join().unwrap().unwrap();
+
+        broker.begin_response(&token).unwrap();
+        assert!(broker.append_text("streamed-turn", "after tool".into()));
+        let second_delta = broker.next_event(&token).unwrap().unwrap();
+        assert_eq!(second_delta.text_delta.as_deref(), Some("after tool"));
+        let revision = {
+            let mut state = broker.state.lock().unwrap();
+            let turn = state.turns.get_mut(&token).unwrap();
+            turn.last_activity = Instant::now() - Duration::from_secs(3);
+            turn.revision
+        };
+        assert!(broker.complete(
+            "streamed-turn",
+            Some(revision),
+            Ok("before tool after tool".into())
+        ));
+        let final_event = broker.next_event(&token).unwrap().unwrap();
+        assert_eq!(final_event.segment_text, "after tool");
+        assert!(final_event.end_turn);
     }
 
     #[test]
