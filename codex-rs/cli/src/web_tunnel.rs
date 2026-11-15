@@ -1,12 +1,12 @@
 //! Background runtime for the Web2Codex MCP connector.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use reqwest::blocking::Client;
@@ -61,12 +61,14 @@ struct ReleaseAsset {
 
 struct RuntimePaths {
     directory: PathBuf,
+    lock: PathBuf,
     profile: PathBuf,
     api_key: PathBuf,
     pid: PathBuf,
     process_start: PathBuf,
     signature: PathBuf,
     health_url: PathBuf,
+    log_file: PathBuf,
 }
 
 struct RemoveFileOnDrop(PathBuf);
@@ -92,7 +94,18 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     anyhow::ensure!(workspace.is_dir(), "workspace is not a directory");
 
     let paths = runtime_paths()?;
-    let signature = runtime_signature(tunnel_id, api_key, &workspace);
+    with_runtime_lock(&paths.lock, || {
+        start_locked(tunnel_id, api_key, &workspace, &paths)
+    })
+}
+
+fn start_locked(
+    tunnel_id: &str,
+    api_key: &str,
+    workspace: &Path,
+    paths: &RuntimePaths,
+) -> anyhow::Result<()> {
+    let signature = runtime_signature(tunnel_id, api_key, workspace);
     if runtime_ready()
         && fs::read_to_string(&paths.signature)
             .is_ok_and(|saved| saved.trim() == signature.as_str())
@@ -105,7 +118,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
         return Ok(());
     }
     if paths.pid.is_file() || runtime_ready() {
-        stop()?;
+        stop_locked(paths)?;
     }
 
     fs::create_dir_all(&paths.directory)?;
@@ -120,18 +133,21 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     // If it cannot be removed, fail closed instead of starting against stale health state.
     remove_file_if_exists(&paths.health_url)
         .context("failed to remove the previous tunnel health URL")?;
+    remove_file_if_exists(&paths.log_file)
+        .context("failed to remove the previous tunnel startup log")?;
     // A crash during the previous startup can leave the short-lived raw key file behind.
     // No active runtime remains at this point, so clear it before any fallible setup step.
     remove_file_if_exists(&paths.api_key)
         .context("failed to clear a stale temporary tunnel API key file")?;
     let client = install_tunnel_client()?;
-    remove_obsolete_client_versions(&paths, &client);
+    remove_obsolete_client_versions(paths, &client);
     let codex = std::env::current_exe().context("failed to locate the Codex executable")?;
     let _api_key_cleanup = RemoveFileOnDrop(paths.api_key.clone());
     if let Err(error) = write_private_file(&paths.api_key, api_key.as_bytes()) {
         return Err(error).context("failed to write the temporary tunnel API key file");
     }
-    write_profile(&paths, tunnel_id, &paths.api_key, &codex, &workspace)?;
+    write_profile(paths, tunnel_id, &paths.api_key, &codex, workspace)?;
+    validate_tunnel_profile(&client, &paths.profile, api_key)?;
 
     // Verify the executable against its protected digest sidecar immediately before launch.
     // install_tunnel_client also checks the cache, but later file operations leave a TOCTOU gap.
@@ -150,7 +166,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
         .arg("run")
         .arg("--profile-file")
         .arg(&paths.profile)
-        .current_dir(&workspace)
+        .current_dir(workspace)
         .env_clear()
         .envs(safe_subprocess_environment())
         .stdin(Stdio::null())
@@ -186,7 +202,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     let Some(process_start) = process_start_token(pid) else {
         let _ = force_terminate_tunnel_process(pid);
         let _ = child.wait();
-        remove_runtime_state(&paths)
+        remove_runtime_state(paths)
             .context("failed to clean runtime state after process identity lookup failed")?;
         bail!("could not record the tunnel-client process identity; refusing to start without it");
     };
@@ -196,7 +212,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     {
         let _ = terminate_tunnel_process(pid);
         let _ = child.wait();
-        return Err(match remove_runtime_state(&paths) {
+        return Err(match remove_runtime_state(paths) {
             Ok(()) => error.context("failed to save tunnel-client process state"),
             Err(cleanup_error) => error.context(format!(
                 "failed to save tunnel-client process state; cleanup also failed: {cleanup_error:#}"
@@ -208,7 +224,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
             if let Err(error) = fs::remove_file(&paths.api_key) {
                 let _ = force_terminate_tunnel_process(pid);
                 let _ = child.wait();
-                return Err(match remove_runtime_state(&paths) {
+                return Err(match remove_runtime_state(paths) {
                     Ok(()) => anyhow::Error::new(error)
                         .context("failed to remove the temporary tunnel API key file"),
                     Err(cleanup_error) => anyhow::Error::new(error).context(format!(
@@ -216,7 +232,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
                     )),
                 });
             }
-            remove_obsolete_client_versions(&paths, &client);
+            remove_obsolete_client_versions(paths, &client);
             println!("OpenAI Secure MCP Tunnel runtime is ready.");
             print_connector_instructions(tunnel_id);
             print_mcp_observation(&paths.health_url);
@@ -226,17 +242,24 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
             Ok(Some(status)) => {
                 let _ = force_terminate_tunnel_process(pid);
                 let _ = child.wait();
-                remove_runtime_state(&paths)
+                let diagnostic = read_tail(&paths.log_file, 64 * 1024)
+                    .unwrap_or_default()
+                    .replace(api_key, "[redacted]");
+                remove_runtime_state(paths)
                     .context("failed to clean runtime state after tunnel-client exited")?;
-                bail!(
-                    "tunnel-client exited during startup with {status}; check the tunnel ID, runtime key, and network connection"
-                );
+                let diagnostic = diagnostic.trim();
+                if diagnostic.is_empty() {
+                    bail!(
+                        "tunnel-client exited during startup with {status}; check the tunnel ID, runtime key, and network connection"
+                    );
+                }
+                bail!("tunnel-client exited during startup with {status}: {diagnostic}");
             }
             Ok(None) => {}
             Err(error) => {
                 let _ = force_terminate_tunnel_process(pid);
                 let _ = child.wait();
-                remove_runtime_state(&paths)
+                remove_runtime_state(paths)
                     .context("failed to clean runtime state after a startup monitoring error")?;
                 return Err(error).context("failed to monitor tunnel-client startup");
             }
@@ -245,7 +268,7 @@ pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow:
     }
     let _ = force_terminate_tunnel_process(pid);
     let _ = child.wait();
-    remove_runtime_state(&paths).context("failed to clean runtime state after startup timeout")?;
+    remove_runtime_state(paths).context("failed to clean runtime state after startup timeout")?;
     bail!(
         "tunnel-client did not become ready within 30 seconds; check the tunnel ID, runtime key, and network connection"
     );
@@ -265,6 +288,10 @@ pub(crate) fn status() -> anyhow::Result<()> {
 
 pub(crate) fn stop() -> anyhow::Result<()> {
     let paths = runtime_paths()?;
+    with_runtime_lock(&paths.lock, || stop_locked(&paths))
+}
+
+fn stop_locked(paths: &RuntimePaths) -> anyhow::Result<()> {
     let pid = match fs::read_to_string(&paths.pid) {
         Ok(value) => value.trim().parse::<u32>().ok(),
         Err(_) => None,
@@ -333,6 +360,7 @@ fn remove_runtime_state(paths: &RuntimePaths) -> anyhow::Result<()> {
         &paths.process_start,
         &paths.signature,
         &paths.health_url,
+        &paths.log_file,
     ] {
         remove_file_if_exists(path)
             .with_context(|| format!("failed to remove tunnel state file {}", path.display()))?;
@@ -555,14 +583,60 @@ fn runtime_paths() -> anyhow::Result<RuntimePaths> {
         .join("web-tunnel")
         .to_path_buf();
     Ok(RuntimePaths {
+        lock: directory.join("runtime.lock"),
         profile: directory.join("profile.yaml"),
         api_key: directory.join("runtime-api-key.tmp"),
         pid: directory.join("tunnel-client.pid"),
         process_start: directory.join("tunnel-client.start"),
         signature: directory.join("runtime.signature"),
         health_url: directory.join("health-url.txt"),
+        log_file: directory.join("tunnel-client.log"),
         directory,
     })
+}
+
+fn with_runtime_lock<T>(
+    lock_path: &Path,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let parent = lock_path
+        .parent()
+        .context("tunnel lock file has no parent directory")?;
+    fs::create_dir_all(parent)?;
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(lock_path)
+        .with_context(|| format!("failed to open tunnel lock {}", lock_path.display()))?;
+    #[cfg(windows)]
+    set_private_windows_acl(lock_path, false)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(lock_path, fs::Permissions::from_mode(0o600))?;
+    }
+    let mut lock = fd_lock::RwLock::new(file);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let _guard = loop {
+        match lock.try_write() {
+            Ok(guard) => break guard,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "timed out waiting for another Web2Codex process to update tunnel state"
+                );
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error).context("failed to lock tunnel runtime state"),
+        }
+    };
+    operation()
 }
 
 fn runtime_signature(tunnel_id: &str, api_key: &str, _workspace: &Path) -> String {
@@ -608,30 +682,71 @@ fn write_profile(
         quote_argument(workspace)
     );
     let profile = format!(
-        "config_version: 1\n\
-         control_plane:\n\
-           tunnel_id: {}\n\
-           api_key: {}\n\
-         health:\n\
-           listen_addr: {}\n\
-           url_file: {}\n\
-         admin_ui:\n\
-           open_browser: false\n\
-         log:\n\
-           level: info\n\
-           format: json\n\
-         mcp:\n\
-           commands:\n\
-           - channel: main\n\
-             command: {}\n",
+        concat!(
+            "config_version: 1\n",
+            "control_plane:\n",
+            "  tunnel_id: {}\n",
+            "  api_key: {}\n",
+            "health:\n",
+            "  listen_addr: {}\n",
+            "  url_file: {}\n",
+            "admin_ui:\n",
+            "  open_browser: false\n",
+            "log:\n",
+            "  level: warn\n",
+            "  format: json\n",
+            "  file: {}\n",
+            "mcp:\n",
+            "  commands:\n",
+            "    - channel: main\n",
+            "      command: {}\n",
+        ),
         yaml_string(tunnel_id),
         yaml_string(&format!("file:{}", api_key_file.to_string_lossy())),
         yaml_string("127.0.0.1:0"),
         yaml_string(&paths.health_url.to_string_lossy()),
+        yaml_string(&paths.log_file.to_string_lossy()),
         yaml_string(&command),
     );
     write_private_file(&paths.profile, profile.as_bytes())
         .context("failed to write the tunnel-client profile")
+}
+
+fn validate_tunnel_profile(client: &Path, profile: &Path, api_key: &str) -> anyhow::Result<()> {
+    let output = Command::new(client)
+        .arg("doctor")
+        .arg("--profile-file")
+        .arg(profile)
+        .arg("--explain")
+        .env_clear()
+        .envs(safe_subprocess_environment())
+        .output()
+        .context("failed to validate the OpenAI tunnel profile")?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let mut report = String::from_utf8_lossy(&output.stdout).into_owned();
+    report.push_str(&String::from_utf8_lossy(&output.stderr));
+    let report = report.replace(api_key, "[redacted]");
+    let report = report.trim();
+    if report.is_empty() {
+        bail!("tunnel-client rejected its profile with {}", output.status);
+    }
+    bail!(
+        "tunnel-client profile check failed with {}: {report}",
+        output.status
+    );
+}
+
+fn read_tail(path: &Path, maximum_bytes: u64) -> anyhow::Result<String> {
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    let start = length.saturating_sub(maximum_bytes);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    file.take(maximum_bytes).read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn yaml_string(value: &str) -> String {
@@ -639,11 +754,9 @@ fn yaml_string(value: &str) -> String {
 }
 
 fn quote_argument(path: &Path) -> String {
-    let mut value = path.to_string_lossy().replace('"', "\\\"");
+    let value = path.to_string_lossy().replace('"', "\\\"");
     #[cfg(windows)]
-    {
-        value = value.replace('\\', "/");
-    }
+    let value = value.replace('\\', "/");
     format!("\"{value}\"")
 }
 
@@ -816,6 +929,21 @@ fn health_response(base_url: &str, endpoint: &str) -> Option<(u16, Vec<u8>)> {
 
 fn install_tunnel_client() -> anyhow::Result<PathBuf> {
     let (os, arch) = target_asset_parts()?;
+    let paths = runtime_paths()?;
+    let executable_name = if cfg!(windows) {
+        "tunnel-client.exe"
+    } else {
+        "tunnel-client"
+    };
+    let cloudflared_name = if cfg!(windows) {
+        "cloudflared.exe"
+    } else {
+        "cloudflared"
+    };
+    if let Some(client) = find_cached_tunnel_client(&paths, executable_name, cloudflared_name) {
+        return Ok(client);
+    }
+
     let client = Client::builder()
         .user_agent(concat!("web2codex/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(90))
@@ -870,12 +998,6 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
             .starts_with("https://github.com/openai/tunnel-client/releases/download/"),
         "GitHub returned an unexpected tunnel-client download URL"
     );
-    let executable_name = if cfg!(windows) {
-        "tunnel-client.exe"
-    } else {
-        "tunnel-client"
-    };
-    let paths = runtime_paths()?;
     let install_directory = paths.directory.join("bin").join(&release.tag_name);
     let executable = install_directory.join(executable_name);
     let digest_path = install_directory.join(format!("{executable_name}.sha256"));
@@ -887,11 +1009,6 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
     }
     #[cfg(windows)]
     set_private_windows_acl(&install_directory, true)?;
-    let cloudflared_name = if cfg!(windows) {
-        "cloudflared.exe"
-    } else {
-        "cloudflared"
-    };
     let cloudflared = install_directory.join(cloudflared_name);
     let manifest = install_directory.join("cloudflared-manifest.json");
     if executable.is_file() {
@@ -1008,6 +1125,36 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
     Ok(executable)
 }
 
+fn find_cached_tunnel_client(
+    paths: &RuntimePaths,
+    executable_name: &str,
+    cloudflared_name: &str,
+) -> Option<PathBuf> {
+    let mut versions = fs::read_dir(paths.directory.join("bin"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .collect::<Vec<_>>();
+    versions.sort_by_key(|entry| {
+        entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    versions.reverse();
+
+    versions.into_iter().find_map(|entry| {
+        let directory = entry.path();
+        let client = directory.join(executable_name);
+        let cloudflared = directory.join(cloudflared_name);
+        let manifest = directory.join("cloudflared-manifest.json");
+        (verify_cached_tunnel_client(&client).is_ok()
+            && verify_cached_tunnel_client(&cloudflared).is_ok()
+            && verify_cached_tunnel_client(&manifest).is_ok())
+        .then_some(client)
+    })
+}
+
 fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let size = fs::metadata(path)
         .with_context(|| {
@@ -1106,5 +1253,113 @@ fn remove_obsolete_client_versions(paths: &RuntimePaths, current_client: &Path) 
         if path != current_directory && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             let _ = fs::remove_dir_all(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn test_runtime_paths(directory: &Path) -> RuntimePaths {
+        RuntimePaths {
+            directory: directory.to_path_buf(),
+            lock: directory.join("runtime.lock"),
+            profile: directory.join("profile.yaml"),
+            api_key: directory.join("runtime-api-key.tmp"),
+            pid: directory.join("tunnel-client.pid"),
+            process_start: directory.join("tunnel-client.start"),
+            signature: directory.join("runtime.signature"),
+            health_url: directory.join("health-url.txt"),
+            log_file: directory.join("tunnel-client.log"),
+        }
+    }
+
+    #[test]
+    fn tunnel_state_lock_serializes_concurrent_updates() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let directory = tempfile::tempdir().unwrap();
+        let lock_path = directory.path().join("runtime.lock");
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(4));
+        let workers = (0..4)
+            .map(|_| {
+                let lock_path = lock_path.clone();
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    with_runtime_lock(&lock_path, || {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(current, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(20));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn generated_tunnel_profile_preserves_nested_yaml_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = test_runtime_paths(directory.path());
+        let workspace = directory.path().join("workspace");
+        let executable = directory.path().join("web2codex");
+
+        write_profile(
+            &paths,
+            "tunnel_0123456789abcdef0123456789abcdef",
+            &paths.api_key,
+            &executable,
+            &workspace,
+        )
+        .unwrap();
+
+        let profile = fs::read_to_string(paths.profile).unwrap();
+        assert!(profile.contains(
+            "control_plane:\n  tunnel_id: \"tunnel_0123456789abcdef0123456789abcdef\"\n  api_key: \"file:"
+        ));
+        assert!(profile.contains("health:\n  listen_addr: \"127.0.0.1:0\"\n"));
+        assert!(profile.contains("mcp:\n  commands:\n    - channel: main\n      command: "));
+    }
+
+    #[test]
+    fn verified_cached_tunnel_client_is_available_without_release_lookup() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = test_runtime_paths(directory.path());
+        let version_directory = directory.path().join("bin/v0.0.21");
+        fs::create_dir_all(&version_directory).unwrap();
+
+        for (name, contents) in [
+            ("tunnel-client", b"cached client".as_slice()),
+            ("cloudflared", b"cached cloudflared".as_slice()),
+            ("cloudflared-manifest.json", b"cached manifest".as_slice()),
+        ] {
+            let executable = version_directory.join(name);
+            fs::write(&executable, contents).unwrap();
+            fs::write(
+                executable.with_file_name(format!("{name}.sha256")),
+                format!("{:x}", Sha256::digest(contents)),
+            )
+            .unwrap();
+        }
+
+        let cached = find_cached_tunnel_client(&paths, "tunnel-client", "cloudflared");
+        assert_eq!(cached, Some(version_directory.join("tunnel-client")));
+
+        fs::write(version_directory.join("cloudflared"), b"tampered").unwrap();
+        assert!(find_cached_tunnel_client(&paths, "tunnel-client", "cloudflared").is_none());
     }
 }

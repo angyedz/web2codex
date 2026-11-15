@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+#[cfg(target_os = "linux")]
+use tao::platform::unix::WindowExtUnix;
 use tao::window::{Window, WindowBuilder};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use uuid::Uuid;
 #[cfg(target_os = "macos")]
 use wry::WebViewBuilderExtDarwin;
@@ -31,6 +35,7 @@ use turn_broker::TurnBroker;
 
 const CHATGPT_SIGN_IN_URL: &str = "https://chatgpt.com/";
 const CHATGPT_TEMPORARY_CHAT_URL: &str = "https://chatgpt.com/?temporary-chat=true";
+const BROWSER_BRIDGE_PROTOCOL: u32 = 3;
 const STALE_LOCK_AGE: Duration = Duration::from_secs(30);
 const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
@@ -419,7 +424,7 @@ enum BrowserPage {
 }
 
 enum BrowserEvent {
-    Open(BrowserPage, SyncSender<Result<(), String>>),
+    Open(BrowserPage, Option<SyncSender<Result<(), String>>>),
     ContinueLogin(AccountTierChoice),
     AccountCapabilities(AccountCapabilities, bool),
     ResponsesBridgeReady(String),
@@ -442,7 +447,7 @@ enum BrowserEvent {
     },
     ReleaseResponses(String),
     Hide,
-    Stop(SyncSender<()>),
+    Stop(Option<SyncSender<()>>),
 }
 
 struct PendingResponsesRequest {
@@ -507,6 +512,8 @@ fn run_background() -> anyhow::Result<()> {
         .with_visible(false)
         .build(&event_loop)
         .context("failed to initialize the hidden Web2Codex window")?;
+    let tray_icon = create_tray_icon(event_loop.create_proxy())
+        .context("failed to create the Web2Codex tray icon; a system tray host is required")?;
 
     let lock_file = acquire_lock(&lock_path, &state_path)?;
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -514,7 +521,7 @@ fn run_background() -> anyhow::Result<()> {
     let state = BrowserState {
         address: listener.local_addr()?,
         token: Uuid::new_v4().to_string(),
-        bridge_protocol: 2,
+        bridge_protocol: BROWSER_BRIDGE_PROTOCOL,
     };
     write_state(&state_path, &state)?;
 
@@ -546,7 +553,84 @@ fn run_background() -> anyhow::Result<()> {
         state_path,
         lock_file,
         broker,
+        Some(tray_icon),
     )
+}
+
+fn create_tray_icon(proxy: EventLoopProxy<BrowserEvent>) -> anyhow::Result<TrayIcon> {
+    let open = MenuItem::with_id("web2codex.open", "Open ChatGPT", true, None);
+    let sign_in = MenuItem::with_id("web2codex.sign-in", "Sign in / switch account", true, None);
+    let separator = PredefinedMenuItem::separator();
+    let quit = MenuItem::with_id("web2codex.quit", "Quit Web2Codex", true, None);
+    let menu = Menu::with_items(&[&open, &sign_in, &separator, &quit])
+        .context("failed to create the Web2Codex tray menu")?;
+
+    let mut rgba = vec![0_u8; 16 * 16 * 4];
+    for y in 2..14 {
+        for x in 2..14 {
+            let offset = (y * 16 + x) * 4;
+            rgba[offset..offset + 4].copy_from_slice(&[76, 125, 255, 255]);
+        }
+    }
+    // A small white W remains legible in both light and dark system trays.
+    for (x, y) in [
+        (4, 5),
+        (4, 6),
+        (4, 7),
+        (4, 8),
+        (4, 9),
+        (5, 10),
+        (6, 9),
+        (7, 8),
+        (8, 9),
+        (9, 10),
+        (10, 9),
+        (11, 8),
+        (11, 7),
+        (11, 6),
+        (11, 5),
+    ] {
+        let offset = (y * 16 + x) * 4;
+        rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
+    }
+    let icon = Icon::from_rgba(rgba, 16, 16).context("failed to create the Web2Codex tray icon")?;
+    let tray_icon = TrayIconBuilder::new()
+        .with_tooltip("Web2Codex")
+        .with_icon(icon)
+        .with_menu(Box::new(menu))
+        .build()
+        .context("failed to register the Web2Codex system tray icon")?;
+
+    let open_id = open.id().clone();
+    let sign_in_id = sign_in.id().clone();
+    let quit_id = quit.id().clone();
+    let selected_account_tier_path = data_directory()?.join("selected-account-tier.json");
+    thread::Builder::new()
+        .name("codex-web-tray-menu".to_string())
+        .spawn(move || {
+            while let Ok(event) = MenuEvent::receiver().recv() {
+                let browser_event = if event.id == open_id {
+                    let page = if selected_account_tier_path.is_file() {
+                        BrowserPage::TemporaryChat
+                    } else {
+                        BrowserPage::AccountChooser
+                    };
+                    BrowserEvent::Open(page, None)
+                } else if event.id == sign_in_id {
+                    BrowserEvent::Open(BrowserPage::AccountChooser, None)
+                } else if event.id == quit_id {
+                    BrowserEvent::Stop(None)
+                } else {
+                    continue;
+                };
+                if proxy.send_event(browser_event).is_err() {
+                    break;
+                }
+            }
+        })
+        .context("failed to listen for Web2Codex tray menu actions")?;
+
+    Ok(tray_icon)
 }
 
 fn run_event_loop(
@@ -559,6 +643,7 @@ fn run_event_loop(
     state_path: PathBuf,
     lock_file: PathBuf,
     broker: Arc<TurnBroker>,
+    tray_icon: Option<TrayIcon>,
 ) -> ! {
     let window_id = window.id();
     let mut web_context: Option<WebContext> = None;
@@ -570,11 +655,17 @@ fn run_event_loop(
     let event_proxy = event_loop.create_proxy();
 
     event_loop.run(move |event, _, control_flow| {
+        let _tray_icon_must_live_for_the_event_loop = &tray_icon;
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(BrowserEvent::Open(page, reply)) => {
                 if let Err(error) = prepare_profile_directory(&profile_dir) {
-                    let _ = reply.send(Err(error.to_string())); return;
+                    if let Some(reply) = reply {
+                        let _ = reply.send(Err(error.to_string()));
+                    } else {
+                        eprintln!("Could not prepare the Web2Codex browser profile: {error:#}");
+                    }
+                    return;
                 }
                 // The picker snapshot belongs to the signed-in browser profile.
                 // Keep it when reopening a Temporary Chat so the CLI can supply
@@ -586,11 +677,18 @@ fn run_event_loop(
                 let context = web_context.get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
                 match build_webview(&window, context, page, event_proxy.clone(), None) {
                     Ok(created) => { webview = Some(created); browser_page = Some(page); }
-                    Err(error) => { let _ = reply.send(Err(error.to_string())); return; }
+                    Err(error) => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err(format!("{error:#}")));
+                        } else {
+                            eprintln!("Could not open the Web2Codex browser: {error:#}");
+                        }
+                        return;
+                    }
                 }
                 window.set_visible(true);
                 window.set_focus();
-                let _ = reply.send(Ok(()));
+                if let Some(reply) = reply { let _ = reply.send(Ok(())); }
             }
             Event::UserEvent(BrowserEvent::ContinueLogin(tier)) => {
                 if browser_page != Some(BrowserPage::AccountChooser) { return; }
@@ -681,7 +779,7 @@ fn run_event_loop(
                 response_views.clear();
                 pending_responses.clear();
                 remove_runtime_files(&state_path, &lock_file);
-                let _ = reply.send(());
+                if let Some(reply) = reply { let _ = reply.send(()); }
                 *control_flow = ControlFlow::Exit;
             }
             Event::WindowEvent { window_id: event_window_id, event: WindowEvent::CloseRequested, .. } if event_window_id == window_id => {
@@ -910,7 +1008,20 @@ fn build_webview(
         BrowserPage::AccountChooser => builder.with_html(ACCOUNT_CHOOSER_HTML),
     };
 
-    builder.build(window).context(WEBVIEW_CREATION_CONTEXT)
+    #[cfg(target_os = "linux")]
+    {
+        use wry::WebViewBuilderExtUnix;
+        let container = window
+            .default_vbox()
+            .context("Tao did not provide a default GTK container for WebKitGTK")?;
+        builder
+            .build_gtk(container)
+            .context(WEBVIEW_CREATION_CONTEXT)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        builder.build(window).context(WEBVIEW_CREATION_CONTEXT)
+    }
 }
 
 fn store_account_tier(path: &Path, tier: AccountTierChoice) -> anyhow::Result<()> {
@@ -1117,7 +1228,7 @@ fn handle_control_request(
                 BrowserPage::TemporaryChat
             };
             if event_proxy
-                .send_event(BrowserEvent::Open(page, reply))
+                .send_event(BrowserEvent::Open(page, Some(reply)))
                 .is_err()
             {
                 let _ = write_response(&mut stream, "503 Service Unavailable", "browser stopped");
@@ -1145,7 +1256,10 @@ fn handle_control_request(
         }
         ("POST", "/stop") => {
             let (reply, stopped) = mpsc::sync_channel(1);
-            if event_proxy.send_event(BrowserEvent::Stop(reply)).is_err() {
+            if event_proxy
+                .send_event(BrowserEvent::Stop(Some(reply)))
+                .is_err()
+            {
                 let _ = write_response(&mut stream, "503 Service Unavailable", "browser stopped");
                 return;
             }

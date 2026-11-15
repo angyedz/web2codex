@@ -65,6 +65,34 @@ pub struct LoaderOverrides {
 }
 
 impl LoaderOverrides {
+    /// Prevent a Web2Codex process from inheriting host Codex configuration.
+    ///
+    /// Web2Codex has its own CODEX_HOME, but the normal loader also reads
+    /// system-wide config, managed requirements, cloud policy, and (on macOS)
+    /// MDM preferences. Point those sources at absent files under the isolated
+    /// home and disable managed requirements while preserving explicit
+    /// Web2Codex user/profile overrides.
+    pub fn isolate_web2codex_host_sources(&mut self, codex_home: &Path) {
+        let isolation_root = codex_home.join(".web2codex-host-sources-disabled");
+        self.packaged_defaults_path = None;
+        self.system_config_path = Some(isolation_root.join("system-config.toml"));
+        self.system_requirements_path = Some(isolation_root.join("system-requirements.toml"));
+        self.managed_config_path = Some(isolation_root.join("managed-config.toml"));
+        self.ignore_managed_requirements = true;
+        #[cfg(target_os = "macos")]
+        {
+            self.managed_preferences_base64 = Some(String::new());
+        }
+        self.macos_managed_config_requirements_base64 = Some(String::new());
+    }
+
+    /// Apply host-source isolation only in the standalone Web2Codex process.
+    pub fn isolate_web2codex_host_sources_from_environment(&mut self) {
+        if let Some(home) = std::env::var_os("WEB2CODEX_HOME") {
+            self.isolate_web2codex_host_sources(Path::new(&home));
+        }
+    }
+
     /// Returns overrides that ignore host-managed configuration.
     ///
     /// This is intended for tests that should load only repo-controlled config fixtures.

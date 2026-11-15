@@ -429,9 +429,9 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(test)]
 use codex_utils_stream_parser::ProposedPlanSegment;
 
-/// Keep Web2Codex approval waits below its 90-second MCP call deadline so a late
-/// approval cannot execute after the connector has already timed out.
-pub(crate) const WEB2CODEX_APPROVAL_TIMEOUT: Duration = Duration::from_secs(80);
+/// Let Web2Codex approvals wait longer than ordinary short MCP calls while
+/// expiring them before the broker's 30-minute native-call deadline.
+pub(crate) const WEB2CODEX_APPROVAL_TIMEOUT: Duration = Duration::from_secs(25 * 60);
 
 /// Whether reported usage updates the installed context baseline or only spending.
 #[derive(Clone, Copy)]

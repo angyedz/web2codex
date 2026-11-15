@@ -26,7 +26,9 @@ pub(crate) fn run(_workspace: PathBuf) -> anyhow::Result<()> {
             client: reqwest::Client::builder()
                 .no_proxy()
                 .connect_timeout(Duration::from_secs(2))
-                .timeout(Duration::from_secs(95))
+                // Match the browser's 30-minute inference/tool-call deadline;
+                // a shorter HTTP timeout can strand a pending Codex approval.
+                .timeout(Duration::from_secs(30 * 60 + 10))
                 .build()?,
         }
         .serve(rmcp::transport::stdio())
@@ -119,9 +121,13 @@ impl WebMcpServer {
         if path == "/bridge/tools" {
             Ok(CallToolResult::structured(body))
         } else {
-            serde_json::from_value(body).context("Invalid native Codex tool result")
+            decode_native_tool_result(body)
         }
     }
+}
+
+fn decode_native_tool_result(body: Value) -> anyhow::Result<CallToolResult> {
+    serde_json::from_value(body).context("Invalid native Codex tool result")
 }
 
 fn connector_tools() -> Vec<Tool> {
@@ -169,4 +175,55 @@ fn connector_tools() -> Vec<Tool> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_tool_results_keep_typed_resources_and_structured_content() {
+        let resource = json!({
+            "type":"resource",
+            "resource":{"uri":"file:///workspace/notes.md","mimeType":"text/markdown","text":"RESOURCE_BODY"}
+        });
+        let resource_link = json!({
+            "type":"resource_link",
+            "name":"design notes",
+            "uri":"web2codex://workspace/design-notes",
+            "description":"RESOURCE_LINK_DESCRIPTION",
+            "mimeType":"text/markdown"
+        });
+        let decoded = decode_native_tool_result(json!({
+            "content":[resource, resource_link],
+            "structuredContent":{"marker":"STRUCTURED_BODY"},
+            "isError":false,
+            "_meta":{"trace":"TRACE_ID"}
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(decoded).unwrap();
+
+        assert_eq!(encoded["content"][0]["type"], "resource");
+        assert_eq!(encoded["content"][0]["resource"]["text"], "RESOURCE_BODY");
+        assert_eq!(encoded["content"][1]["type"], "resource_link");
+        assert_eq!(
+            encoded["content"][1]["uri"],
+            "web2codex://workspace/design-notes"
+        );
+        assert_eq!(encoded["structuredContent"]["marker"], "STRUCTURED_BODY");
+        assert_eq!(encoded["_meta"]["trace"], "TRACE_ID");
+    }
+
+    #[test]
+    fn native_tool_result_rejects_unknown_content_types_without_dropping_them() {
+        let error = decode_native_tool_result(json!({
+            "content":[{"type":"unknown_extension","payload":"KEEP_ME"}]
+        }))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid native Codex tool result")
+        );
+    }
 }

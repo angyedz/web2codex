@@ -173,6 +173,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+fd-lock = "4.0.4"
 # Internal
 codex-realtime-webrtc = { path = "realtime-webrtc" }
 app_test_support = { path = "app-server/tests/common" }

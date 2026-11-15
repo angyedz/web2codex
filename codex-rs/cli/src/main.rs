@@ -924,9 +924,6 @@ fn main() -> anyhow::Result<()> {
         // Finish polling the large subcommand dispatcher before polling interactive TUI events.
         if let Some(tui) = Box::pin(dispatch_cli(arg0_paths)).await? {
             let result = tui.await;
-            if let Err(error) = web_browser::stop_after_interactive() {
-                eprintln!("Could not stop the Web2Codex browser after the chat ended: {error:#}");
-            }
             result?;
         }
         Ok(())

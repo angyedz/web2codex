@@ -28,7 +28,7 @@ For the local bridge, failed native tool results carry a private transport marke
 
 Inline PNG, JPEG, WebP, and GIF images plus WAV, MP3, M4A, AAC, OGG, WebM, and FLAC audio in user messages are attached to the ChatGPT composer. Media returned by native MCP tools is attached to the next Temporary Chat as well. Opaque `file_id` references are rejected with an explicit error when their local bytes are unavailable; the bridge does not try an API or remote file endpoint to resolve them. The built-in Codex attachment store keeps user uploads inline. The entire request is limited to 32 MiB, and remote media URLs are rejected. The browser waits for attachment cards before sending the prompt. Whether ChatGPT accepts a given audio format depends on its current Web upload support and has not yet been verified in a signed-in session.
 
-The local Responses adapter accepts `tool_choice` values `auto`, `none`, and `required`, plus named `function` or `custom` tools. `none` exposes no callable tools, `required` fails the response if ChatGPT finishes without a connector call, and a named choice limits MCP discovery to that tool. Schemas remain in MCP discovery and are never added to the prompt.
+The local Responses adapter accepts `tool_choice` values `auto`, `none`, and `required`, plus named `function` or `custom` tools. `none` exposes no callable tools, `required` fails the response if ChatGPT finishes without a connector call, and a named choice limits discovery to that tool and fails if it is not called. Schemas remain in MCP discovery and are never added to the prompt.
 
 The native catalog enables Codex terminal sessions and freeform patches because the bridge implements those call types. This describes harness functionality; it does not infer ChatGPT account entitlements from a model label.
 
@@ -38,9 +38,11 @@ The local socket listens on loopback and requires a random bearer credential fro
 
 A disconnected Responses observer retires its turn and releases the browser. A cancelled or expired MCP invocation fails the turn and wakes its waiters. Late tool results cannot create a replacement chat. Provider retries are disabled to avoid silently submitting a second prompt after a transport failure.
 
-MCP calls settle within 90 seconds, ahead of the tunnel transport deadline used by the reference project. Web2Codex native command and patch approvals abort after 80 seconds; the pending approval is removed from Codex's router so a later click cannot run the timed-out operation. Long commands should return a session and be polled in separate calls; command polls are bounded to 60 seconds and agent polls to 30 seconds. A timeout is reported without repeating the operation.
+The native MCP call wait is 30 minutes and the Tunnel HTTP wait is slightly longer. Native command and patch approvals wait up to 25 minutes; if one expires, Codex removes it from the router so a later click cannot run the timed-out operation. A late native result cannot resume a retired turn. Long commands should return a session and be polled in separate calls; command polls are bounded to 60 seconds and agent polls to 30 seconds. A timeout is reported without repeating the operation.
 
-Explicit `web hide` and closing the user-facing browser hide that window while active hidden turns continue. `web stop` cancels all turns. Browser state protocol version 2 replaces the previous text-marker bridge on the next launch. The tunnel runtime signature changes with the executable so an older connector host is restarted after an update.
+Explicit `web hide` and closing the user-facing browser hide that window while active hidden turns continue. The tray menu reopens ChatGPT or switches accounts; the browser remains available after the interactive harness exits until the user quits it from the tray or runs `web stop`. Startup fails visibly through the CLI if the system tray cannot be created, preventing a hidden controller with no way to reopen it. Browser state protocol version 3 restarts older background WebViews on the next harness launch so tray behavior and bridge changes take effect. The tunnel runtime signature changes with the executable so an older connector host is restarted after an update. Tunnel start and stop share an interprocess lock while updating runtime state.
+
+Web2Codex ignores host-wide Codex config, managed settings, MDM requirements, and cloud policy. It loads its own user config and `.web2codex` project config under its isolated `CODEX_HOME`.
 
 ## Local verification
 

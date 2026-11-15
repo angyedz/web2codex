@@ -14,7 +14,10 @@ use crate::{
 
 const MAX_TURNS: usize = 16;
 const MAX_PENDING_CALLS: usize = 32;
-const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(90);
+// A native tool can sit in Codex's user approval UI for several minutes. Keep
+// the MCP call alive longer than the 25-minute approval wait so a late-enough
+// approval still resumes the original ChatGPT turn.
+const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const COMPLETION_QUIET_PERIOD: Duration = Duration::from_secs(2);
 
 pub(crate) struct TurnBroker {
@@ -472,7 +475,11 @@ impl TurnBroker {
                 self.changed.notify_all();
                 return true;
             }
-            if turn.tool_choice == ToolChoice::Required && turn.completed_tools == 0 {
+            if matches!(
+                &turn.tool_choice,
+                ToolChoice::Required | ToolChoice::Named { .. }
+            ) && turn.completed_tools == 0
+            {
                 turn.result = Some(Err(
                     "tool_choice required a Web2Codex connector call, but ChatGPT answered without invoking one".into(),
                 ));
@@ -839,6 +846,34 @@ mod tests {
             turn.revision
         };
         assert!(broker.complete("required-turn", Some(revision), Ok("answer".into())));
+        assert!(matches!(
+            broker.next_event(&token),
+            Err(message) if message.contains("required")
+        ));
+    }
+
+    #[test]
+    fn named_tool_choice_rejects_a_final_answer_without_a_connector_call() {
+        let broker = TurnBroker::default();
+        let token = broker
+            .begin(
+                "named-required-turn".into(),
+                registry(),
+                ToolChoice::Named {
+                    kind: CallableToolKind::Function,
+                    namespace: "functions".into(),
+                    name: "exec_command".into(),
+                },
+            )
+            .unwrap();
+        broker.begin_response(&token).unwrap();
+        let revision = {
+            let mut state = broker.state.lock().unwrap();
+            let turn = state.turns.get_mut(&token).unwrap();
+            turn.last_activity = Instant::now() - COMPLETION_QUIET_PERIOD;
+            turn.revision
+        };
+        assert!(broker.complete("named-required-turn", Some(revision), Ok("answer".into())));
         assert!(matches!(
             broker.next_event(&token),
             Err(message) if message.contains("required")

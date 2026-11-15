@@ -43,6 +43,9 @@ pub async fn load_local_application_requirements(
     fs: &dyn ExecutorFileSystem,
     overrides: &LoaderOverrides,
 ) -> io::Result<LocalApplicationRequirements> {
+    let mut isolated_overrides = overrides.clone();
+    isolated_overrides.isolate_web2codex_host_sources_from_environment();
+    let overrides = &isolated_overrides;
     if overrides.ignore_managed_requirements {
         return Ok(LocalApplicationRequirements {
             ignore_managed: true,

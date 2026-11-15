@@ -8,6 +8,37 @@ fn test_user_config_path(temp_dir: &TempDir, file_name: &str) -> AbsolutePathBuf
 }
 
 #[test]
+fn web2codex_loader_overrides_isolate_host_sources_but_keep_user_profile() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let user_config = test_user_config_path(&temp_dir, "profile.toml");
+    let mut overrides = LoaderOverrides {
+        packaged_defaults_path: Some(test_user_config_path(&temp_dir, "host-defaults.toml")),
+        user_config_path: Some(user_config.clone()),
+        ignore_managed_requirements: false,
+        ..LoaderOverrides::default()
+    };
+
+    overrides.isolate_web2codex_host_sources(temp_dir.path());
+
+    assert!(overrides.packaged_defaults_path.is_none());
+    assert!(overrides.ignore_managed_requirements);
+    assert_eq!(overrides.user_config_path, Some(user_config));
+    let isolation_root = temp_dir.path().join(".web2codex-host-sources-disabled");
+    assert_eq!(
+        overrides.system_config_path.as_deref(),
+        Some(isolation_root.join("system-config.toml").as_path())
+    );
+    assert_eq!(
+        overrides.system_requirements_path.as_deref(),
+        Some(isolation_root.join("system-requirements.toml").as_path())
+    );
+    assert_eq!(
+        overrides.managed_config_path.as_deref(),
+        Some(isolation_root.join("managed-config.toml").as_path())
+    );
+}
+
+#[test]
 fn origins_use_canonical_key_aliases() {
     let layer = ConfigLayerEntry::new(
         ConfigLayerSource::SessionFlags,

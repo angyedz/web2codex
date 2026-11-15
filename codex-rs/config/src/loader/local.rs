@@ -98,7 +98,9 @@ pub async fn load_local_config_layers(
     codex_home: &Path,
     cwd: &AbsolutePathBuf,
 ) -> io::Result<LocalConfigLayers> {
-    load_local_config_layers_with_overrides(fs, codex_home, cwd, &LoaderOverrides::default()).await
+    let mut overrides = LoaderOverrides::default();
+    overrides.isolate_web2codex_host_sources_from_environment();
+    load_local_config_layers_with_overrides(fs, codex_home, cwd, &overrides).await
 }
 
 pub(super) async fn load_local_config_layers_with_overrides(
@@ -107,6 +109,11 @@ pub(super) async fn load_local_config_layers_with_overrides(
     cwd: &AbsolutePathBuf,
     overrides: &LoaderOverrides,
 ) -> io::Result<LocalConfigLayers> {
+    let mut isolated_overrides = overrides.clone();
+    if std::env::var_os("WEB2CODEX_HOME").is_some() {
+        isolated_overrides.isolate_web2codex_host_sources(codex_home);
+    }
+    let overrides = &isolated_overrides;
     let codex_home = AbsolutePathBuf::from_absolute_path(codex_home)?;
     let loaded_managed = layer_io::load_config_layers_internal(
         fs,

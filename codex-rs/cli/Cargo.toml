@@ -29,6 +29,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+fd-lock = { workspace = true }
 codex-utils-process = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }

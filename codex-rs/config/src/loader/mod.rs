@@ -153,10 +153,13 @@ pub async fn load_config_layers_state(
     thread_config_loader: &dyn ThreadConfigLoader,
 ) -> io::Result<ConfigLayerStack> {
     let ConfigLoadOptions {
-        loader_overrides: overrides,
+        loader_overrides: mut overrides,
         strict_config,
         cloud_config_bundle,
     } = options.into();
+    if std::env::var_os("WEB2CODEX_HOME").is_some() {
+        overrides.isolate_web2codex_host_sources(codex_home);
+    }
     let packaged_defaults_layer = if let Some(file) = &overrides.packaged_defaults_path {
         let config = layer_io::read_config_from_path(
             fs,
@@ -1172,7 +1175,11 @@ impl ProjectTrustContext {
         }
 
         let relative_dir = dir.as_path().strip_prefix(checkout_root.as_path()).ok()?;
-        Some(repo_root.join(relative_dir).join(project_config_directory_name()))
+        Some(
+            repo_root
+                .join(relative_dir)
+                .join(project_config_directory_name()),
+        )
     }
 }
 

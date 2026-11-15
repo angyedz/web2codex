@@ -13,12 +13,11 @@ use clap::Args;
 use clap::Subcommand;
 use codex_core::config::find_codex_home;
 use codex_secrets::{SecretName, SecretScope, SecretsBackendKind, SecretsManager};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal;
 use serde::Deserialize;
 
 const TUNNEL_API_KEY_NAME: &str = "OPENAI_TUNNEL_API_KEY";
 const TUNNEL_ID_NAME: &str = "OPENAI_TUNNEL_ID";
+const BROWSER_BRIDGE_PROTOCOL: u32 = 3;
 
 #[derive(Debug, Args)]
 pub(crate) struct WebCommand {
@@ -154,42 +153,24 @@ pub(crate) fn interactive_provider_overrides(cwd: Option<&Path>) -> anyhow::Resu
     ])
 }
 
-/// Stop the independent WebView process when its owning interactive harness exits.
-/// The signed-in profile remains on disk, so the next launch can restore the
-/// Temporary Chat without leaving a browser process consuming memory.
-pub(crate) fn stop_after_interactive() -> anyhow::Result<()> {
-    match send_control(ControlAction::Stop) {
-        Ok(()) => Ok(()),
-        Err(error) if error.to_string().contains("state is missing") => Ok(()),
-        Err(error) => Err(error).context("failed to stop the Web2Codex browser"),
-    }
-}
-
-/// Open the private ChatGPT window before the interactive TUI loads its model catalog.
-/// On a first run this shows the account chooser; on later runs it opens a Temporary Chat.
-/// Waiting here lets a user finish sign-in before the TUI asks the local provider for models.
+/// Start the private ChatGPT WebView hidden. The user can open it from the tray
+/// when sign-in is needed; ordinary harness startup never steals focus.
 pub(crate) fn prepare_interactive_launch() -> anyhow::Result<()> {
     configure_tunnel_on_first_launch()?;
     let capabilities_path = data_directory()?.join("account-capabilities.json");
     let has_cached_models = read_account_capabilities(&capabilities_path)
         .is_some_and(|capabilities| !capabilities.picker_options.is_empty());
     ensure_browser_started()?;
-    send_control(if has_saved_account_choice() {
-        ControlAction::Open
-    } else {
-        ControlAction::Login
-    })?;
 
     // A previously authenticated profile already has a usable model catalog.
-    // Reopening its Temporary Chat must not block startup while the background
-    // probe refreshes the same list.
+    // Keep the browser hidden while the background probe refreshes the same list.
     if has_cached_models {
         return Ok(());
     }
 
     let deadline = Instant::now() + Duration::from_secs(5 * 60);
     eprintln!(
-        "Waiting for ChatGPT Web models. Sign in in the Web2Codex window; press Ctrl+C to cancel."
+        "Waiting for ChatGPT Web models. Open Web2Codex from the system tray to sign in; press Ctrl+C to cancel."
     );
     while Instant::now() < deadline {
         if read_account_capabilities(&capabilities_path)
@@ -206,7 +187,7 @@ pub(crate) fn prepare_interactive_launch() -> anyhow::Result<()> {
     }
 
     anyhow::bail!(
-        "No ChatGPT Web models were detected after five minutes. Finish signing in and check `web2codex web models`, then run `web2codex` again."
+        "No ChatGPT Web models were detected after five minutes. Open Web2Codex from the system tray, finish signing in, check `web2codex web models`, then run `web2codex` again."
     );
 }
 
@@ -388,8 +369,9 @@ fn configure_tunnel_credentials() -> anyhow::Result<()> {
         is_valid_tunnel_id(&tunnel_id),
         "invalid tunnel ID; expected tunnel_<32 lowercase letters or digits> or tunnel_<4-character namespace>_<32 lowercase letters or digits>"
     );
-    let api_key =
-        prompt_hidden("OpenAI tunnel runtime API key (Tunnels Read + Use, not an admin key): ")?;
+    let api_key = prompt_visible(
+        "OpenAI tunnel runtime API key (visible input; Tunnels Read + Use, not an admin key): ",
+    )?;
     let (manager, scope, api_key_name, tunnel_id_name) = tunnel_secrets()?;
     let previous_tunnel_id = manager.get(&scope, &tunnel_id_name)?;
     manager
@@ -466,51 +448,20 @@ fn prompt_line(prompt: &str) -> anyhow::Result<String> {
     Ok(value.trim().to_string())
 }
 
-fn prompt_hidden(prompt: &str) -> anyhow::Result<String> {
+fn prompt_visible(prompt: &str) -> anyhow::Result<String> {
     anyhow::ensure!(
         std::io::stdin().is_terminal(),
         "tunnel setup requires an interactive terminal"
     );
     print!("{prompt}");
     std::io::stdout().flush()?;
-    terminal::enable_raw_mode().context("failed to disable terminal echo for the API key")?;
-    let _raw_mode = RawTerminalMode;
     let mut value = String::new();
-    loop {
-        match event::read()? {
-            Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
-                KeyCode::Enter => break,
-                KeyCode::Esc => anyhow::bail!("tunnel setup cancelled"),
-                KeyCode::Backspace => {
-                    value.pop();
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    anyhow::bail!("tunnel setup cancelled")
-                }
-                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    value.push(character);
-                }
-                _ => {}
-            },
-            Event::Paste(pasted) => value.push_str(&pasted),
-            _ => {}
-        }
-    }
-    drop(_raw_mode);
-    println!();
+    std::io::stdin().read_line(&mut value)?;
     anyhow::ensure!(
         !value.trim().is_empty() && !value.chars().any(char::is_whitespace),
         "API key must be a non-empty value without whitespace"
     );
     Ok(value.trim().to_string())
-}
-
-struct RawTerminalMode;
-
-impl Drop for RawTerminalMode {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
-    }
 }
 
 fn has_saved_account_choice() -> bool {
@@ -522,7 +473,7 @@ fn has_saved_account_choice() -> bool {
 fn ensure_browser_started() -> anyhow::Result<()> {
     if send_control(ControlAction::Status).is_ok() {
         let state = read_state()?;
-        if state.bridge_protocol == 2 {
+        if state.bridge_protocol == BROWSER_BRIDGE_PROTOCOL {
             return Ok(());
         }
         // Old browser builds wrote state without a protocol version. Ask the
@@ -578,6 +529,11 @@ fn ensure_browser_started() -> anyhow::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    #[cfg(target_os = "linux")]
+    process.env(
+        "WEBKIT_DISABLE_DMABUF_RENDERER",
+        std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").unwrap_or_else(|| "1".into()),
+    );
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -597,14 +553,14 @@ fn ensure_browser_started() -> anyhow::Result<()> {
         }
         if let Some(status) = child.try_wait()? {
             anyhow::bail!(
-                "Web2Codex browser exited during startup with {status}; check that a graphical session and the required native WebView runtime are available"
+                "Web2Codex browser exited during startup with {status}; check that a graphical session, native WebView runtime, and system tray host are available"
             );
         }
     }
     let _ = child.kill();
     let status = child.wait().ok();
     anyhow::bail!(
-        "Web2Codex browser did not start{}; check that a graphical session and the required native WebView runtime are available",
+        "Web2Codex browser did not start{}; check that a graphical session, native WebView runtime, and system tray host are available",
         status.map_or_else(String::new, |status| format!(" ({status})")),
     )
 }
@@ -656,7 +612,9 @@ fn read_state() -> anyhow::Result<BrowserState> {
 pub(crate) fn bridge_credentials() -> anyhow::Result<(SocketAddr, String)> {
     let state = read_state()?;
     anyhow::ensure!(
-        state.address.ip().is_loopback() && !state.token.is_empty() && state.bridge_protocol == 2,
+        state.address.ip().is_loopback()
+            && !state.token.is_empty()
+            && state.bridge_protocol == BROWSER_BRIDGE_PROTOCOL,
         "Invalid local Web2Codex bridge state"
     );
     Ok((state.address, state.token))

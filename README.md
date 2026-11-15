@@ -43,7 +43,7 @@ web2codex
 
 Web2Codex keeps its settings, sessions, browser profile, and installer releases in its own data directories (`~/.web2codex` and `~/.local/share/web2codex/browser` on Linux; `~/Library/Application Support/Web2Codex/Browser` on macOS; `%USERPROFILE%\.web2codex` and `%LOCALAPPDATA%\Web2Codex\Browser` on Windows). Set `WEB2CODEX_HOME` or `WEB2CODEX_WEB_DATA_DIR` to choose custom directories.
 
-Starting `web2codex` offers first-run OpenAI Tunnel setup, then opens the private ChatGPT window. On first use, choose Free/Go, Plus, or Pro and sign in; the terminal waits up to five minutes for the model picker to load before opening the harness. The browser does not launch at computer startup and closes when the interactive session exits. Model requests use this Web session; Web2Codex does not use API keys or OAuth for inference. To update an installed release, run `web2codex update`.
+Starting `web2codex` offers first-run OpenAI Tunnel setup and starts the private ChatGPT browser hidden. Open it from the system tray when you need to sign in or switch accounts; closing its window hides it again. On first use, choose Free/Go, Plus, or Pro and sign in; the terminal waits up to five minutes for the model picker to load before opening the harness. The browser stays available in the tray after the interactive session exits and does not launch at computer startup. Model requests use this Web session; Web2Codex does not use API keys or OAuth for inference. To update an installed release, run `web2codex update`.
 
 ## ChatGPT Web
 
@@ -55,7 +55,7 @@ web2codex web login           # Show the Free/Go, Plus, and Pro account choices
 web2codex web open            # Open ChatGPT in the private window
 web2codex web models          # Show the last observed ChatGPT Web model picker
 web2codex web status          # Check the background controller
-web2codex web hide            # Hide the window; keep the controller available
+web2codex web hide            # Hide the window; keep the browser available in the tray
 web2codex web stop            # Stop the controller
 ```
 
@@ -67,7 +67,7 @@ The chooser records the account type you selected, but does not verify your subs
 
 `/context` shows the current context profile. Use `/context stable`, `/context expanded`, or `/context unstable` to set the context window for all detected web models to 200k, 270k, or 400k tokens. Automatic compaction starts around 90% based on Codex's local history estimate; ChatGPT Web does not expose exact token counts, so the threshold is approximate.
 
-The WebView is required for model requests. `web hide` hides its window while keeping the controller available. `web stop` stops the controller; the next `web2codex` launch starts it again. The WebView does not launch at computer startup.
+The WebView is required for model requests. Closing its window or running `web hide` hides it while keeping the browser available in the system tray. The tray menu can open ChatGPT, switch accounts, or quit the browser. `web stop` also stops it; the next `web2codex` launch starts it again. The WebView does not launch at computer startup.
 
 ### Browser requirements
 
