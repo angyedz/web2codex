@@ -8,17 +8,25 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::{BridgeCompletion, CallableTool, CallableToolKind, response_item_for_completion};
+use crate::{
+    BridgeCompletion, CallableTool, CallableToolKind, ToolChoice, response_item_for_completion,
+};
 
 const MAX_TURNS: usize = 16;
 const MAX_PENDING_CALLS: usize = 32;
 const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(90);
 const COMPLETION_QUIET_PERIOD: Duration = Duration::from_secs(2);
 
-#[derive(Default)]
 pub(crate) struct TurnBroker {
     state: Mutex<State>,
     changed: Condvar,
+    mcp_call_timeout: Duration,
+}
+
+impl Default for TurnBroker {
+    fn default() -> Self {
+        Self::with_mcp_call_timeout(MCP_CALL_TIMEOUT)
+    }
 }
 
 #[derive(Default)]
@@ -29,6 +37,7 @@ struct State {
 struct Turn {
     request_id: String,
     tools: Vec<CallableTool>,
+    tool_choice: ToolChoice,
     queue: VecDeque<String>,
     calls: HashMap<String, Invocation>,
     result: Option<Result<String, String>>,
@@ -54,10 +63,19 @@ pub(crate) struct NativeEvent {
 }
 
 impl TurnBroker {
+    fn with_mcp_call_timeout(mcp_call_timeout: Duration) -> Self {
+        Self {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+            mcp_call_timeout,
+        }
+    }
+
     pub(crate) fn begin(
         &self,
         request_id: String,
         tools: Vec<CallableTool>,
+        tool_choice: ToolChoice,
     ) -> Result<String, String> {
         let mut state = self
             .state
@@ -77,6 +95,7 @@ impl TurnBroker {
             Turn {
                 request_id,
                 tools,
+                tool_choice,
                 queue: VecDeque::new(),
                 calls: HashMap::new(),
                 result: None,
@@ -217,10 +236,11 @@ impl TurnBroker {
             .tools
             .iter()
             .filter(|tool| {
-                query.is_empty()
-                    || format!("{} {}", wire_name(tool), tool.declaration)
-                        .to_lowercase()
-                        .contains(&query)
+                tool_is_available(&turn.tool_choice, tool)
+                    && (query.is_empty()
+                        || format!("{} {}", wire_name(tool), tool.declaration)
+                            .to_lowercase()
+                            .contains(&query))
             })
             .collect::<Vec<_>>();
         let tools = matching
@@ -242,6 +262,7 @@ impl TurnBroker {
             "total": matching.len(),
             "next_offset": (offset + tools.len() < matching.len()).then_some(offset + tools.len()),
             "discovery_tools": turn.tools.iter().filter(|tool| tool.kind == CallableToolKind::ToolSearch)
+                .filter(|tool| tool_is_available(&turn.tool_choice, tool))
                 .map(|tool| {
                     let mut declaration = tool.declaration.clone();
                     declaration["wire_name"] = json!(wire_name(tool));
@@ -271,7 +292,9 @@ impl TurnBroker {
         if turn.calls.len() >= MAX_PENDING_CALLS {
             return Err("Too many pending tools in this turn".into());
         }
-        let tool = turn.tools.iter().find(|tool| wire_name(tool) == name)
+        let tool = turn.tools.iter().find(|tool| {
+            wire_name(tool) == name && tool_is_available(&turn.tool_choice, tool)
+        })
             .ok_or_else(|| format!("Tool is not available in this turn: {name}. Discover tools through the MCP inventory."))?;
         let completion = completion_for_call(tool, request)?;
         let call_id = format!("call_{}", Uuid::new_v4().simple());
@@ -289,7 +312,7 @@ impl TurnBroker {
         turn.revision += 1;
         turn.last_activity = Instant::now();
         self.changed.notify_all();
-        let deadline = Instant::now() + MCP_CALL_TIMEOUT;
+        let deadline = Instant::now() + self.mcp_call_timeout;
         loop {
             let turn = state
                 .turns
@@ -449,6 +472,14 @@ impl TurnBroker {
                 self.changed.notify_all();
                 return true;
             }
+            if turn.tool_choice == ToolChoice::Required && turn.completed_tools == 0 {
+                turn.result = Some(Err(
+                    "tool_choice required a Web2Codex connector call, but ChatGPT answered without invoking one".into(),
+                ));
+                turn.last_activity = Instant::now();
+                self.changed.notify_all();
+                return true;
+            }
             turn.text = text.clone();
         }
         turn.result = Some(result);
@@ -480,6 +511,18 @@ impl TurnBroker {
 
 fn wire_name(tool: &CallableTool) -> String {
     format!("{}.{}", tool.namespace, tool.name)
+}
+
+fn tool_is_available(choice: &ToolChoice, tool: &CallableTool) -> bool {
+    match choice {
+        ToolChoice::Auto | ToolChoice::Required => true,
+        ToolChoice::None => false,
+        ToolChoice::Named {
+            kind,
+            namespace,
+            name,
+        } => tool.kind == *kind && tool.namespace == *namespace && tool.name == *name,
+    }
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -589,6 +632,7 @@ fn mcp_tool_result(output: Value) -> Value {
                         content.push(json!({"type": if mime.starts_with("audio/") {"audio"} else {"image"}, "mimeType": mime, "data": data}));
                     } else { content.push(json!({"type":"text", "text": format!("Media result: {part}")})); }
                 }
+                Some("resource" | "resource_link") => content.push(part.clone()),
                 _ => content.push(json!({"type":"text", "text": part.to_string()})),
             }
         }
@@ -648,7 +692,7 @@ mod tests {
         ])))
         .unwrap();
         let token = broker
-            .begin("external-mcp-turn".into(), tools.clone())
+            .begin("external-mcp-turn".into(), tools.clone(), ToolChoice::Auto)
             .unwrap();
         let pending = invocation(
             &broker,
@@ -695,6 +739,146 @@ mod tests {
         );
     }
 
+    #[test]
+    fn connector_preserves_typed_resource_results() {
+        let resource = json!({
+            "type":"resource",
+            "resource":{"uri":"file:///workspace/README.md","mimeType":"text/markdown","text":"# Project docs"}
+        });
+        let link = json!({
+            "type":"resource_link",
+            "name":"architecture",
+            "uri":"web2codex://workspace/architecture",
+            "description":"Current architecture notes",
+            "mimeType":"text/markdown"
+        });
+        let result = mcp_tool_result(json!([resource.clone(), link.clone()]));
+        assert_eq!(result["content"], json!([resource, link]));
+        assert_eq!(result["isError"], false);
+    }
+
+    #[test]
+    fn an_approval_timeout_fences_a_late_native_result() {
+        let broker = Arc::new(TurnBroker::with_mcp_call_timeout(Duration::from_millis(25)));
+        let tools = crate::parse_callable_tools(Some(&json!([
+            {"type":"namespace", "name":"mcp__external", "tools":[
+                {"type":"function", "name":"update", "parameters":{"type":"object"}}
+            ]}
+        ])))
+        .unwrap();
+        let token = broker
+            .begin("timeout-turn".into(), tools.clone(), ToolChoice::Auto)
+            .unwrap();
+        let pending = invocation(
+            &broker,
+            &token,
+            "mcp__external.update",
+            json!({"arguments":{"value":"approved too late"}}),
+        );
+        let delivered = next_call(&broker, &token);
+        let call_id = delivered.item["call_id"].as_str().unwrap().to_owned();
+        let error = pending.join().unwrap().unwrap_err();
+        assert!(error.contains("MCP deadline"));
+        assert!(
+            broker
+                .resume(
+                    &[(call_id, json!({"content":[{"type":"text","text":"late"}]}))],
+                    &tools
+                )
+                .is_err()
+        );
+        assert_eq!(broker.snapshot("timeout-turn")["active"], false);
+    }
+
+    #[test]
+    fn none_and_named_tool_choices_filter_inventory_and_invocations() {
+        let tools = registry();
+        let broker = TurnBroker::default();
+        let none_token = broker
+            .begin("none-turn".into(), tools.clone(), ToolChoice::None)
+            .unwrap();
+        let inventory = broker.inventory(&json!({"turn_token":none_token})).unwrap();
+        assert_eq!(inventory["total"], 0);
+        assert!(inventory["discovery_tools"].as_array().unwrap().is_empty());
+        assert!(broker
+            .invoke(&json!({"turn_token":none_token,"wire_name":"functions.exec_command","arguments":{}}), || false)
+            .is_err());
+
+        let named_token = broker
+            .begin(
+                "named-turn".into(),
+                tools,
+                ToolChoice::Named {
+                    kind: CallableToolKind::Function,
+                    namespace: "functions".into(),
+                    name: "exec_command".into(),
+                },
+            )
+            .unwrap();
+        let inventory = broker
+            .inventory(&json!({"turn_token":named_token}))
+            .unwrap();
+        assert_eq!(inventory["total"], 1);
+        assert_eq!(inventory["tools"][0]["wire_name"], "functions.exec_command");
+        assert!(broker
+            .invoke(&json!({"turn_token":named_token,"wire_name":"functions.apply_patch","input":"change"}), || false)
+            .is_err());
+    }
+
+    #[test]
+    fn required_tool_choice_rejects_a_final_answer_without_a_connector_call() {
+        let broker = TurnBroker::default();
+        let token = broker
+            .begin("required-turn".into(), registry(), ToolChoice::Required)
+            .unwrap();
+        broker.begin_response(&token).unwrap();
+        let revision = {
+            let mut state = broker.state.lock().unwrap();
+            let turn = state.turns.get_mut(&token).unwrap();
+            turn.last_activity = Instant::now() - COMPLETION_QUIET_PERIOD;
+            turn.revision
+        };
+        assert!(broker.complete("required-turn", Some(revision), Ok("answer".into())));
+        assert!(matches!(
+            broker.next_event(&token),
+            Err(message) if message.contains("required")
+        ));
+    }
+
+    #[test]
+    fn modified_dom_text_after_streaming_stops_the_response() {
+        let broker = TurnBroker::default();
+        let token = broker
+            .begin("dom-revision-turn".into(), Vec::new(), ToolChoice::Auto)
+            .unwrap();
+        broker.begin_response(&token).unwrap();
+        assert!(broker.append_text("dom-revision-turn", "first draft".into()));
+        assert_eq!(
+            broker
+                .next_event(&token)
+                .unwrap()
+                .unwrap()
+                .text_delta
+                .as_deref(),
+            Some("first draft")
+        );
+        let revision = {
+            let mut state = broker.state.lock().unwrap();
+            let turn = state.turns.get_mut(&token).unwrap();
+            turn.last_activity = Instant::now() - COMPLETION_QUIET_PERIOD;
+            turn.revision
+        };
+        assert!(broker.complete(
+            "dom-revision-turn",
+            Some(revision),
+            Ok("revised draft".into())
+        ));
+        assert!(matches!(
+            broker.next_event(&token),
+            Err(message) if message.contains("revised text")
+        ));
+    }
+
     fn invocation(
         broker: &Arc<TurnBroker>,
         token: &str,
@@ -723,7 +907,9 @@ mod tests {
     fn mcp_calls_make_native_round_trips_in_the_same_turn() {
         let broker = Arc::new(TurnBroker::default());
         let tools = registry();
-        let token = broker.begin("browser-turn".into(), tools.clone()).unwrap();
+        let token = broker
+            .begin("browser-turn".into(), tools.clone(), ToolChoice::Auto)
+            .unwrap();
         for command in ["first", "second"] {
             let pending = invocation(
                 &broker,
@@ -768,6 +954,11 @@ mod tests {
             Some(revision),
             Ok("finished in the original chat".into())
         ));
+        let final_delta = broker.next_event(&token).unwrap().unwrap();
+        assert_eq!(
+            final_delta.text_delta.as_deref(),
+            Some("finished in the original chat")
+        );
         let final_event = broker.next_event(&token).unwrap().unwrap();
         assert!(final_event.end_turn);
         assert_eq!(
@@ -780,7 +971,9 @@ mod tests {
     fn freeform_patch_and_multimodal_result_keep_their_native_payloads() {
         let broker = Arc::new(TurnBroker::default());
         let tools = registry();
-        let token = broker.begin("patch-turn".into(), tools.clone()).unwrap();
+        let token = broker
+            .begin("patch-turn".into(), tools.clone(), ToolChoice::Auto)
+            .unwrap();
         let patch = "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch";
         let pending = invocation(
             &broker,
@@ -818,8 +1011,12 @@ mod tests {
     fn concurrent_turns_are_isolated_and_cancellation_releases_mcp_waiters() {
         let broker = Arc::new(TurnBroker::default());
         let tools = registry();
-        let parent = broker.begin("parent".into(), tools.clone()).unwrap();
-        let child = broker.begin("child".into(), tools.clone()).unwrap();
+        let parent = broker
+            .begin("parent".into(), tools.clone(), ToolChoice::Auto)
+            .unwrap();
+        let child = broker
+            .begin("child".into(), tools.clone(), ToolChoice::Auto)
+            .unwrap();
         let parent_call = invocation(
             &broker,
             &parent,
@@ -865,7 +1062,9 @@ mod tests {
     fn discovery_updates_the_turn_registry_and_rejects_unavailable_tools() {
         let broker = Arc::new(TurnBroker::default());
         let mut tools = registry();
-        let token = broker.begin("search".into(), tools.clone()).unwrap();
+        let token = broker
+            .begin("search".into(), tools.clone(), ToolChoice::Auto)
+            .unwrap();
         let inventory = broker
             .inventory(&json!({"turn_token":token, "query":"configured MCP"}))
             .unwrap();
@@ -921,7 +1120,9 @@ mod tests {
     fn streamed_text_is_append_only_and_resumed_responses_start_at_the_new_segment() {
         let broker = Arc::new(TurnBroker::default());
         let tools = registry();
-        let token = broker.begin("streamed-turn".into(), tools.clone()).unwrap();
+        let token = broker
+            .begin("streamed-turn".into(), tools.clone(), ToolChoice::Auto)
+            .unwrap();
         broker.begin_response(&token).unwrap();
         assert!(broker.append_text("streamed-turn", "before tool ".into()));
         let first_delta = broker.next_event(&token).unwrap().unwrap();
@@ -964,7 +1165,9 @@ mod tests {
     #[test]
     fn transport_cancellation_stops_the_turn_without_executing_anything() {
         let broker = TurnBroker::default();
-        let token = broker.begin("cancel".into(), registry()).unwrap();
+        let token = broker
+            .begin("cancel".into(), registry(), ToolChoice::Auto)
+            .unwrap();
         assert!(broker.invoke(&json!({"turn_token":token,"wire_name":"functions.exec_command","arguments":{"cmd":"never executed"}}), || true).is_err());
         assert!(broker.next_event(&token).is_err());
         assert_eq!(broker.snapshot("cancel")["active"], false);

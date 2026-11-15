@@ -1366,6 +1366,7 @@ impl ChatWidget {
             | SlashCommand::Config
             | SlashCommand::Theme
             | SlashCommand::Tui
+            | SlashCommand::Context
             | SlashCommand::Pets => QueueDrain::Stop,
         }
     }

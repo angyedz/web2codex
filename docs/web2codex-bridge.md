@@ -22,11 +22,13 @@ Create a custom connector in ChatGPT named **Web2Codex**, using **Connection: Tu
 - `codex_tool_inventory(turn_token, query?, offset?, limit?, include_schema?)` returns paginated native tool declarations, exact `wire_name` values, and native discovery entries.
 - `codex_tool_call(turn_token, wire_name, arguments?, input?)` invokes the discovered tool. Functions and tool search accept an arguments object; freeform tools such as `apply_patch` accept their original input text.
 
-Tool search results extend the registry on the next Codex request. Native text, structured MCP results, and inline image/audio content return through the connector. The bridge does not download media URLs. Text emitted by ChatGPT is always text: there is no sentinel parser and no request to format answers as JSON.
+Tool search results extend the registry on the next Codex request. Native text, structured MCP results, typed resources/resource links, and inline image/audio content return through the connector. The bridge does not download media URLs. Text emitted by ChatGPT is always text: there is no sentinel parser and no request to format answers as JSON.
 
 For the local bridge, failed native tool results carry a private transport marker so the connector can preserve the MCP `isError` flag. The marker is removed before the result reaches ChatGPT and is not used to parse model responses.
 
-Inline PNG, JPEG, WebP, and GIF images plus WAV, MP3, M4A, AAC, OGG, WebM, and FLAC audio in user messages are attached to the ChatGPT composer. Media returned by native MCP tools is attached to the next Temporary Chat as well. The entire request is limited to 32 MiB, and remote media URLs are rejected with an explicit error. The browser waits for attachment cards before sending the prompt. Whether ChatGPT accepts a given audio format depends on its current Web upload support and has not yet been verified in a signed-in session.
+Inline PNG, JPEG, WebP, and GIF images plus WAV, MP3, M4A, AAC, OGG, WebM, and FLAC audio in user messages are attached to the ChatGPT composer. Media returned by native MCP tools is attached to the next Temporary Chat as well. Opaque `file_id` references are rejected with an explicit error when their local bytes are unavailable; the bridge does not try an API or remote file endpoint to resolve them. The built-in Codex attachment store keeps user uploads inline. The entire request is limited to 32 MiB, and remote media URLs are rejected. The browser waits for attachment cards before sending the prompt. Whether ChatGPT accepts a given audio format depends on its current Web upload support and has not yet been verified in a signed-in session.
+
+The local Responses adapter accepts `tool_choice` values `auto`, `none`, and `required`, plus named `function` or `custom` tools. `none` exposes no callable tools, `required` fails the response if ChatGPT finishes without a connector call, and a named choice limits MCP discovery to that tool. Schemas remain in MCP discovery and are never added to the prompt.
 
 The native catalog enables Codex terminal sessions and freeform patches because the bridge implements those call types. This describes harness functionality; it does not infer ChatGPT account entitlements from a model label.
 
@@ -36,13 +38,13 @@ The local socket listens on loopback and requires a random bearer credential fro
 
 A disconnected Responses observer retires its turn and releases the browser. A cancelled or expired MCP invocation fails the turn and wakes its waiters. Late tool results cannot create a replacement chat. Provider retries are disabled to avoid silently submitting a second prompt after a transport failure.
 
-MCP calls settle within 90 seconds, ahead of the tunnel transport deadline used by the reference project. Long commands should return a session and be polled in separate calls; command polls are bounded to 60 seconds and agent polls to 30 seconds. A timeout is reported without repeating the operation. Native approvals remain visible in Codex and count toward this transport deadline.
+MCP calls settle within 90 seconds, ahead of the tunnel transport deadline used by the reference project. Web2Codex native command and patch approvals abort after 80 seconds; the pending approval is removed from Codex's router so a later click cannot run the timed-out operation. Long commands should return a session and be polled in separate calls; command polls are bounded to 60 seconds and agent polls to 30 seconds. A timeout is reported without repeating the operation.
 
 Explicit `web hide` and closing the user-facing browser hide that window while active hidden turns continue. `web stop` cancels all turns. Browser state protocol version 2 replaces the previous text-marker bridge on the next launch. The tunnel runtime signature changes with the executable so an older connector host is restarted after an update.
 
 ## Local verification
 
-The broker and request-parser tests cover repeated native tool rounds in one browser turn, freeform patches, inline media, concurrent turn isolation, cancellation, completion fencing, native tool discovery, stale outputs, and exclusion of tool schemas from prompts.
+The broker and request-parser tests cover repeated native tool rounds in one browser turn, text streamed before and after tool calls, freeform patches, inline media, explicit opaque-file-ID rejection, concurrent turn isolation, cancellation and late-result fencing, completion fencing, all supported tool-choice modes, typed MCP resources, native tool discovery, stale outputs, and exclusion of tool schemas from prompts.
 
 ```sh
 cargo test --locked --manifest-path codex-rs/Cargo.toml -p codex-web-browser

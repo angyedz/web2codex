@@ -1185,6 +1185,7 @@ fn client_connection_closed(stream: &TcpStream) -> bool {
 struct TextOnlyResponsesRequest {
     model: String,
     reasoning_effort: Option<String>,
+    tool_choice: ToolChoice,
     prompt: String,
     attachments: Vec<MediaAttachment>,
     stream: bool,
@@ -1289,6 +1290,82 @@ enum CallableToolKind {
     Function,
     Custom,
     ToolSearch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolChoice {
+    Auto,
+    None,
+    Required,
+    Named {
+        kind: CallableToolKind,
+        namespace: String,
+        name: String,
+    },
+}
+
+fn parse_tool_choice(
+    value: Option<&serde_json::Value>,
+    tools: &[CallableTool],
+) -> Result<ToolChoice, RequestParseError> {
+    let unsupported = |message| {
+        (
+            "422 Unprocessable Content",
+            "tool_choice_unsupported",
+            message,
+        )
+    };
+    let Some(value) = value else {
+        return Ok(ToolChoice::Auto);
+    };
+    if let Some(choice) = value.as_str() {
+        return match choice {
+            "auto" => Ok(ToolChoice::Auto),
+            "none" => Ok(ToolChoice::None),
+            "required" if !tools.is_empty() => Ok(ToolChoice::Required),
+            "required" => Err(unsupported(
+                "tool_choice required needs at least one callable tool",
+            )),
+            _ => Err(unsupported(
+                "tool_choice must be auto, none, required, or a named tool",
+            )),
+        };
+    }
+    let kind = match value.get("type").and_then(serde_json::Value::as_str) {
+        Some("function") => CallableToolKind::Function,
+        Some("custom") => CallableToolKind::Custom,
+        _ => {
+            return Err(unsupported(
+                "named tool_choice must target a function or custom tool",
+            ));
+        }
+    };
+    let name = value
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty() && name.len() <= 257)
+        .ok_or(unsupported(
+            "named tool_choice must include a bounded tool name",
+        ))?;
+    let matches = tools
+        .iter()
+        .filter(|tool| {
+            tool.kind == kind
+                && (tool.name == name || format!("{}.{}", tool.namespace, tool.name) == name)
+        })
+        .collect::<Vec<_>>();
+    let [tool] = matches.as_slice() else {
+        return Err(unsupported(if matches.is_empty() {
+            "named tool_choice does not match a declared callable tool"
+        } else {
+            "named tool_choice is ambiguous; use its namespace-qualified name"
+        }));
+    };
+    Ok(ToolChoice::Named {
+        kind,
+        namespace: tool.namespace.clone(),
+        name: tool.name.clone(),
+    })
 }
 
 #[derive(Clone)]
@@ -1589,18 +1666,34 @@ fn input_content_to_text(
                         }
                         text.push_str(part_text);
                     }
-                    "input_image" => append_data_url_attachment(
-                        part.get("image_url").and_then(serde_json::Value::as_str),
-                        "image",
-                        attachments,
-                        &mut text,
-                    )?,
-                    "input_audio" => append_data_url_attachment(
-                        part.get("audio_url").and_then(serde_json::Value::as_str),
-                        "audio",
-                        attachments,
-                        &mut text,
-                    )?,
+                    "input_image" => {
+                        if part.get("file_id").is_some() {
+                            return Err(unsupported(
+                                "input_image_file_id_unavailable",
+                                "this file_id has no local attachment bytes available to Web2Codex; resend the image through the Web2Codex upload path",
+                            ));
+                        }
+                        append_data_url_attachment(
+                            part.get("image_url").and_then(serde_json::Value::as_str),
+                            "image",
+                            attachments,
+                            &mut text,
+                        )?;
+                    }
+                    "input_audio" => {
+                        if part.get("file_id").is_some() {
+                            return Err(unsupported(
+                                "input_audio_file_id_unavailable",
+                                "this file_id has no local attachment bytes available to Web2Codex; resend the audio through the Web2Codex upload path",
+                            ));
+                        }
+                        append_data_url_attachment(
+                            part.get("audio_url").and_then(serde_json::Value::as_str),
+                            "audio",
+                            attachments,
+                            &mut text,
+                        )?;
+                    }
                     _ => {
                         return Err(unsupported(
                             "input_format_unsupported",
@@ -1917,15 +2010,7 @@ fn parse_text_only_responses_request(
     ))?;
     let mut tools = parse_callable_tools(object.get("tools"))?;
     extend_callable_tools_from_input(&mut tools, input)?;
-    if object
-        .get("tool_choice")
-        .is_some_and(|choice| choice != "auto")
-    {
-        return Err(unsupported(
-            "tool_choice_unsupported",
-            "only automatic tool choice is supported by the ChatGPT connector",
-        ));
-    }
+    let tool_choice = parse_tool_choice(object.get("tool_choice"), &tools)?;
     if let Some(text) = object.get("text")
         && text.get("format").is_some_and(|format| {
             format
@@ -1967,6 +2052,7 @@ fn parse_text_only_responses_request(
     Ok(TextOnlyResponsesRequest {
         model,
         reasoning_effort,
+        tool_choice,
         prompt,
         attachments,
         stream,

@@ -2700,10 +2700,8 @@ impl App {
                         self.config.model_context_window = Some(context_window);
                         self.config.model_auto_compact_token_limit = None;
                         self.config.model_auto_compact_token_limit_scope = Default::default();
-                        self.chat_widget.config.model_context_window = Some(context_window);
-                        self.chat_widget.config.model_auto_compact_token_limit = None;
-                        self.chat_widget.config.model_auto_compact_token_limit_scope =
-                            Default::default();
+                        self.chat_widget
+                            .set_model_context_window(context_window);
                         self.refresh_status_line();
                         self.chat_widget.add_info_message(
                             format!(

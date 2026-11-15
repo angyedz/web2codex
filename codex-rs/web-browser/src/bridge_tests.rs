@@ -168,6 +168,80 @@ fn external_audio_is_rejected_instead_of_silently_omitted() {
 }
 
 #[test]
+fn opaque_file_id_media_is_rejected_with_a_local_resolution_error() {
+    let image = serde_json::to_vec(&json!({
+        "model":"Web picker choice",
+        "input":[{"type":"message", "role":"user", "content":[
+            {"type":"input_image", "file_id":"file_image_123"}
+        ]}]
+    }))
+    .unwrap();
+    assert!(matches!(
+        parse_text_only_responses_request(&image),
+        Err((_, "input_image_file_id_unavailable", message)) if message.contains("local attachment bytes")
+    ));
+
+    let audio = serde_json::to_vec(&json!({
+        "model":"Web picker choice",
+        "input":[{"type":"message", "role":"user", "content":[
+            {"type":"input_audio", "file_id":"file_audio_123"}
+        ]}]
+    }))
+    .unwrap();
+    assert!(matches!(
+        parse_text_only_responses_request(&audio),
+        Err((_, "input_audio_file_id_unavailable", message)) if message.contains("local attachment bytes")
+    ));
+}
+
+#[test]
+fn tool_choice_supports_auto_none_required_and_named_tools() {
+    let tools = json!([
+        {"type":"function","name":"exec_command","parameters":{"type":"object"}},
+        {"type":"custom","name":"apply_patch","format":{"type":"text"}}
+    ]);
+    for (choice, expected) in [
+        (json!("auto"), ToolChoice::Auto),
+        (json!("none"), ToolChoice::None),
+        (json!("required"), ToolChoice::Required),
+        (
+            json!({"type":"function","name":"exec_command"}),
+            ToolChoice::Named {
+                kind: CallableToolKind::Function,
+                namespace: "functions".into(),
+                name: "exec_command".into(),
+            },
+        ),
+        (
+            json!({"type":"custom","name":"apply_patch"}),
+            ToolChoice::Named {
+                kind: CallableToolKind::Custom,
+                namespace: "functions".into(),
+                name: "apply_patch".into(),
+            },
+        ),
+    ] {
+        let parsed = parse_text_only_responses_request(
+            &serde_json::to_vec(&json!({
+                "model":"Web picker choice", "input":"Try a change",
+                "tools":tools.clone(), "tool_choice":choice
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed.tool_choice, expected);
+    }
+    let no_tools = serde_json::to_vec(&json!({
+        "model":"Web picker choice", "input":"Hello", "tool_choice":"required"
+    }))
+    .unwrap();
+    assert!(matches!(
+        parse_text_only_responses_request(&no_tools),
+        Err((_, "tool_choice_unsupported", _))
+    ));
+}
+
+#[test]
 fn external_images_are_rejected_instead_of_silently_omitted() {
     let request = serde_json::to_vec(&json!({
         "model":"Web picker choice",
@@ -315,6 +389,39 @@ fn new_temporary_chat_preserves_structured_mcp_results_and_inline_images() {
             .prompt
             .contains("[Attached audio: web2codex-audio-2.wav]")
     );
+}
+
+#[test]
+fn earlier_typed_mcp_resources_keep_their_payload_and_links() {
+    let resource = json!({
+        "type":"resource",
+        "resource":{"uri":"file:///workspace/notes.txt","mimeType":"text/plain","text":"RESOURCE_TEXT"}
+    });
+    let resource_link = json!({
+        "type":"resource_link",
+        "name":"design notes",
+        "uri":"web2codex://workspace/design-notes",
+        "description":"DESIGN_LINK_DESCRIPTION",
+        "mimeType":"text/markdown"
+    });
+    let parsed = parse_text_only_responses_request(
+        &serde_json::to_vec(&json!({
+            "model":"Web picker choice", "input":[
+                {"type":"function_call_output","call_id":"mcp-call","output":{
+                    "content":[resource, resource_link],
+                    "structuredContent":{"marker":"STRUCTURED_RESOURCE_DATA"}
+                }},
+                {"type":"message","role":"user","content":"Use the prior resource"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(parsed.prompt.contains("RESOURCE_TEXT"));
+    assert!(parsed.prompt.contains("file:///workspace/notes.txt"));
+    assert!(parsed.prompt.contains("DESIGN_LINK_DESCRIPTION"));
+    assert!(parsed.prompt.contains("web2codex://workspace/design-notes"));
+    assert!(parsed.prompt.contains("STRUCTURED_RESOURCE_DATA"));
 }
 
 #[test]

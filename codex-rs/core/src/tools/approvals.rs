@@ -13,6 +13,7 @@ use crate::hook_runtime::run_permission_request_hooks;
 use crate::mcp_tool_call::request_mcp_tool_user_approval;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::NetworkApprovalTurn;
+use crate::session::WEB2CODEX_APPROVAL_TIMEOUT;
 use crate::session::session::Session;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::runtimes::apply_patch::ApplyPatchApprovalKey;
@@ -621,8 +622,33 @@ impl Session {
                 cancellation_reason: None,
             },
             Some(PermissionRequestDecision::Allow) | None => {
-                self.request_reviewer_approval(action, ctx, user_prompt)
+                if ctx.requires_human_approval()
+                    && ctx.review_context.turn().provider.info().name == "Web2Codex"
+                {
+                    match tokio::time::timeout(
+                        WEB2CODEX_APPROVAL_TIMEOUT,
+                        self.request_reviewer_approval(action, ctx, user_prompt),
+                    )
                     .await
+                    {
+                        Ok(resolution) => resolution,
+                        Err(_) => {
+                            if let Some(token) = &ctx.cancellation_token {
+                                token.cancel();
+                            }
+                            ApprovalResolution {
+                                decision: ReviewDecision::Abort,
+                                source: ApprovalResolutionSource::User,
+                                cancellation_reason: Some(
+                                    McpApprovalCancellationReason::Interrupted,
+                                ),
+                            }
+                        }
+                    }
+                } else {
+                    self.request_reviewer_approval(action, ctx, user_prompt)
+                        .await
+                }
             }
         };
         if resolution.decision == ReviewDecision::Approved {

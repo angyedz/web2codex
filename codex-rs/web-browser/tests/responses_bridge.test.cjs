@@ -48,11 +48,12 @@ test("a request uses the re-rendered composer, attaches image and audio files, t
   });
   const markdown = makeElement({ innerText: "Done." });
   const assistant = makeElement({ querySelectorAll: () => [markdown] });
+  let assistantReplies = [assistant];
   const document = {
     querySelectorAll(selector) {
       if (selector.startsWith("#prompt-textarea")) return [currentComposer];
       if (selector.startsWith(".__menu-item")) return [row];
-      if (selector.startsWith("[data-message-author-role")) return submitted ? [assistant] : [];
+      if (selector.startsWith("[data-message-author-role")) return submitted ? assistantReplies : [];
       return [];
     },
     createRange: () => ({ selectNodeContents() {}, collapse() {} }),
@@ -108,4 +109,22 @@ test("a request uses the re-rendered composer, attaches image and audio files, t
   const resultEventIndex = nativeEvents.findIndex(event => event.type === "responses-result");
   assert.ok(textEventIndex >= 0 && textEventIndex < resultEventIndex);
   assert.equal(nativeEvents[textEventIndex].delta, "Done.");
+
+  let revisionRead = 0;
+  const revisedMarkdown = makeElement({});
+  Object.defineProperty(revisedMarkdown, "innerText", {
+    get() { return revisionRead++ === 0 ? "First draft" : "Revised draft"; },
+  });
+  assistantReplies = [makeElement({ querySelectorAll: () => [revisedMarkdown] })];
+  submitted = false;
+  result = undefined;
+  window.__web2codexCompleted = false;
+  await window.__web2codexSend({
+    request_id: "request-1", model: "GPT-6", reasoning_effort: null,
+    prompt: "Check append-only streaming", attachments: [],
+  });
+  const revisionDelta = nativeEvents.find(event => event.type === "responses-text" && event.delta === "First draft");
+  const revisionError = nativeEvents.filter(event => event.type === "responses-result").slice(-1)[0];
+  assert.ok(revisionDelta, "first DOM text revision should be streamed");
+  assert.match(revisionError.error, /revised text that was already streamed/);
 });

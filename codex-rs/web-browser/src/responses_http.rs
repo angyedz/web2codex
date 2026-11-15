@@ -157,7 +157,7 @@ pub(super) fn handle(
         }
         None => {
             let request_id = Uuid::new_v4().to_string();
-            match broker.begin(request_id.clone(), parsed.tools) {
+            match broker.begin(request_id.clone(), parsed.tools, parsed.tool_choice.clone()) {
                 Ok(token) => (token, request_id, true),
                 Err(message) => {
                     let _ = write_json_response(
@@ -188,9 +188,19 @@ pub(super) fn handle(
     if fresh {
         // Only connector selection and a turn capability are added to the text.
         // Tool definitions are available exclusively through the MCP connector.
+        let choice_guidance = match parsed.tool_choice {
+            crate::ToolChoice::None => {
+                "Do not invoke tools through the Web2Codex connector for this response.\n\n"
+            }
+            crate::ToolChoice::Required | crate::ToolChoice::Named { .. } => {
+                "Invoke an available tool through the Web2Codex connector before answering. Tool availability is provided by MCP discovery.\n\n"
+            }
+            crate::ToolChoice::Auto => "",
+        };
         let prompt = format!(
             "You are continuing a Web2Codex coding-agent conversation. Use the selected Web2Codex connector when tools are needed. Current harness turn_token: {}. Copy it unchanged in connector calls. Return user-facing answers in ordinary prose.\n\n{}",
-            observer.token, parsed.prompt
+            observer.token,
+            format!("{choice_guidance}{}", parsed.prompt)
         );
         if event_proxy
             .send_event(BrowserEvent::ResponsesRequest {
@@ -454,4 +464,105 @@ fn response_output_items(event: &NativeEvent, message_item_id: &str) -> Vec<Valu
 fn finish_sse(stream: &mut TcpStream) -> std::io::Result<()> {
     stream.write_all(b"0\r\n\r\n")?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    fn read_chunked_body(mut stream: TcpStream) -> String {
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let raw = String::from_utf8(raw).unwrap();
+        let mut body = raw.split_once("\r\n\r\n").unwrap().1.as_bytes();
+        let mut decoded = Vec::new();
+        loop {
+            let line_end = body.windows(2).position(|bytes| bytes == b"\r\n").unwrap();
+            let chunk_size =
+                usize::from_str_radix(std::str::from_utf8(&body[..line_end]).unwrap(), 16).unwrap();
+            body = &body[line_end + 2..];
+            if chunk_size == 0 {
+                break;
+            }
+            decoded.extend_from_slice(&body[..chunk_size]);
+            body = &body[chunk_size + 2..];
+        }
+        String::from_utf8(decoded).unwrap()
+    }
+
+    #[test]
+    fn sse_keeps_text_before_native_call_and_emits_codex_tool_item_shape() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let reader = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            read_chunked_body(stream)
+        });
+        let mut stream = TcpStream::connect(address).unwrap();
+        let event = NativeEvent {
+            item: json!({
+                "id":"tool_1",
+                "type":"function_call",
+                "status":"completed",
+                "call_id":"call_1",
+                "namespace":"mcp__workspace",
+                "name":"read_file",
+                "arguments":"{\"path\":\"README.md\"}"
+            }),
+            end_turn: false,
+            text_delta: None,
+            segment_text: "I will inspect the project first.".into(),
+        };
+        let mut message_started = false;
+        let mut streamed_text = String::new();
+        write_sse_header(&mut stream).unwrap();
+        write_completion(
+            &mut stream,
+            "resp_test",
+            "GPT-6",
+            &event,
+            "msg_test",
+            &mut message_started,
+            &mut streamed_text,
+        )
+        .unwrap();
+        drop(stream);
+        let body = reader.join().unwrap();
+        let events = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str::<Value>(data).unwrap())
+            .collect::<Vec<_>>();
+        let kinds = events
+            .iter()
+            .filter_map(|event| event["type"].as_str())
+            .collect::<Vec<_>>();
+        let text_delta = kinds
+            .iter()
+            .position(|kind| *kind == "response.output_text.delta")
+            .unwrap();
+        let tool_added = events.iter().position(|event| {
+            event["type"] == "response.output_item.added"
+                && event.pointer("/item/type").and_then(Value::as_str) == Some("function_call")
+        });
+        assert!(text_delta < tool_added.unwrap());
+        let tool_done = events
+            .iter()
+            .find(|event| {
+                event["type"] == "response.output_item.done"
+                    && event.pointer("/item/type").and_then(Value::as_str) == Some("function_call")
+            })
+            .unwrap();
+        assert_eq!(tool_done["item"]["status"], "completed");
+        assert_eq!(tool_done["item"]["call_id"], "call_1");
+        assert_eq!(tool_done["item"]["namespace"], "mcp__workspace");
+        assert_eq!(tool_done["item"]["name"], "read_file");
+        assert_eq!(tool_done["item"]["arguments"], "{\"path\":\"README.md\"}");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "response.completed")
+        );
+    }
 }

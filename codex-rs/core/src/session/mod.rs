@@ -12,6 +12,7 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -427,6 +428,10 @@ use codex_tools::ToolName;
 use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(test)]
 use codex_utils_stream_parser::ProposedPlanSegment;
+
+/// Keep Web2Codex approval waits below its 90-second MCP call deadline so a late
+/// approval cannot execute after the connector has already timed out.
+pub(crate) const WEB2CODEX_APPROVAL_TIMEOUT: Duration = Duration::from_secs(80);
 
 /// Whether reported usage updates the installed context baseline or only spending.
 #[derive(Clone, Copy)]
@@ -3453,7 +3458,19 @@ impl Session {
         });
         let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
         self.send_event(turn_context, event).await;
-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
+        if turn_context.provider.info().name == "Web2Codex" {
+            match tokio::time::timeout(WEB2CODEX_APPROVAL_TIMEOUT, rx_approve).await {
+                Ok(decision) => decision.unwrap_or(ReviewDecision::Abort),
+                Err(_) => {
+                    let _ = self
+                        .take_pending_approval(&effective_approval_id, Some(&turn_context.sub_id))
+                        .await;
+                    ReviewDecision::Abort
+                }
+            }
+        } else {
+            rx_approve.await.unwrap_or(ReviewDecision::Abort)
+        }
     }
 
     #[expect(
@@ -3502,7 +3519,19 @@ impl Session {
         });
         let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
         self.send_event(turn_context, event).await;
-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
+        if turn_context.provider.info().name == "Web2Codex" {
+            match tokio::time::timeout(WEB2CODEX_APPROVAL_TIMEOUT, rx_approve).await {
+                Ok(decision) => decision.unwrap_or(ReviewDecision::Abort),
+                Err(_) => {
+                    let _ = self
+                        .take_pending_approval(&approval_id, Some(&turn_context.sub_id))
+                        .await;
+                    ReviewDecision::Abort
+                }
+            }
+        } else {
+            rx_approve.await.unwrap_or(ReviewDecision::Abort)
+        }
     }
 
     #[expect(
