@@ -227,7 +227,12 @@ fn handle_with_dispatch(
         }
         None => {
             let request_id = Uuid::new_v4().to_string();
-            match broker.begin_scoped(request_id.clone(), parsed.tools, identity) {
+            match broker.begin_scoped(
+                request_id.clone(),
+                parsed.tools,
+                parsed.connector_tool_choice,
+                identity,
+            ) {
                 Ok(token) => (token, request_id, 0, true),
                 Err(message) => {
                     let _ = write_json_response(

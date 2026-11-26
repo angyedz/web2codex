@@ -24,12 +24,14 @@ const COMPLETION_QUIET_PERIOD: Duration = Duration::from_secs(2);
 pub(crate) struct TurnBroker {
     state: Mutex<State>,
     changed: Condvar,
-    mcp_call_timeout: Duration,
 }
 
 impl Default for TurnBroker {
     fn default() -> Self {
-        Self::with_mcp_call_timeout(MCP_CALL_TIMEOUT)
+        Self {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+        }
     }
 }
 
@@ -196,13 +198,14 @@ impl TurnBroker {
         tools: Vec<CallableTool>,
         tool_choice: ToolChoice,
     ) -> Result<String, String> {
-        self.begin_scoped(request_id, tools, TurnIdentity::default())
+        self.begin_scoped(request_id, tools, tool_choice, TurnIdentity::default())
     }
 
     pub(crate) fn begin_scoped(
         &self,
         request_id: String,
         tools: Vec<CallableTool>,
+        tool_choice: ToolChoice,
         identity: TurnIdentity,
     ) -> Result<String, String> {
         let mut state = self

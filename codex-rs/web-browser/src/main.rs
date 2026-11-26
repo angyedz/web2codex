@@ -551,7 +551,7 @@ enum BrowserEvent {
     BackgroundTab(String, SyncSender<Result<usize, String>>),
     ListTabs(SyncSender<Vec<String>>),
     CloseAgentTab(String, Option<String>, SyncSender<AgentTabCloseOutcome>),
-    Open(BrowserPage, bool, SyncSender<Result<(), String>>),
+    Open(BrowserPage, bool, Option<SyncSender<Result<(), String>>>),
     ClientConnected(SyncSender<()>),
     ClientDisconnected,
     ContinueLogin(AccountTierChoice),
@@ -603,7 +603,7 @@ enum BrowserEvent {
     CancelResponses(String),
     ReleaseResponses(String),
     Hide,
-    Stop(TcpStream),
+    Stop(Option<TcpStream>),
 }
 
 #[cfg(target_os = "windows")]
@@ -1642,9 +1642,9 @@ fn create_tray_icon(proxy: EventLoopProxy<BrowserEvent>) -> anyhow::Result<TrayI
                     } else {
                         BrowserPage::AccountChooser
                     };
-                    BrowserEvent::Open(page, None)
+                    BrowserEvent::Open(page, false, None)
                 } else if event.id == sign_in_id {
-                    BrowserEvent::Open(BrowserPage::AccountChooser, None)
+                    BrowserEvent::Open(BrowserPage::AccountChooser, false, None)
                 } else if event.id == quit_id {
                     BrowserEvent::Stop(None)
                 } else {
@@ -1801,7 +1801,9 @@ fn run_event_loop(
             Event::UserEvent(BrowserEvent::Open(page, reuse, reply)) => {
                 if webview.is_some() && (reuse || page == BrowserPage::TemporaryChat) {
                     activate_browser_window(&window, BrowserActivationIntent::UserAction);
-                    let _ = reply.send(Ok(()));
+                    if let Some(reply) = reply {
+                        let _ = reply.send(Ok(()));
+                    }
                     return;
                 }
                 if let Err(error) = prepare_profile_directory(&profile_dir) {
@@ -1838,7 +1840,9 @@ fn run_event_loop(
                 if clients == 0 && session_owned {
                     idle_deadline = Some(Instant::now() + Duration::from_secs(10 * 60));
                 }
-                let _ = reply.send(Ok(()));
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(()));
+                }
             }
             Event::UserEvent(BrowserEvent::NewTab(url)) => {
                 if extra_tabs.len() >= 31 || !url::Url::parse(&url).is_ok_and(|url| matches!(url.scheme(), "http" | "https")) { return; }
@@ -2613,7 +2617,7 @@ fn run_event_loop(
                 window.set_visible(false);
             }
             Event::UserEvent(BrowserEvent::Stop(reply)) => {
-                stop_reply = Some(reply);
+                stop_reply = reply;
             }
             Event::WindowEvent { window_id: event_window_id, event: WindowEvent::CloseRequested, .. } if event_window_id == window_id => {
                 window.set_visible(false);
@@ -3932,7 +3936,7 @@ fn handle_control_request(
                 .send_event(BrowserEvent::Open(
                     page,
                     request.path.starts_with("/session/"),
-                    reply,
+                    Some(reply),
                 ))
                 .is_err()
             {
@@ -3961,8 +3965,8 @@ fn handle_control_request(
         }
         ("POST", "/stop") => {
             let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-            if let Err(error) = event_proxy.send_event(BrowserEvent::Stop(stream))
-                && let BrowserEvent::Stop(mut stream) = error.0
+            if let Err(error) = event_proxy.send_event(BrowserEvent::Stop(Some(stream)))
+                && let BrowserEvent::Stop(Some(mut stream)) = error.0
             {
                 let _ = write_response(&mut stream, "503 Service Unavailable", "browser stopped");
             }
@@ -4009,7 +4013,7 @@ struct TextOnlyResponsesRequest {
     setup_smoke_test: bool,
     compaction_stages: Vec<CompactionStage>,
     reasoning_effort: Option<String>,
-    tool_choice: ToolChoice,
+    connector_tool_choice: ToolChoice,
     prompt: String,
     resume_prompt: String,
     attachments: Vec<MediaAttachment>,
@@ -4259,11 +4263,11 @@ fn parse_tool_choice(
     value: Option<&serde_json::Value>,
     tools: &[CallableTool],
 ) -> Result<ToolChoice, RequestParseError> {
-    let unsupported = |message| {
+    let unsupported = |message: &str| {
         (
             "422 Unprocessable Content",
             "tool_choice_unsupported",
-            message,
+            message.to_owned(),
         )
     };
     let Some(value) = value else {
@@ -5374,6 +5378,7 @@ fn parse_text_only_responses_request(
     if is_compaction {
         tools.clear();
     }
+    let connector_tool_choice = parse_tool_choice(object.get("tool_choice"), &tools)?;
     let mut tool_choice = HarnessToolChoice::select(object.get("tool_choice"), &mut tools)?;
     if let Some(text) = object.get("text")
         && text.get("format").is_some_and(|format| {
@@ -5491,7 +5496,7 @@ fn parse_text_only_responses_request(
         setup_smoke_test,
         compaction_stages,
         reasoning_effort,
-        tool_choice,
+        connector_tool_choice,
         prompt,
         resume_prompt,
         attachments,
