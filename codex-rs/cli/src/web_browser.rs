@@ -13,6 +13,8 @@ use clap::Args;
 use clap::Subcommand;
 use codex_core::config::find_codex_home;
 use codex_secrets::{SecretName, SecretScope, SecretsBackendKind, SecretsManager};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal;
 use serde::Deserialize;
 
 const TUNNEL_API_KEY_NAME: &str = "OPENAI_TUNNEL_API_KEY";
@@ -960,7 +962,9 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(900));
             stream
-                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .unwrap();
         });
         let result = send_control_to(&state, ControlAction::Stop);
@@ -1172,6 +1176,58 @@ fn prompt_visible(prompt: &str) -> anyhow::Result<String> {
         "API key must be a non-empty value without whitespace"
     );
     Ok(value.trim().to_string())
+}
+
+struct HiddenPromptTerminalGuard;
+
+impl Drop for HiddenPromptTerminalGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        println!();
+    }
+}
+
+fn prompt_hidden(prompt: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        std::io::stdin().is_terminal(),
+        "tunnel setup requires an interactive terminal"
+    );
+    terminal::enable_raw_mode().context("failed to hide API key input")?;
+    let _guard = HiddenPromptTerminalGuard;
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+
+    let mut value = String::new();
+    loop {
+        match event::read().context("failed to read hidden API key input")? {
+            Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+                KeyCode::Enter => break,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    anyhow::bail!("tunnel setup cancelled")
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    anyhow::bail!("input closed; setup cancelled")
+                }
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Char(character)
+                    if !character.is_control()
+                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    value.push(character);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    anyhow::ensure!(
+        !value.trim().is_empty() && !value.chars().any(char::is_whitespace),
+        "API key must be a non-empty value without whitespace"
+    );
+    Ok(value)
 }
 
 fn has_saved_account_choice() -> bool {

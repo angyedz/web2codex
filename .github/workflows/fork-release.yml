@@ -26,7 +26,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
-            runner: macos-15
+            runner: macos-15-intel
           - target: x86_64-apple-darwin
             runner: macos-15-intel
           - target: x86_64-pc-windows-msvc
@@ -38,8 +38,7 @@ jobs:
       CODEX_GITHUB_REPOSITORY: ${{ github.repository }}
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       TARGET: ${{ matrix.target }}
-      # The ARM macOS runner has three CPUs; the other matrix runners have four.
-      CARGO_BUILD_JOBS: ${{ matrix.runner == 'macos-15' && '2' || '4' }}
+      CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       CARGO_PROFILE_RELEASE_LTO: "false"
@@ -91,6 +90,10 @@ jobs:
           version="${GITHUB_REF_NAME#codex-web-v}"
           python .github/scripts/set_fork_release_version.py "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh Cargo.lock for the release version
+        shell: bash
+        run: cargo metadata --manifest-path codex-rs/Cargo.toml --format-version 1 >/dev/null
 
       - name: Build the native WebView browser
         if: runner.os == 'Linux'

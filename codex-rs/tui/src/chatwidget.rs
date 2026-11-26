@@ -2106,12 +2106,6 @@ impl ChatWidget {
         &self.config
     }
 
-    pub(crate) fn set_model_context_window(&mut self, context_window: i64) {
-        self.config.model_context_window = Some(context_window);
-        self.config.model_auto_compact_token_limit = None;
-        self.config.model_auto_compact_token_limit_scope = Default::default();
-    }
-
     pub(crate) fn new_status_indicator(
         &self,
     ) -> crate::status_indicator_widget::StatusIndicatorWidget {

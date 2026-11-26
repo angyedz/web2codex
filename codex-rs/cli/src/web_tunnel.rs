@@ -42,6 +42,9 @@ use windows_sys::Win32::System::Threading::{
 use crate::web_environment::safe_subprocess_environment;
 
 const RELEASE_API: &str = "https://api.github.com/repos/openai/tunnel-client/releases/latest";
+const RELEASE_PAGE: &str = "https://github.com/openai/tunnel-client/releases/latest";
+const RELEASE_ASSETS_PAGE: &str =
+    "https://github.com/openai/tunnel-client/releases/expanded_assets/";
 const MAX_RELEASE_JSON: usize = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
@@ -61,6 +64,12 @@ struct ReleaseAsset {
     name: String,
     browser_download_url: String,
     digest: Option<String>,
+}
+
+struct ResolvedReleaseAsset {
+    tag_name: String,
+    browser_download_url: String,
+    sha256: String,
 }
 
 struct RuntimePaths {
@@ -85,7 +94,8 @@ impl Drop for RemoveFileOnDrop {
 
 pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow::Result<()> {
     std::thread::scope(|scope| {
-        scope.spawn(|| start_blocking(tunnel_id, api_key, workspace))
+        scope
+            .spawn(|| start_blocking(tunnel_id, api_key, workspace))
             .join()
             .map_err(|_| anyhow::anyhow!("tunnel startup thread panicked"))?
     })
@@ -282,8 +292,7 @@ fn start_locked(
                 if !api_key.is_empty() {
                     diagnostic = diagnostic.replace(api_key, "[redacted]");
                 }
-                let doctor =
-                    run_tunnel_doctor(&client, &paths.profile, &workspace, api_key);
+                let doctor = run_tunnel_doctor(&client, &paths.profile, &workspace, api_key);
                 if !diagnostic.is_empty() {
                     diagnostic.push_str("\n\n");
                 }
@@ -333,12 +342,7 @@ fn start_locked(
 /// Run the tunnel client's one-shot validator only after startup fails. This
 /// gives us actionable diagnostics without keeping an unbounded daemon log on
 /// disk or changing its detached stdio after it has become ready.
-fn run_tunnel_doctor(
-    client: &Path,
-    profile: &Path,
-    workspace: &Path,
-    api_key: &str,
-) -> String {
+fn run_tunnel_doctor(client: &Path, profile: &Path, workspace: &Path, api_key: &str) -> String {
     let mut command = Command::new(client);
     command
         .arg("doctor")
@@ -843,7 +847,10 @@ fn force_terminate_tunnel_process(pid: u32) -> anyhow::Result<()> {
 }
 
 fn print_connector_instructions(tunnel_id: &str) {
-    println!("In ChatGPT, add an MCP connector named `{}` using Connection: Tunnel.", crate::web_browser::connector_name());
+    println!(
+        "In ChatGPT, add an MCP connector named `{}` using Connection: Tunnel.",
+        crate::web_browser::connector_name()
+    );
     println!("Tunnel ID: {tunnel_id}");
 }
 
@@ -1018,7 +1025,7 @@ fn write_profile(
             "control_plane:\n  tunnel_id: {}\n  api_key: {}\n",
             "health:\n  listen_addr: {}\n  url_file: {}\n",
             "admin_ui:\n  open_browser: false\n",
-            "log:\n  level: info\n  format: json\n",
+            "log:\n  level: info\n  format: json\n  file: {}\n",
             "mcp:\n  commands:\n  - channel: main\n    command: {}\n",
         ),
         yaml_string(tunnel_id),
@@ -1247,6 +1254,112 @@ fn health_response(base_url: &str, endpoint: &str) -> Option<(u16, Vec<u8>)> {
     Some((status, response[separator + 4..].to_vec()))
 }
 
+fn read_release_metadata(response: reqwest::blocking::Response) -> anyhow::Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RELEASE_JSON as u64)
+    {
+        bail!("GitHub release metadata is too large");
+    }
+    let mut metadata = Vec::new();
+    response
+        .take(MAX_RELEASE_JSON as u64 + 1)
+        .read_to_end(&mut metadata)?;
+    anyhow::ensure!(
+        metadata.len() <= MAX_RELEASE_JSON,
+        "GitHub release metadata is too large"
+    );
+    Ok(metadata)
+}
+
+fn validate_release_tag(tag: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !tag.is_empty()
+            && tag
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric()
+                    || matches!(character, '.' | '-' | '_')),
+        "GitHub release tag contains unexpected characters"
+    );
+    Ok(())
+}
+
+fn resolve_release_asset_from_github_page(
+    client: &Client,
+    os: &str,
+    arch: &str,
+) -> anyhow::Result<ResolvedReleaseAsset> {
+    let response = client
+        .get(RELEASE_PAGE)
+        .send()
+        .context("failed to open the public tunnel-client release page")?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "GitHub release page request failed: {}",
+        response.status()
+    );
+    let latest_url = response.url();
+    anyhow::ensure!(
+        latest_url.scheme() == "https" && latest_url.host_str() == Some("github.com"),
+        "GitHub redirected the release lookup to an unexpected host"
+    );
+    let segments = latest_url
+        .path_segments()
+        .context("GitHub returned an invalid latest release URL")?
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        segments.len() == 5
+            && segments[0] == "openai"
+            && segments[1] == "tunnel-client"
+            && segments[2] == "releases"
+            && segments[3] == "tag",
+        "GitHub returned an unexpected latest release URL"
+    );
+    let tag_name = segments[4].to_owned();
+    validate_release_tag(&tag_name)?;
+
+    let archive_name = format!("tunnel-client-{tag_name}-{os}-{arch}.zip");
+    let assets_url = format!("{RELEASE_ASSETS_PAGE}{tag_name}");
+    let response = client
+        .get(assets_url)
+        .send()
+        .context("failed to load tunnel-client release assets")?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "GitHub release assets request failed: {}",
+        response.status()
+    );
+    let metadata = read_release_metadata(response)?;
+    let html = std::str::from_utf8(&metadata)
+        .context("GitHub returned invalid tunnel-client release asset metadata")?;
+    let expected_href =
+        format!("href=\"/openai/tunnel-client/releases/download/{tag_name}/{archive_name}\"");
+    let asset_offset = html
+        .find(&expected_href)
+        .with_context(|| format!("the latest tunnel-client release has no {os}/{arch} archive"))?;
+    let asset_row = html[asset_offset..]
+        .split_once("</li>")
+        .map(|(row, _)| row)
+        .context("GitHub returned an incomplete release asset entry")?;
+    let digest_offset = asset_row
+        .find("sha256:")
+        .context("GitHub did not provide a SHA-256 digest for the tunnel-client archive")?
+        + "sha256:".len();
+    let sha256 = asset_row
+        .get(digest_offset..digest_offset + 64)
+        .filter(|digest| digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .context("GitHub returned an invalid SHA-256 digest for the tunnel-client archive")?
+        .to_ascii_lowercase();
+
+    Ok(ResolvedReleaseAsset {
+        tag_name: tag_name.clone(),
+        browser_download_url: format!(
+            "https://github.com/openai/tunnel-client/releases/download/{tag_name}/{archive_name}"
+        ),
+        sha256,
+    })
+}
+
 fn install_tunnel_client() -> anyhow::Result<PathBuf> {
     let (os, arch) = target_asset_parts()?;
     let paths = runtime_paths()?;
@@ -1273,52 +1386,54 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
         .get(RELEASE_API)
         .send()
         .context("failed to look up the latest OpenAI tunnel-client release")?;
+    let release_asset = if response.status().is_success() {
+        let release_json = read_release_metadata(response)?;
+        let release: Release = serde_json::from_slice(&release_json)
+            .context("GitHub returned invalid tunnel-client release metadata")?;
+        validate_release_tag(&release.tag_name)?;
+        let archive_name = format!("tunnel-client-{}-{os}-{arch}.zip", release.tag_name);
+        let asset = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == archive_name)
+            .with_context(|| {
+                format!("the latest tunnel-client release has no {os}/{arch} archive")
+            })?;
+        let sha256 = asset
+            .digest
+            .as_deref()
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+            .context("GitHub did not provide a SHA-256 digest for the tunnel-client archive")?;
+        ResolvedReleaseAsset {
+            tag_name: release.tag_name,
+            browser_download_url: asset.browser_download_url.clone(),
+            sha256: sha256.to_owned(),
+        }
+    } else if matches!(response.status().as_u16(), 403 | 429) {
+        resolve_release_asset_from_github_page(&client, os, arch).with_context(|| {
+            format!(
+                "GitHub release API returned {}, and the public release page fallback failed",
+                response.status()
+            )
+        })?
+    } else {
+        bail!("GitHub release lookup failed: {}", response.status());
+    };
     anyhow::ensure!(
-        response.status().is_success(),
-        "GitHub release lookup failed: {}",
-        response.status()
-    );
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RELEASE_JSON as u64)
-    {
-        bail!("GitHub release metadata is too large");
-    }
-    let mut release_json = Vec::new();
-    response
-        .take(MAX_RELEASE_JSON as u64 + 1)
-        .read_to_end(&mut release_json)?;
-    anyhow::ensure!(
-        release_json.len() <= MAX_RELEASE_JSON,
-        "GitHub release metadata is too large"
-    );
-    let release: Release = serde_json::from_slice(&release_json)
-        .context("GitHub returned invalid tunnel-client release metadata")?;
-    anyhow::ensure!(
-        release
-            .tag_name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')),
-        "GitHub release tag contains unexpected characters"
-    );
-    let archive_name = format!("tunnel-client-{}-{os}-{arch}.zip", release.tag_name);
-    let asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name == archive_name)
-        .with_context(|| format!("the latest tunnel-client release has no {os}/{arch} archive"))?;
-    let expected_sha256 = asset
-        .digest
-        .as_deref()
-        .and_then(|digest| digest.strip_prefix("sha256:"))
-        .context("GitHub did not provide a SHA-256 digest for the tunnel-client archive")?;
-    anyhow::ensure!(
-        asset
+        release_asset
             .browser_download_url
             .starts_with("https://github.com/openai/tunnel-client/releases/download/"),
         "GitHub returned an unexpected tunnel-client download URL"
     );
-    let install_directory = paths.directory.join("bin").join(&release.tag_name);
+    anyhow::ensure!(
+        release_asset.sha256.len() == 64
+            && release_asset
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "GitHub returned an invalid SHA-256 digest for the tunnel-client archive"
+    );
+    let install_directory = paths.directory.join("bin").join(&release_asset.tag_name);
     let executable = install_directory.join(executable_name);
     let digest_path = install_directory.join(format!("{executable_name}.sha256"));
     fs::create_dir_all(&install_directory)?;
@@ -1353,7 +1468,7 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
         remove_file_if_exists(&digest_path)?;
     }
     let response = client
-        .get(&asset.browser_download_url)
+        .get(&release_asset.browser_download_url)
         .send()
         .context("failed to download tunnel-client")?;
     anyhow::ensure!(
@@ -1377,7 +1492,7 @@ fn install_tunnel_client() -> anyhow::Result<PathBuf> {
     );
     let actual_sha256 = format!("{:x}", Sha256::digest(&archive_bytes));
     anyhow::ensure!(
-        actual_sha256.eq_ignore_ascii_case(expected_sha256),
+        actual_sha256.eq_ignore_ascii_case(&release_asset.sha256),
         "SHA-256 verification failed for tunnel-client archive"
     );
 
