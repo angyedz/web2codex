@@ -299,6 +299,8 @@ fn handle_with_dispatch(
             resume_prompt,
             attachments: parsed.attachments.clone(),
             resume_attachments: parsed.resume_attachments.clone(),
+            interruption_prompt: parsed.interruption_prompt.clone(),
+            interruption_attachment_names: parsed.interruption_attachment_names.clone(),
         }) {
             let _ = write_json_response(
                 stream,

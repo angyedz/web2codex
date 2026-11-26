@@ -46,14 +46,15 @@ const MAX_TOOL_SCHEMAS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOOL_COUNT: usize = 1024;
 const MAX_TOOL_CALL_INPUT_BYTES: usize = 512 * 1024;
 const PENDING_AGENT_CLOSE_TTL: Duration = Duration::from_secs(300);
+const INTERRUPTED_PRIMARY_CHAT_TTL: Duration = Duration::from_secs(10 * 60);
 const TUI_TEXT_RENDERING_INSTRUCTIONS: &str =
     "Use Markdown headings, lists, tables, and code blocks; show URLs directly.";
 const MCP_CHAT_OUTPUT_INSTRUCTIONS: &str = "Keep protocol data private. Summarize completed work and report errors plainly.";
 const TOOL_COMPLETION_INSTRUCTIONS: &str = "For explicitly requested agents, work in parallel, do not recurse, and wait for all final results.";
 const MCP_TOOL_ROUTING_INSTRUCTIONS: &str = "Use only the selected connector's documented tools; do not guess or fall back, and report failures.";
 const MCP_AGENT_TASK_INSTRUCTIONS: &str = "Use only the selected connector's documented tools to complete the assigned task; report only results verified by tool output.";
-// ChatGPT already supplies its own system prompt. Replace only Web2Codex's
-// exact built-in prompt; custom base and project instructions stay intact.
+// ChatGPT already supplies its own system prompt. Compact Web2Codex's built-in
+// prompt even when it is combined with custom project instructions.
 const DEFAULT_BASE_INSTRUCTIONS: &str =
     include_str!("../../protocol/src/prompts/base_instructions/default.md");
 const COMPACT_BASE_INSTRUCTIONS: &str = "Act as a coding agent. Follow user and project instructions; use tools when needed and report verified results.";
@@ -585,6 +586,8 @@ enum BrowserEvent {
         resume_prompt: String,
         attachments: Vec<MediaAttachment>,
         resume_attachments: Vec<MediaAttachment>,
+        interruption_prompt: Option<String>,
+        interruption_attachment_names: Vec<String>,
     },
     ResponsesToolState(String),
     ResponsesText {
@@ -793,6 +796,13 @@ struct PendingResponsesRequest {
     started_at: std::time::Instant,
 }
 
+struct InterruptedPrimaryChat {
+    tab_index: usize,
+    conversation_epoch: Option<String>,
+    request_id_state: Option<Arc<Mutex<Option<String>>>>,
+    interrupted_at: Instant,
+}
+
 // Initial composer discovery and the capability probe can take 105 seconds.
 const RESPONSE_BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -856,7 +866,9 @@ struct AgentTabRegistry {
     primary_response_tabs: HashMap<String, usize>,
     primary_by_thread: HashMap<String, AgentBrowserTab>,
     primary_request_to_thread: HashMap<String, String>,
+    interrupted_primary_chats: HashMap<String, InterruptedPrimaryChat>,
     response_request_ids: HashMap<usize, Arc<Mutex<Option<String>>>>,
+    retired_primary_response_ids: HashMap<usize, Arc<Mutex<Option<String>>>>,
     reusable_primary_response_tab: Option<usize>,
 }
 
@@ -1081,6 +1093,52 @@ impl AgentTabRegistry {
         self.primary_by_thread.get(thread_id)
     }
 
+    fn note_interrupted_primary(&mut self, request_id: &str) {
+        self.interrupted_primary_chats
+            .retain(|_, interrupted| interrupted.interrupted_at.elapsed() < INTERRUPTED_PRIMARY_CHAT_TTL);
+        let Some(thread_id) = self.primary_request_to_thread.get(request_id).cloned() else {
+            return;
+        };
+        let Some(tab) = self.primary_by_thread.get(&thread_id) else {
+            return;
+        };
+        if tab.active_request_id.as_deref() != Some(request_id) {
+            return;
+        }
+        self.interrupted_primary_chats.insert(
+            thread_id,
+            InterruptedPrimaryChat {
+                tab_index: tab.tab_index,
+                conversation_epoch: tab.conversation_epoch.clone(),
+                request_id_state: self
+                    .response_request_ids
+                    .get(&tab.tab_index)
+                    .or_else(|| self.retired_primary_response_ids.get(&tab.tab_index))
+                    .cloned(),
+                interrupted_at: Instant::now(),
+            },
+        );
+    }
+
+    fn take_interrupted_primary(
+        &mut self,
+        thread_id: &str,
+        conversation_epoch: Option<&str>,
+    ) -> Option<Arc<Mutex<Option<String>>>> {
+        let Some(interrupted) = self.interrupted_primary_chats.remove(thread_id) else {
+            return None;
+        };
+        let tab_still_matches = self.primary_by_thread.get(thread_id).is_some_and(|tab| {
+            tab.tab_index == interrupted.tab_index
+                && tab.conversation_epoch.as_deref() == interrupted.conversation_epoch.as_deref()
+        });
+        (tab_still_matches
+            && interrupted.interrupted_at.elapsed() < INTERRUPTED_PRIMARY_CHAT_TTL
+            && interrupted.conversation_epoch.as_deref() == conversation_epoch)
+            .then_some(interrupted.request_id_state)
+            .flatten()
+    }
+
     fn stale_response_request(
         &self,
         request_id: &str,
@@ -1115,6 +1173,9 @@ impl AgentTabRegistry {
             && let Ok(mut current) = state.lock()
         {
             *current = None;
+            if self.primary_request_to_thread.contains_key(request_id) {
+                self.retired_primary_response_ids.insert(tab_index, state.clone());
+            }
         }
     }
 
@@ -1130,6 +1191,12 @@ impl AgentTabRegistry {
         tab_index: usize,
         request_id_state: Arc<Mutex<Option<String>>>,
     ) {
+        if let Some(retired) = self.retired_primary_response_ids.remove(&tab_index)
+            && !Arc::ptr_eq(&retired, &request_id_state)
+            && let Ok(mut current) = retired.lock()
+        {
+            *current = None;
+        }
         if let Some(previous) = self.response_request_ids.insert(tab_index, request_id_state.clone())
             && !Arc::ptr_eq(&previous, &request_id_state)
             && let Ok(mut current) = previous.lock()
@@ -1397,6 +1464,14 @@ impl AgentTabRegistry {
                 self.primary_response_tabs.remove(&request_id);
             }
         }
+        self.interrupted_primary_chats.retain(|thread_id, interrupted| {
+            !removed_primary_threads.contains(thread_id) && interrupted.tab_index != tab_index
+        });
+        for interrupted in self.interrupted_primary_chats.values_mut() {
+            if interrupted.tab_index > tab_index {
+                interrupted.tab_index -= 1;
+            }
+        }
         canceled_requests.extend(
             self.primary_response_tabs
                 .iter()
@@ -1413,6 +1488,11 @@ impl AgentTabRegistry {
         {
             *current = None;
         }
+        if let Some(state) = self.retired_primary_response_ids.remove(&tab_index)
+            && let Ok(mut current) = state.lock()
+        {
+            *current = None;
+        }
         for index in self.primary_response_tabs.values_mut() {
             if *index > tab_index {
                 *index -= 1;
@@ -1425,6 +1505,11 @@ impl AgentTabRegistry {
         }
         let request_id_states = std::mem::take(&mut self.response_request_ids);
         self.response_request_ids = request_id_states
+            .into_iter()
+            .map(|(index, state)| (if index > tab_index { index - 1 } else { index }, state))
+            .collect();
+        let retired_request_id_states = std::mem::take(&mut self.retired_primary_response_ids);
+        self.retired_primary_response_ids = retired_request_id_states
             .into_iter()
             .map(|(index, state)| (if index > tab_index { index - 1 } else { index }, state))
             .collect();
@@ -1723,17 +1808,43 @@ fn run_event_loop(
         // request for the same conversation, using the normal release path.
         let request_to_release = match &event {
             Event::UserEvent(BrowserEvent::ReleaseResponses(request_id)) => Some(request_id.clone()),
-            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, conversation_id, agent, setup_smoke_test, .. }) => {
+            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, conversation_id, conversation_epoch, interruption_prompt, agent, setup_smoke_test, .. }) => {
                 if broker.snapshot(request_id)["active"].as_bool() != Some(true) {
                     return;
                 }
-                agent_tabs.stale_response_request(
+                let stale = agent_tabs.stale_response_request(
                     request_id,
                     conversation_id.as_deref(),
                     agent.as_ref(),
                     *setup_smoke_test,
                     &broker,
-                )
+                );
+                if let Some(previous_request_id) = stale.as_deref()
+                    && interruption_prompt.is_some()
+                    && let Some(thread_id) = conversation_id.as_deref()
+                    && agent_tabs
+                        .primary_tab_for_thread(thread_id)
+                        .is_some_and(|tab| {
+                            tab.conversation_epoch.as_deref() == conversation_epoch.as_deref()
+                        })
+                    && pending_responses.contains_key(previous_request_id)
+                {
+                    agent_tabs.note_interrupted_primary(previous_request_id);
+                    if let Some(view) = response_view_for_request(
+                        previous_request_id,
+                        &response_views,
+                        &agent_tabs,
+                        &webview,
+                        &extra_tabs,
+                    ) {
+                        let previous_request_id = serde_json::to_string(previous_request_id)
+                            .unwrap_or_else(|_| "null".to_owned());
+                        let _ = view.evaluate_script(&format!(
+                            "window.__web2codexCancel?.({previous_request_id});"
+                        ));
+                    }
+                }
+                stale
             }
             _ => None,
         };
@@ -1748,9 +1859,13 @@ fn run_event_loop(
             ) {
                 let _ = view.evaluate_script(&response_signal_script(&request_id, "window.__web2codexCompleted=true;"));
             }
-            // Without UI acknowledgement we cannot safely reuse the composer:
-            // an old generation or prompt dispatch may still be in flight.
-            if pending_responses.contains_key(&request_id) {
+            // Preserve a cancelled primary chat when the next request is an
+            // interruption from the same Codex thread and context epoch.
+            let preserve_interrupted_primary = agent_tabs
+                .primary_thread_for_request(&request_id)
+                .and_then(|thread_id| agent_tabs.interrupted_primary_chats.get(thread_id))
+                .is_some();
+            if pending_responses.contains_key(&request_id) && !preserve_interrupted_primary {
                 agent_tabs.require_fresh_response_view(&request_id);
             }
             release_background_focus_guard(
@@ -2216,6 +2331,8 @@ fn run_event_loop(
                                 request_id,
                                 primary_thread_id.as_deref(),
                                 primary_epoch,
+                                false,
+                                None,
                                 &window,
                                 context,
                                 event_proxy.clone(),
@@ -2394,7 +2511,7 @@ fn run_event_loop(
                 }
                 activate_browser_window(&window, BrowserActivationIntent::BackgroundWork);
             }
-            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, conversation_id, conversation_epoch, agent, setup_smoke_test, model, reasoning_effort, connector_required, mcp_required, mcp_action_required, tool_work_expected, prompt, stages, resume_prompt, attachments, resume_attachments }) => {
+            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, conversation_id, conversation_epoch, agent, setup_smoke_test, model, reasoning_effort, connector_required, mcp_required, mcp_action_required, tool_work_expected, prompt, stages, resume_prompt, attachments, resume_attachments, interruption_prompt, interruption_attachment_names }) => {
                 if let Err(error) = prepare_profile_directory(&profile_dir) {
                     broker.complete(&request_id, None, Err(error.to_string())); return;
                 }
@@ -2413,6 +2530,57 @@ fn run_event_loop(
                 }
                 let context = web_context.get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
                 let persistent_thread = !setup_smoke_test && (agent.is_some() || conversation_id.is_some());
+                let compaction = !stages.is_empty();
+                let mut interrupted_request_state = None;
+                if !compaction && agent.is_none() && interruption_prompt.is_some()
+                    && let Some(thread_id) = conversation_id.as_deref()
+                {
+                    let previous_request = agent_tabs
+                        .primary_tab_for_thread(thread_id)
+                        .filter(|tab| tab.conversation_epoch == conversation_epoch)
+                        .and_then(|tab| tab.active_request_id.clone())
+                        .filter(|previous_request| previous_request != &request_id);
+                    if let Some(previous_request) = previous_request
+                        && broker.snapshot(&previous_request)["active"].as_bool() == Some(true)
+                    {
+                        agent_tabs.note_interrupted_primary(&previous_request);
+                        if let Some(view) = response_view_for_request(
+                            &previous_request,
+                            &response_views,
+                            &agent_tabs,
+                            &webview,
+                            &extra_tabs,
+                        ) {
+                            let previous_request = serde_json::to_string(&previous_request)
+                                .unwrap_or_else(|_| "null".to_owned());
+                            let _ = view.evaluate_script(&format!(
+                                "window.__web2codexCancel?.({previous_request});"
+                            ));
+                        }
+                    }
+                    interrupted_request_state = agent_tabs
+                        .take_interrupted_primary(thread_id, conversation_epoch.as_deref());
+                }
+                let interrupt_existing_response = interrupted_request_state.is_some();
+                let prompt = if interrupt_existing_response {
+                    interruption_prompt.map_or(prompt, |message| {
+                        format!(
+                            "The user interrupted the previous response and sent a new message. Continue the same task, taking this message and its attachments into account:\n\nUser message:\n{message}"
+                        )
+                    })
+                } else {
+                    prompt
+                };
+                let attachments = if interrupt_existing_response {
+                    attachments
+                        .into_iter()
+                        .filter(|attachment| {
+                            interruption_attachment_names.contains(&attachment.name)
+                        })
+                        .collect()
+                } else {
+                    attachments
+                };
                 if let Some(agent) = agent {
                     if let Err(error) = open_agent_response_tab(
                         &agent,
@@ -2466,6 +2634,8 @@ fn run_event_loop(
                         &request_id,
                         conversation_id.as_deref(),
                         conversation_epoch.clone(),
+                        interrupt_existing_response,
+                        interrupted_request_state,
                         &window,
                         context,
                         event_proxy.clone(),
@@ -2487,7 +2657,6 @@ fn run_event_loop(
                         return;
                     }
                 }
-                let compaction = !stages.is_empty();
                 let stage_characters = stages
                     .iter()
                     .filter_map(|stage| stage["prompt"].as_str())
@@ -2602,6 +2771,7 @@ fn run_event_loop(
             }
             Event::UserEvent(BrowserEvent::ReleaseResponses(_)) => {}
             Event::UserEvent(BrowserEvent::CancelResponses(request_id)) => {
+                agent_tabs.note_interrupted_primary(&request_id);
                 if let Some(view) = response_view_for_request(
                     &request_id,
                     &response_views,
@@ -2938,6 +3108,8 @@ fn open_primary_response_tab(
     request_id: &str,
     conversation_id: Option<&str>,
     conversation_epoch: Option<String>,
+    interrupt_existing_response: bool,
+    interrupted_request_state: Option<Arc<Mutex<Option<String>>>>,
     window: &Window,
     context: &mut WebContext,
     event_proxy: EventLoopProxy<BrowserEvent>,
@@ -2956,11 +3128,9 @@ fn open_primary_response_tab(
         .as_ref()
         .and_then(|tab| tab.active_request_id.as_deref())
         .is_some_and(|active_request| active_request != request_id);
-    // An earlier ChatGPT response can still be completing a tool round when
-    // Codex issues its next request for the same thread. Keep that response
-    // isolated in its own view and continue in a fresh Temporary Chat with
-    // the full Codex context supplied by this request.
-    let existing_index = if previous_response_still_active {
+    // Independent requests get their own Temporary Chat. An explicit user
+    // interruption reuses the active chat after its response is stopped.
+    let existing_index = if previous_response_still_active && !interrupt_existing_response {
         None
     } else {
         previous
@@ -2968,18 +3138,23 @@ fn open_primary_response_tab(
             .map(|tab| tab.tab_index)
             .or_else(|| response_tabs.reusable_primary_response_tab())
     };
-    let reuse_existing = !previous_response_still_active && previous.as_ref().is_some_and(|tab| {
+    let reuse_existing = previous.as_ref().is_some_and(|tab| {
         tab.conversation_epoch == conversation_epoch
-            && response_tabs.response_request_id_state(tab.tab_index).is_some()
+            && (response_tabs.response_request_id_state(tab.tab_index).is_some()
+                || interrupt_existing_response)
     });
     let request_id_state = if reuse_existing {
         let state = response_tabs
             .response_request_id_state(existing_index.expect("reused chat tab has an index"))
-            .expect("reused chat tab has a response binding");
-        if let Ok(mut current) = state.lock() {
-            *current = Some(request_id.to_owned());
+            .or(interrupted_request_state);
+        if let Some(state) = state {
+            if let Ok(mut current) = state.lock() {
+                *current = Some(request_id.to_owned());
+            }
+            state
+        } else {
+            Arc::new(Mutex::new(Some(request_id.to_owned())))
         }
-        state
     } else {
         Arc::new(Mutex::new(Some(request_id.to_owned())))
     };
@@ -4018,6 +4193,8 @@ struct TextOnlyResponsesRequest {
     resume_prompt: String,
     attachments: Vec<MediaAttachment>,
     resume_attachments: Vec<MediaAttachment>,
+    interruption_prompt: Option<String>,
+    interruption_attachment_names: Vec<String>,
     stream: bool,
     tools: Vec<CallableTool>,
     connector_required: bool,
@@ -4720,6 +4897,7 @@ fn input_content_to_text(
     content: &serde_json::Value,
     attachments: &mut Vec<MediaAttachment>,
     required_media: bool,
+    include_images: bool,
 ) -> Result<String, RequestParseError> {
     let unsupported =
         |code, message: &str| ("422 Unprocessable Content", code, message.to_string());
@@ -4732,6 +4910,9 @@ fn input_content_to_text(
                     .get("type")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
+                if kind == "input_image" && !include_images {
+                    continue;
+                }
                 match kind {
                     "input_text" | "output_text" => {
                         let part_text = part
@@ -5029,7 +5210,7 @@ fn responses_input_to_prompt_with_policy(
     let mut sections = Vec::new();
     let mut seen_instruction_text = HashSet::new();
     // A fresh Temporary Chat needs earlier tool images as well as their text.
-    // In a tool continuation the active ChatGPT response already has them.
+    // Compaction intentionally omits images; a tool continuation already has them.
     let new_user_turn = items
         .iter()
         .rev()
@@ -5081,12 +5262,16 @@ fn responses_input_to_prompt_with_policy(
                     "input_format_unsupported",
                     "conversation message is missing content",
                 ))?;
-                let text =
-                    input_content_to_text(content, attachments, Some(index) == latest_input)?;
+                let text = input_content_to_text(
+                    content,
+                    attachments,
+                    Some(index) == latest_input,
+                    !compaction,
+                )?;
                 let text = if matches!(role, "system" | "developer") {
                     compact_default_base_instructions(&text)
                 } else {
-                    &text
+                    text
                 };
                 if matches!(role, "system" | "developer")
                     && !seen_instruction_text.insert(text.trim().to_owned())
@@ -5105,18 +5290,26 @@ fn responses_input_to_prompt_with_policy(
                 let Some(content) = item.get("content") else {
                     continue;
                 };
-                let text =
-                    input_content_to_text(content, attachments, Some(index) == latest_input)?;
+                let text = input_content_to_text(
+                    content,
+                    attachments,
+                    Some(index) == latest_input,
+                    !compaction,
+                )?;
                 if !text.trim().is_empty() {
                     sections.push(format!("Agent ({author}):\n{text}"));
                 }
             }
             "function_call_output" | "custom_tool_call_output" | "mcp_tool_call_output" => {
-                // Each user turn opens a new Temporary Chat. Preserve textual
+                // A new independent user turn opens a Temporary Chat. Preserve textual
                 // results from earlier tool rounds so the next turn retains
                 // the work already done; schemas still travel only via MCP.
                 if let Some(output) = item.get("output") {
-                    let text = tool_output_to_context(output, new_user_turn, attachments);
+                    let text = tool_output_to_context(
+                        output,
+                        new_user_turn && !compaction,
+                        attachments,
+                    );
                     if !text.trim().is_empty() {
                         sections.push(format!("Earlier tool result:\n{text}"));
                     }
@@ -5169,12 +5362,45 @@ fn responses_input_to_prompt_with_policy(
     Ok(sections.join("\n\n"))
 }
 
-fn compact_default_base_instructions(instructions: &str) -> &str {
-    if instructions.trim() == DEFAULT_BASE_INSTRUCTIONS.trim() {
-        COMPACT_BASE_INSTRUCTIONS
-    } else {
-        instructions
+fn latest_user_message_for_interrupt(
+    input: &serde_json::Value,
+) -> Result<Option<(String, Vec<String>)>, RequestParseError> {
+    let Some(items) = input.as_array() else {
+        return Ok(input.as_str().map(|text| (text.to_owned(), Vec::new())));
+    };
+    let Some(message) = items.iter().rev().find(|item| {
+        item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+            && item.get("role").and_then(serde_json::Value::as_str) == Some("user")
+    }) else {
+        return Ok(None);
+    };
+    let content = message.get("content").ok_or((
+        "422 Unprocessable Content",
+        "input_format_unsupported",
+        "the latest user message is missing content".to_string(),
+    ))?;
+    let mut attachments = Vec::new();
+    let text = input_content_to_text(content, &mut attachments, true, true)?;
+    let attachment_names = attachments
+        .into_iter()
+        .map(|attachment| attachment.name)
+        .collect();
+    Ok(Some((text, attachment_names)))
+}
+
+fn compact_default_base_instructions(instructions: &str) -> String {
+    let default = DEFAULT_BASE_INSTRUCTIONS.trim();
+    if instructions.trim() == default {
+        return COMPACT_BASE_INSTRUCTIONS.to_owned();
     }
+    // The default prompt can arrive combined with project instructions. Replace
+    // that built-in block in place while preserving all project-specific text.
+    if instructions.contains(default) {
+        return instructions.replace(default, COMPACT_BASE_INSTRUCTIONS);
+    }
+    let normalized = instructions.replace("\r\n", "\n");
+    let normalized_default = default.replace("\r\n", "\n");
+    normalized.replace(&normalized_default, COMPACT_BASE_INSTRUCTIONS)
 }
 
 fn split_compaction_context_into_four(context: &str) -> [String; 4] {
@@ -5366,6 +5592,13 @@ fn parse_text_only_responses_request(
         "input_format_unsupported",
         "request is missing input",
     ))?;
+    let (interruption_prompt, interruption_attachment_names) = if is_compaction {
+        (None, Vec::new())
+    } else {
+        latest_user_message_for_interrupt(input)?
+            .map(|(text, attachment_names)| (Some(text), attachment_names))
+            .unwrap_or_default()
+    };
     // A compaction handoff must start in a clean Temporary Chat so its four
     // messages do not inherit the already-large chat history being compacted.
     let conversation_epoch = if is_compaction {
@@ -5429,7 +5662,7 @@ fn parse_text_only_responses_request(
             .get("instructions")
             .and_then(serde_json::Value::as_str)
             .filter(|instructions| !instructions.trim().is_empty())
-            .map(|instructions| compact_default_base_instructions(instructions).to_owned())
+            .map(compact_default_base_instructions)
             .filter(|instructions| !prompt.contains(instructions.trim()))
     };
     if !expects_continuation && !is_compaction {
@@ -5501,6 +5734,8 @@ fn parse_text_only_responses_request(
         resume_prompt,
         attachments,
         resume_attachments,
+        interruption_prompt,
+        interruption_attachment_names,
         stream,
         tools,
         connector_required,

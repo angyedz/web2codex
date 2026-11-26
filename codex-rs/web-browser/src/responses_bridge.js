@@ -562,15 +562,16 @@
   let busy = false;
   let promptSubmitted = false;
   let requestCancelled = false;
+  let cancelledResponseNeedsStop = false;
   let activeRequestPrompt = "";
   let bindingRevision = 0;
   let bindingAttempt = 0;
   let lastSubmittedRequestId = null;
   window.__web2codexCancel = cancelledRequestId => {
-    if (cancelledRequestId !== requestId || !busy || requestCancelled ||
-        window.__web2codexCompleted) return false;
+    if (cancelledRequestId !== requestId || !busy || requestCancelled) return false;
     requestCancelled = true;
     if (promptSubmitted) {
+      cancelledResponseNeedsStop = true;
       stopButton()?.click();
     } else {
       const composer = findComposer();
@@ -585,11 +586,20 @@
   window.__web2codexBindRequest = async nextRequestId => {
     if (typeof nextRequestId !== "string" || !nextRequestId) return false;
     const attempt = ++bindingAttempt;
+    const previousWasCancelled = requestCancelled || cancelledResponseNeedsStop;
     // Native completion can be acknowledged just before the observer's final
     // sleep ends. Let that observer unwind before rebinding the retained page.
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + (previousWasCancelled ? 30000 : 5000);
     while (busy && attempt === bindingAttempt && Date.now() < deadline) await sleep(100);
     if (busy || attempt !== bindingAttempt) return false;
+    // A same-chat interruption must wait until ChatGPT has stopped generating
+    // before the next user message is typed into its composer.
+    if (previousWasCancelled) {
+      const stopDeadline = Date.now() + 30000;
+      while (stopVisible() && attempt === bindingAttempt && Date.now() < stopDeadline) await sleep(100);
+      if (stopVisible() || attempt !== bindingAttempt) return false;
+    }
+    cancelledResponseNeedsStop = false;
     const binding = ++bindingRevision;
     requestId = nextRequestId;
     window.__web2codexRequestId = nextRequestId;
@@ -669,6 +679,7 @@
     busy = true;
     promptSubmitted = false;
     requestCancelled = false;
+    cancelledResponseNeedsStop = false;
     activeRequestPrompt = request.prompt;
     window.__web2codexCompleted = false;
     window.__web2codexToolState = null;

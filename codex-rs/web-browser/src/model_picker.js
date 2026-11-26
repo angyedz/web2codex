@@ -62,11 +62,12 @@
     button.getAttribute("data-selected-reasoning-effort") !== null ||
     button.getAttribute("data-codex-intelligence-trigger") === "true";
   const findEffortControl = () => {
-    const controls = [...document.querySelectorAll('button[data-composer-navigation-target="reasoning"][aria-haspopup="menu"], button[data-selected-reasoning-effort][aria-haspopup="menu"], button[data-codex-intelligence-trigger="true"][aria-haspopup="menu"], button[aria-label*="reasoning effort" i], button[aria-label*="усилий рассуждения" i], button[data-tone="neutral"][aria-haspopup="menu"]')]
+    const controls = [...document.querySelectorAll('button[data-composer-navigation-target="reasoning"][aria-haspopup="menu"], button[data-selected-reasoning-effort][aria-haspopup="menu"], button[data-codex-intelligence-trigger="true"][aria-haspopup="menu"], button[aria-label*="reasoning effort" i], button[aria-label*="усилий рассуждения" i], button[data-tone="neutral"][aria-haspopup="menu"], button, [role="button"]')]
       .filter(visible).filter(button => !button.closest('[role="menu"], [role="listbox"]'));
     return controls.find(explicitEffortControl) ||
       controls.find(button => /reasoning|рассужд/i.test(button.getAttribute("aria-label") || "")) ||
-      controls.find(button => isEffort(text(button)));
+      controls.find(button => isEffort(text(button)) &&
+        (button.hasAttribute("aria-haspopup") || button.closest("form")));
   };
   const findControl = () => findModelControl() || findEffortControl();
   const effortControlResolver = initial => {
