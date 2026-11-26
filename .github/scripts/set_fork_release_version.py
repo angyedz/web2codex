@@ -108,7 +108,10 @@ def main() -> int:
         lock_updated_names.add(name)
         return replaced
 
-    lock_updated = PACKAGE_BLOCK.sub(update_lock_package, lock_text)
+    lock_updated = PACKAGE_BLOCK.sub(
+        lambda match: update_lock_package(match.group(0)),
+        lock_text,
+    )
     missing = package_names - lock_updated_names
     if missing:
         raise RuntimeError(
