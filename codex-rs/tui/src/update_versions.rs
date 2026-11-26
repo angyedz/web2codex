@@ -27,10 +27,7 @@ pub(crate) fn latest_release_api_url() -> String {
 
 #[cfg(any(not(debug_assertions), test))]
 pub(crate) fn is_newer(latest: &str, current: &str) -> Option<bool> {
-    match (parse_version(latest), parse_version(current)) {
-        (Some(l), Some(c)) => Some(l > c),
-        _ => None,
-    }
+    codex_build_info::is_newer_stable_release(latest, current)
 }
 
 #[cfg(any(not(debug_assertions), test))]
@@ -43,7 +40,8 @@ pub(crate) fn extract_version_from_latest_tag(latest_tag_name: &str) -> anyhow::
 
 #[cfg(any(not(debug_assertions), test))]
 pub(crate) fn is_source_build_version(version: &str) -> bool {
-    parse_version(version) == Some((0, 0, 0))
+    semver::Version::parse(version.trim())
+        .is_ok_and(|version| (version.major, version.minor, version.patch) == (0, 0, 0))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,15 +66,6 @@ pub(crate) fn server_version_notice_kind(
     }
     (server.build.is_empty() && server_release != (0, 0, 0) && client > server)
         .then_some(ServerVersionNoticeKind::Older)
-}
-
-#[cfg(any(not(debug_assertions), test))]
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let mut iter = v.trim().split('.');
-    let maj = iter.next()?.parse::<u64>().ok()?;
-    let min = iter.next()?.parse::<u64>().ok()?;
-    let pat = iter.next()?.parse::<u64>().ok()?;
-    Some((maj, min, pat))
 }
 
 #[cfg(test)]
@@ -116,12 +105,18 @@ mod tests {
     fn source_build_version_is_not_checked() {
         assert!(is_source_build_version("0.0.0"));
         assert!(!is_source_build_version("0.1.0"));
+        assert!(!is_source_build_version("0.1.0-prealpha.20261125"));
     }
 
     #[test]
     fn whitespace_is_ignored() {
-        assert_eq!(parse_version(" 1.2.3 \n"), Some((1, 2, 3)));
         assert_eq!(is_newer(" 1.2.3 ", "1.2.2"), Some(true));
+    }
+
+    #[test]
+    fn stable_release_is_compared_to_installed_prealpha() {
+        assert_eq!(is_newer("0.1.0", "0.1.0-prealpha.20261125"), Some(true));
+        assert_eq!(is_newer("0.0.9", "0.1.0-prealpha.20261125"), Some(false));
     }
 
     #[test]

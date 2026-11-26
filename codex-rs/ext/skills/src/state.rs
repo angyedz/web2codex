@@ -123,9 +123,11 @@ impl SkillsThreadState {
         &self,
         cloud: Option<SkillCatalog>,
         executor: SkillCatalog,
+        host: Option<SkillCatalog>,
         discovery_v2: bool,
     ) -> SkillStepCatalog {
-        let mut step = SkillStepCatalog::new(cloud, executor, discovery_v2, Default::default());
+        let mut step = SkillStepCatalog::new(cloud, executor, discovery_v2, Default::default())
+            .with_host_catalog(host);
         step.aliases = self.aliases.capture(
             step.merged
                 .entries

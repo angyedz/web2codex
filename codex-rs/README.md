@@ -1,3 +1,3 @@
-# Codex CLI
+# Web2Codex CLI
 
-[**Codex CLI Documentation**](https://developers.openai.com/codex/cli)
+[**Web2Codex CLI Documentation**](https://developers.openai.com/codex/cli) (upstream reference)

@@ -151,6 +151,8 @@ impl McpToolCallCell {
         let status = self.success();
         let node_repl = self.result_kind() == McpResultKind::NodeRepl;
         let compact = node_repl && mode == McpToolCallRenderMode::Display;
+        let compact_standard = !node_repl && mode == McpToolCallRenderMode::Display;
+        let compact_invocation = compact || compact_standard;
         let bullet = match status {
             Some(true) => "•".green().bold(),
             Some(false) => "•".red().bold(),
@@ -176,7 +178,7 @@ impl McpToolCallCell {
             .and_then(serde_json::Value::as_str)
             .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
             .filter(|title| !title.is_empty());
-        let invocation_line = if compact {
+        let invocation_line = if compact_invocation {
             Line::from(
                 title
                     .clone()
@@ -195,12 +197,12 @@ impl McpToolCallCell {
         let mut compact_header = Line::from(compact_spans.clone());
         let reserved = compact_header.width();
 
-        let inline_invocation =
-            compact || invocation_line.width() <= (width as usize).saturating_sub(reserved);
+        let inline_invocation = compact_invocation
+            || invocation_line.width() <= (width as usize).saturating_sub(reserved);
 
         if inline_invocation {
             compact_header.extend(invocation_line.spans.clone());
-            lines.push(mcp_header_line(if compact {
+            lines.push(mcp_header_line(if compact_invocation {
                 truncate_line_with_ellipsis_if_overflow(compact_header, width as usize)
             } else {
                 compact_header
@@ -239,6 +241,8 @@ impl McpToolCallCell {
 
     /// Share one bounded preview across result blocks while retaining full transcript sources.
     fn render_detail_lines(&self, width: u16, mode: McpToolCallRenderMode) -> Vec<HyperlinkLine> {
+        let compact_standard =
+            self.result_kind() == McpResultKind::Standard && mode == McpToolCallRenderMode::Display;
         let detail_width = usize::from(width)
             .saturating_sub(/*rhs*/ 4)
             .max(/*other*/ 1);
@@ -266,7 +270,12 @@ impl McpToolCallCell {
                             ));
                         }
                     }
-                    let Some(text) = self.result_block_text(block, mode) else {
+                    let text = if compact_standard {
+                        block.compact_preview_text().map(Cow::Borrowed)
+                    } else {
+                        self.result_block_text(block, mode)
+                    };
+                    let Some(text) = text else {
                         continue;
                     };
                     for segment in text.lines() {
@@ -283,6 +292,9 @@ impl McpToolCallCell {
                 }
             }
             Some(Err(error)) => {
+                if mode == McpToolCallRenderMode::Display && result::is_json_value(error) {
+                    return lines;
+                }
                 let text = format!("Error: {error}");
                 for segment in text.lines() {
                     if mode == McpToolCallRenderMode::Display {
@@ -314,6 +326,9 @@ impl McpToolCallCell {
         let node_repl = self.result_kind() == McpResultKind::NodeRepl;
         if mode == McpToolCallRenderMode::Transcript {
             return Some(Cow::Borrowed(block.render_full()));
+        }
+        if node_repl && block.is_json_fallback() && block.text().is_none() {
+            return None;
         }
         if node_repl && self.success() == Some(true) {
             let meaningful_output = block.text().and_then(|text| {

@@ -15,7 +15,7 @@ Scenario: The fork excludes the blocked turn and submits the selected rewrite.
     [03] <COLLABORATION_MODE>
     [04] <tools>
         Deferred tool namespaces:
-        - codex_tui: Manage Codex tasks available through the connected app server.
+        - codex_tui: Manage Web2Codex tasks available through the connected app server.
         </tools>
 02:message/user:
     <ENVIRONMENT_CONTEXT>
@@ -32,7 +32,7 @@ Scenario: The fork excludes the blocked turn and submits the selected rewrite.
     [03] <COLLABORATION_MODE>
     [04] <tools>
         Deferred tool namespaces:
-        - codex_tui: Manage Codex tasks available through the connected app server.
+        - codex_tui: Manage Web2Codex tasks available through the connected app server.
         </tools>
 02:message/user:
     <ENVIRONMENT_CONTEXT>

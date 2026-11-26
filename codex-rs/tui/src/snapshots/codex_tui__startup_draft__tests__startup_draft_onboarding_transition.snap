@@ -6,10 +6,10 @@ before onboarding: hidden (0x0 viewport)
 ---
 after onboarding:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ Web2Codex (v<VERSION>)
      loading
 
 
-› Ask Codex to do anything
+› Ask Web2Codex to do anything
 
   ? for shortcuts

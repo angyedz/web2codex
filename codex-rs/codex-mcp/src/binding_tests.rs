@@ -500,7 +500,7 @@ async fn sandbox_executable_requires_local_stdio_and_a_full_cli() -> anyhow::Res
         .expect("prepared call");
     // Use a probe-capable CLI so remote/HTTP exclusions cannot pass merely
     // because the supplied executable lacks the sandbox capability.
-    let executable = codex_utils_cargo_bin::cargo_bin("codex")?;
+    let executable = codex_utils_cargo_bin::cargo_bin("web2codex")?;
     for (server, runtime_environment, path, expected) in [
         (
             serde_json::json!({"command": "mcp"}),

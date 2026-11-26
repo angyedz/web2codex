@@ -100,7 +100,6 @@ fn approval_metadata(
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     }
 }
 
@@ -266,10 +265,11 @@ fn install_mcp_permission_request_hook(
     matcher: &str,
     hook_output: &serde_json::Value,
 ) -> std::path::PathBuf {
-    let script_path = turn_context
-        .config
-        .codex_home
-        .join("mcp_permission_request_hook.py");
+    let script_path = turn_context.config.codex_home.join(if cfg!(windows) {
+        "mcp_permission_request_hook.ps1"
+    } else {
+        "mcp_permission_request_hook.py"
+    });
     let log_path = turn_context
         .config
         .codex_home
@@ -277,8 +277,21 @@ fn install_mcp_permission_request_hook(
     let hook_output = hook_output.to_string();
     std::fs::create_dir_all(&turn_context.config.codex_home)
         .expect("create codex home for MCP permission hook");
-    let script = format!(
-        r#"import json
+    let (script, command) = if cfg!(windows) {
+        let powershell_literal = |value: &str| format!("'{}'", value.replace('\'', "''"));
+        let log_path = powershell_literal(&log_path.display().to_string());
+        let hook_output = powershell_literal(&hook_output);
+        let script = format!(
+            r#"$inputJson = [Console]::In.ReadToEnd().TrimEnd([char[]]@([char]13, [char]10))
+[IO.File]::AppendAllText({log_path}, $inputJson + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+[Console]::Out.WriteLine({hook_output})
+"#
+        );
+        let script_path = powershell_literal(&script_path.display().to_string());
+        (script, format!("& {script_path}"))
+    } else {
+        let script = format!(
+            r#"import json
 from pathlib import Path
 import sys
 
@@ -288,20 +301,17 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
 
 print({hook_output:?})
 "#,
-        log_path = log_path.display(),
-        hook_output = hook_output,
-    );
-
-    std::fs::write(&script_path, script).expect("write MCP permission hook script");
-    let python = if cfg!(windows) { "python" } else { "python3" };
-    let script_path_arg = if cfg!(windows) {
-        script_path.display().to_string()
-    } else {
-        format!(
+            log_path = log_path.display(),
+            hook_output = hook_output,
+        );
+        let script_path_arg = format!(
             "'{}'",
             script_path.display().to_string().replace('\'', "'\\''")
-        )
+        );
+        (script, format!("python3 {script_path_arg}"))
     };
+
+    std::fs::write(&script_path, script).expect("write MCP permission hook script");
     std::fs::write(
         turn_context.config.codex_home.join("hooks.json"),
         serde_json::json!({
@@ -310,7 +320,7 @@ print({hook_output:?})
                     "matcher": matcher,
                     "hooks": [{
                         "type": "command",
-                        "command": format!("{python} {script_path_arg}"),
+                        "command": command,
                         "timeout_sec": 5,
                     }]
                 }]
@@ -334,9 +344,19 @@ print({hook_output:?})
     let hooks = session.hooks().reconfigured(HooksConfig {
         feature_enabled: true,
         config_layer_stack: Some(trusted_config_layer_stack),
-        shell_program: (!cfg!(windows)).then_some("/bin/sh".to_string()),
+        shell_program: Some(if cfg!(windows) {
+            "powershell.exe".to_string()
+        } else {
+            "/bin/sh".to_string()
+        }),
         shell_args: if cfg!(windows) {
-            Vec::new()
+            vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+            ]
         } else {
             vec!["-c".to_string()]
         },
@@ -1655,7 +1675,6 @@ async fn codex_apps_tool_call_request_meta_includes_turn_metadata_and_codex_apps
             .cloned()
             .expect("_codex_apps metadata should be an object"),
         ),
-        openai_file_input_optional_fields: None,
     };
 
     let mut expected_apps_meta = serde_json::json!({
@@ -2147,7 +2166,6 @@ fn guardian_mcp_review_request_includes_annotations_when_present() {
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
 
     let request = build_guardian_mcp_tool_review_request("call-1", &invocation, Some(&metadata));
@@ -2978,7 +2996,6 @@ async fn approve_mode_skips_when_annotations_do_not_require_approval() {
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
 
     let decision = maybe_request_mcp_tool_approval(
@@ -3062,7 +3079,6 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
 
     let decision = maybe_request_mcp_tool_approval(
@@ -3128,7 +3144,6 @@ async fn permission_request_hook_allows_mcp_tool_call() {
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
 
     let decision = maybe_request_mcp_tool_approval(
@@ -3298,7 +3313,6 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
     let remembered_key = session_mcp_tool_approval_key(
         &McpServerKey::unscoped(&invocation.server),
@@ -3411,7 +3425,6 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip(
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
     let mut captured_mcp_config = approval_config(&turn_context);
     captured_mcp_config
@@ -3507,7 +3520,6 @@ async fn assert_mcp_user_approval_persistence(
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
 
     let approval_task = tokio::spawn({
@@ -3596,7 +3608,6 @@ async fn prompt_mode_waits_for_approval_when_annotations_do_not_require_approval
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
 
     let mut approval_task = {
@@ -3664,7 +3675,6 @@ async fn full_access_mode_skips_mcp_tool_approval_for_all_approval_modes() {
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
 
     for approval_mode in [
@@ -3726,7 +3736,6 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
         mcp_app_resource_uri: None,
         mcp_app_ui: None,
         codex_apps_meta: None,
-        openai_file_input_optional_fields: None,
     };
 
     for approval_policy in [

@@ -24,6 +24,8 @@ use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::ProfileV2Name;
 use codex_utils_cli::SharedCliOptions;
 use std::collections::HashSet;
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::path::PathBuf;
@@ -149,7 +151,7 @@ enum Subcommand {
     /// Update Web2Codex from the latest GitHub Release.
     Update,
 
-    /// Open the fork's private ChatGPT WebView window.
+    /// Open Web2Codex's private ChatGPT WebView window.
     Web(web_browser::WebCommand),
 
     /// Diagnose the Web2Codex installation, account WebView, tunnel, and runtime.
@@ -264,7 +266,7 @@ struct DebugModelsCommand {}
 
 #[derive(Debug, Parser)]
 struct ReviewCommand {
-    /// Error out when config.toml contains fields that are not recognized by this version of Codex.
+    /// Error out when config.toml contains fields that are not recognized by this version of Web2Codex.
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
@@ -349,7 +351,7 @@ struct SessionArchiveConfigOverrides {
     #[clap(flatten)]
     shared: SharedCliOptions,
 
-    /// Error out when config.toml contains fields that are not recognized by this version of Codex.
+    /// Error out when config.toml contains fields that are not recognized by this version of Web2Codex.
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
@@ -442,7 +444,7 @@ type HostSandboxArgs = UnsupportedSandboxArgs;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Debug, Parser)]
 struct UnsupportedSandboxArgs {
-    /// Layer $CODEX_HOME/<name>.config.toml on top of the base user config.
+    /// Layer a profile from the Web2Codex home (`WEB2CODEX_HOME`; legacy `CODEX_HOME`) on top of the base user config.
     #[arg(long = "profile", short = 'p')]
     pub config_profile: Option<ProfileV2Name>,
 
@@ -479,7 +481,7 @@ struct AppServerCommand {
     #[command(flatten)]
     code_mode_host: codex_app_server::AppServerCodeModeHostArgs,
 
-    /// Error out when config.toml contains fields that are not recognized by this version of Codex.
+    /// Error out when config.toml contains fields that are not recognized by this version of Web2Codex.
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
@@ -537,7 +539,7 @@ enum AppServerSubcommand {
     /// [experimental] Generate JSON Schema for the app server protocol.
     GenerateJsonSchema(GenerateJsonSchemaCommand),
 
-    /// [internal] Generate internal JSON Schema artifacts for Codex tooling.
+    /// [internal] Generate internal JSON Schema artifacts for Web2Codex tooling.
     #[clap(hide = true)]
     GenerateInternalJsonSchema(GenerateInternalJsonSchemaCommand),
 }
@@ -693,12 +695,12 @@ fn run_update_action(
             status.success(),
             "Daemon update failed with status {status}"
         );
-        println!("Relaunch Codex to reconnect.");
+        println!("Relaunch Web2Codex to reconnect.");
         return Ok(());
     }
     println!();
     let cmd_str = action.command_str();
-    println!("Updating Codex via `{cmd_str}`...");
+    println!("Updating Web2Codex via `{cmd_str}`...");
     let status = {
         #[cfg(windows)]
         {
@@ -922,9 +924,16 @@ fn main() -> anyhow::Result<()> {
     codex_build_info::initialize!();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         // Finish polling the large subcommand dispatcher before polling interactive TUI events.
-        if let Some(tui) = Box::pin(dispatch_cli(arg0_paths)).await? {
-            let result = tui.await;
-            result?;
+        match Box::pin(dispatch_cli(arg0_paths)).await {
+            Ok(Some(tui)) => tui.await?,
+            Ok(None) => {}
+            Err(err) if err.downcast_ref::<codex_exec::ExecTurnFailed>().is_some() => {
+                // dispatch_cli has returned, so its BrowserSession has already dropped and
+                // stopped any tunnel it started. Preserve the non-zero status without
+                // printing a second generic error after the model's actionable message.
+                std::process::exit(1);
+            }
+            Err(err) => return Err(err),
         }
         Ok(())
     })
@@ -934,6 +943,9 @@ fn main() -> anyhow::Result<()> {
 /// Codex Desktop exports CODEX_HOME to child processes, so the standalone
 /// binary must replace it before any config or secret store is loaded.
 fn initialize_web2codex_home() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    clear_inherited_registered_core_flag()?;
+
     let configured_home = std::env::var_os("WEB2CODEX_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
@@ -954,6 +966,24 @@ fn initialize_web2codex_home() -> anyhow::Result<()> {
     // The config loader uses this product marker to keep project-local
     // settings in `.web2codex/` instead of reading a repository's `.codex/`.
     unsafe { std::env::set_var("WEB2CODEX_HOME", home.as_path()) };
+    Ok(())
+}
+
+#[cfg(windows)]
+fn clear_inherited_registered_core_flag() -> anyhow::Result<()> {
+    const REGISTERED_CORE_VARIABLE: &str = "CODEX_WINDOWS_REGISTERED_CORE";
+    let value = std::env::var_os(REGISTERED_CORE_VARIABLE);
+    if value.as_deref() == Some(OsStr::new("1"))
+        && codex_cli::should_clear_registered_core_flag(
+            value.as_deref(),
+            codex_windows_sandbox::process_has_package_identity()?,
+        )
+    {
+        // A standalone Web2Codex process can inherit this MSIX-only flag from
+        // Codex Desktop. Keep registered-Core mode only when Windows confirms
+        // this process itself has a package identity.
+        unsafe { std::env::remove_var(REGISTERED_CORE_VARIABLE) };
+    }
     Ok(())
 }
 
@@ -989,7 +1019,7 @@ async fn dispatch_cli(
         && let Some(agents_endpoint) = &options.remote.remote
         && root_endpoint != agents_endpoint
     {
-        anyhow::bail!("`codex agents` received conflicting remote server endpoints");
+        anyhow::bail!("`web2codex agents` received conflicting remote server endpoints");
     }
     let root_remote = agents_options
         .and_then(|options| options.remote.remote.clone())
@@ -1025,7 +1055,7 @@ async fn dispatch_cli(
             );
             if open_agents_overview {
                 if interactive.prompt.is_some() || !interactive.images.is_empty() {
-                    anyhow::bail!("`codex agents` does not accept an initial prompt or images");
+                    anyhow::bail!("`web2codex agents` does not accept an initial prompt or images");
                 }
                 if root_remote.is_some()
                     && (interactive.oss
@@ -1043,7 +1073,7 @@ async fn dispatch_cli(
                             }))
                 {
                     anyhow::bail!(
-                        "`codex agents` cannot apply local provider or additional-directory overrides to a remote server"
+                        "`web2codex agents` cannot apply local provider or additional-directory overrides to a remote server"
                     );
                 }
                 interactive.agents_overview = true;
@@ -1073,8 +1103,9 @@ async fn dispatch_cli(
                 &mut exec_cli.config_overrides,
                 root_config_overrides.clone(),
             );
+            let browser_session = web_browser::BrowserSession::connect()?;
             exec_cli.config_overrides.raw_overrides.extend(
-                crate::web_browser::interactive_provider_overrides(exec_cli.shared.cwd.as_deref())?,
+                browser_session.provider_overrides(exec_cli.shared.cwd.as_deref())?,
             );
             // Keep the exec future out of the shared dispatcher's stack frame.
             Box::pin(codex_exec::run_main(exec_cli, arg0_paths.clone())).await?;
@@ -1104,8 +1135,9 @@ async fn dispatch_cli(
                 &mut exec_cli.config_overrides,
                 root_config_overrides.clone(),
             );
+            let browser_session = web_browser::BrowserSession::connect()?;
             exec_cli.config_overrides.raw_overrides.extend(
-                crate::web_browser::interactive_provider_overrides(exec_cli.shared.cwd.as_deref())?,
+                browser_session.provider_overrides(exec_cli.shared.cwd.as_deref())?,
             );
             Box::pin(codex_exec::run_main(exec_cli, arg0_paths.clone())).await?;
         }
@@ -1215,8 +1247,9 @@ async fn dispatch_cli(
                         ..Default::default()
                     };
                     let mut model_config_overrides = root_config_overrides;
+                    let browser_session = web_browser::BrowserSession::connect()?;
                     model_config_overrides.raw_overrides.extend(
-                        crate::web_browser::interactive_provider_overrides(
+                        browser_session.provider_overrides(
                             interactive.shared.cwd.as_deref(),
                         )?,
                     );
@@ -1554,8 +1587,9 @@ async fn dispatch_cli(
                 "doctor",
             )?;
             let mut doctor_config_overrides = root_config_overrides.clone();
+            let browser_session = web_browser::BrowserSession::connect()?;
             doctor_config_overrides.raw_overrides.extend(
-                web_browser::interactive_provider_overrides(interactive.shared.cwd.as_deref())?,
+                browser_session.provider_overrides(interactive.shared.cwd.as_deref())?,
             );
             doctor::run_doctor(
                 doctor_cli,
@@ -1625,7 +1659,7 @@ async fn dispatch_cli(
             #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             {
                 let _ = loader_overrides;
-                anyhow::bail!("`codex sandbox` is not supported on this operating system");
+                anyhow::bail!("`web2codex sandbox` is not supported on this operating system");
             }
         }
         Some(Subcommand::Debug(DebugCommand { subcommand })) => match subcommand {
@@ -1883,7 +1917,8 @@ async fn run_debug_prompt_input_command(
     let shared = interactive.shared.into_inner();
     let mut raw_overrides = root_config_overrides.raw_overrides;
     raw_overrides.extend(interactive.config_overrides.raw_overrides);
-    raw_overrides.extend(crate::web_browser::interactive_provider_overrides(
+    let browser_session = web_browser::BrowserSession::connect()?;
+    raw_overrides.extend(browser_session.provider_overrides(
         workspace.as_deref(),
     )?);
     let mut cli_kv_overrides = CliConfigOverrides { raw_overrides }
@@ -1986,9 +2021,10 @@ async fn run_debug_models_command(
     cwd: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let mut root_config_overrides = root_config_overrides;
+    let browser_session = web_browser::BrowserSession::connect()?;
     root_config_overrides
         .raw_overrides
-        .extend(crate::web_browser::interactive_provider_overrides(cwd)?);
+        .extend(browser_session.provider_overrides(cwd)?);
     let cli_overrides = root_config_overrides
         .parse_overrides()
         .map_err(anyhow::Error::msg)?;
@@ -2059,12 +2095,12 @@ fn reject_remote_mode_for_subcommand(
 ) -> anyhow::Result<()> {
     if let Some(remote) = remote {
         anyhow::bail!(
-            "`--remote {remote}` is only supported for interactive TUI commands, not `codex {subcommand}`"
+            "`--remote {remote}` is only supported for interactive TUI commands, not `web2codex {subcommand}`"
         );
     }
     if remote_auth_token_env.is_some() {
         anyhow::bail!(
-            "`--remote-auth-token-env` is only supported for interactive TUI commands, not `codex {subcommand}`"
+            "`--remote-auth-token-env` is only supported for interactive TUI commands, not `web2codex {subcommand}`"
         );
     }
     Ok(())
@@ -2094,12 +2130,12 @@ fn reject_unsupported_worktree_for_subcommand(
         None => Ok(()),
         Some(Subcommand::Fork(command)) if command.session_id.is_some() && !command.last => Ok(()),
         Some(Subcommand::Fork(_)) => {
-            anyhow::bail!("`codex fork --worktree` requires an explicit session ID")
+            anyhow::bail!("`web2codex fork --worktree` requires an explicit session ID")
         }
         Some(Subcommand::Exec(command)) => match &command.command {
             None | Some(ExecCommand::Fork(_)) => Ok(()),
             Some(ExecCommand::Resume(_)) => anyhow::bail!(
-                "`--worktree` cannot resume an existing session; use `codex exec fork --worktree`"
+                "`--worktree` cannot resume an existing session; use `web2codex exec fork --worktree`"
             ),
             Some(ExecCommand::Review(_)) => {
                 anyhow::bail!("`--worktree` is not supported for code review")
@@ -2107,7 +2143,7 @@ fn reject_unsupported_worktree_for_subcommand(
         },
         _ => {
             anyhow::bail!(
-                "`--worktree` supports new interactive sessions, `codex fork`, `codex exec`, and `codex exec fork`"
+                "`--worktree` supports new interactive sessions, `web2codex fork`, `web2codex exec`, and `web2codex exec fork`"
             )
         }
     }
@@ -2193,7 +2229,7 @@ fn reject_strict_config_for_unsupported_subcommand(
     subcommand: &str,
 ) -> anyhow::Result<()> {
     if strict_config {
-        anyhow::bail!("`--strict-config` is not supported for `codex {subcommand}`");
+        anyhow::bail!("`--strict-config` is not supported for `web2codex {subcommand}`");
     }
     Ok(())
 }
@@ -2270,7 +2306,7 @@ async fn run_interactive_tui(
 ) -> std::io::Result<AppExitInfo> {
     if remote.is_some() || remote_auth_token_env.is_some() {
         return Ok(AppExitInfo::fatal(
-            "Web2Codex runs the local Codex harness with ChatGPT Web models; remote Codex servers are not supported.",
+            "Web2Codex runs its local coding harness with ChatGPT Web models; remote servers are not supported.",
         ));
     }
     if let Some(prompt) = interactive.prompt.take() {
@@ -2287,7 +2323,7 @@ async fn run_interactive_tui(
         }
 
         eprintln!(
-            "WARNING: TERM is set to \"dumb\". Codex's interactive TUI may not work in this terminal."
+            "WARNING: TERM is set to \"dumb\". Web2Codex's interactive TUI may not work in this terminal."
         );
         if !confirm("Continue anyway? [y/N]: ")? {
             return Ok(AppExitInfo::fatal(
@@ -2308,9 +2344,13 @@ async fn run_interactive_tui(
             "Web2Codex uses ChatGPT Web models only; local OSS model providers are not supported.",
         ));
     }
-    crate::web_browser::prepare_interactive_launch().map_err(std::io::Error::other)?;
+    let browser_session = web_browser::BrowserSession::connect().map_err(std::io::Error::other)?;
+    browser_session
+        .prepare_interactive_launch()
+        .map_err(std::io::Error::other)?;
     interactive.config_overrides.raw_overrides.extend(
-        crate::web_browser::interactive_provider_overrides(interactive.shared.cwd.as_deref())
+        browser_session
+            .provider_overrides(interactive.shared.cwd.as_deref())
             .map_err(std::io::Error::other)?,
     );
     if interactive.agents_overview && remote_endpoint.is_none() {
@@ -2378,7 +2418,7 @@ where
             Err(backup_err) => {
                 local_state_db::print_diagnostic_guidance(startup_error);
                 return Ok(AppExitInfo::fatal(format!(
-                    "failed to move damaged Codex local database files into a backup folder automatically: {backup_err}"
+                    "failed to move damaged Web2Codex local database files into a backup folder automatically: {backup_err}"
                 )));
             }
         }
@@ -2434,7 +2474,7 @@ fn confirm(prompt: &str) -> std::io::Result<bool> {
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
-/// Build the final `TuiCli` for a `codex resume` invocation.
+/// Build the final `TuiCli` for a `web2codex resume` invocation.
 fn finalize_resume_interactive(
     mut interactive: TuiCli,
     root_config_overrides: CliConfigOverrides,
@@ -2469,7 +2509,7 @@ fn finalize_resume_interactive(
     interactive
 }
 
-/// Build the final `TuiCli` for a `codex fork` invocation.
+/// Build the final `TuiCli` for a `web2codex fork` invocation.
 fn finalize_fork_interactive(
     mut interactive: TuiCli,
     root_config_overrides: CliConfigOverrides,
@@ -2645,7 +2685,7 @@ mod tests {
 
     #[tokio::test]
     async fn updater_http_client_factory_honors_respect_system_proxy() {
-        let codex_home = tempfile::tempdir().expect("temporary Codex home");
+        let codex_home = tempfile::tempdir().expect("temporary Web2Codex home");
         let config = ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
             .cli_overrides(vec![(
@@ -2676,7 +2716,7 @@ mod tests {
 
     #[tokio::test]
     async fn updater_http_client_factory_enforces_application_requirements() {
-        let home = tempfile::tempdir().expect("temporary Codex home");
+        let home = tempfile::tempdir().expect("temporary Web2Codex home");
         let requirements = home.path().join("requirements.toml");
         std::fs::write(
             &requirements,
@@ -3197,7 +3237,7 @@ enabled = true
     }
 
     fn default_app_server_socket_path() -> AbsolutePathBuf {
-        let codex_home = find_codex_home().expect("codex home");
+        let codex_home = find_codex_home().expect("Web2Codex home");
         codex_app_server::app_server_control_socket_path(&codex_home)
             .expect("default app-server socket path")
     }
@@ -3270,19 +3310,19 @@ enabled = true
 
     #[test]
     fn plugin_marketplace_help_uses_plugin_namespace() {
-        let help = help_from_args(&["codex", "plugin", "marketplace", "--help"]);
+        let help = help_from_args(&["web2codex", "plugin", "marketplace", "--help"]);
         assert!(
-            help.contains("Usage: codex plugin marketplace [OPTIONS] <COMMAND>"),
+            help.contains("Usage: web2codex plugin marketplace [OPTIONS] <COMMAND>"),
             "{help}"
         );
 
         for (subcommand, usage) in [
-            ("add", "Usage: codex plugin marketplace add"),
-            ("list", "Usage: codex plugin marketplace list"),
-            ("upgrade", "Usage: codex plugin marketplace upgrade"),
-            ("remove", "Usage: codex plugin marketplace remove"),
+            ("add", "Usage: web2codex plugin marketplace add"),
+            ("list", "Usage: web2codex plugin marketplace list"),
+            ("upgrade", "Usage: web2codex plugin marketplace upgrade"),
+            ("remove", "Usage: web2codex plugin marketplace remove"),
         ] {
-            let help = help_from_args(&["codex", "plugin", "marketplace", subcommand, "--help"]);
+            let help = help_from_args(&["web2codex", "plugin", "marketplace", subcommand, "--help"]);
             assert!(help.contains(usage), "{help}");
         }
     }
@@ -3605,8 +3645,8 @@ enabled = true
             vec![
                 "Disconnected from this task. Any running work continues.",
                 "To reconnect, run:",
-                "  codex --remote wss://example.com:443/ --remote-auth-token-env CODEX_REMOTE_TOKEN resume 123e4567-e89b-12d3-a456-426614174000",
-                "Stop the current turn: run codex --remote wss://example.com:443/ --remote-auth-token-env CODEX_REMOTE_TOKEN agents, select this task, and press ctrl + x.",
+                "  web2codex --remote wss://example.com:443/ --remote-auth-token-env CODEX_REMOTE_TOKEN resume 123e4567-e89b-12d3-a456-426614174000",
+                "Stop the current turn: run web2codex --remote wss://example.com:443/ --remote-auth-token-env CODEX_REMOTE_TOKEN agents, select this task, and press ctrl + x.",
                 "Token usage so far: total=2 input=0 output=2",
             ]
         );
@@ -3654,7 +3694,7 @@ enabled = true
             vec![
                 "Token usage: total=2 input=0 output=2".to_string(),
                 "To continue this session, run:".to_string(),
-                "  codex resume 123e4567-e89b-12d3-a456-426614174000".to_string(),
+                "  web2codex resume 123e4567-e89b-12d3-a456-426614174000".to_string(),
             ]
         );
     }
@@ -3669,7 +3709,7 @@ enabled = true
                 insta::assert_snapshot!(lines.join("\n"), @"
                 Token usage: total=2 input=0 output=2
                 To continue this session, run:
-                  codex resume 123e4567-e89b-12d3-a456-426614174000
+                  web2codex resume 123e4567-e89b-12d3-a456-426614174000
                 ");
             }
         }
@@ -3687,7 +3727,7 @@ enabled = true
             vec![
                 "Token usage: total=2 input=0 output=2",
                 "To continue this session, run:",
-                "  \u{1b}[36mcodex resume 123e4567-e89b-12d3-a456-426614174000\u{1b}[39m",
+                "  \u{1b}[36mweb2codex resume 123e4567-e89b-12d3-a456-426614174000\u{1b}[39m",
             ]
         );
     }
@@ -3702,8 +3742,8 @@ enabled = true
         insta::assert_snapshot!(lines.join("\n"), @"
         Token usage: total=2 input=0 output=2
         To continue this session, run:
-          codex resume 123e4567-e89b-12d3-a456-426614174000
-        Or run codex resume and select my-thread.
+          web2codex resume 123e4567-e89b-12d3-a456-426614174000
+        Or run web2codex resume and select my-thread.
         ");
     }
 
@@ -3719,8 +3759,8 @@ enabled = true
             vec![
                 "Token usage: total=2 input=0 output=2",
                 "To continue this session, run:",
-                "  \u{1b}[36mcodex resume 123e4567-e89b-12d3-a456-426614174000\u{1b}[39m",
-                "Or run \u{1b}[36mcodex resume\u{1b}[39m and select \u{1b}[36mmy-thread\u{1b}[39m.",
+                "  \u{1b}[36mweb2codex resume 123e4567-e89b-12d3-a456-426614174000\u{1b}[39m",
+                "Or run \u{1b}[36mweb2codex resume\u{1b}[39m and select \u{1b}[36mmy-thread\u{1b}[39m.",
             ]
         );
     }
@@ -4065,7 +4105,7 @@ enabled = true
 
         assert_eq!(
             err.to_string(),
-            "`--strict-config` is not supported for `codex app-server proxy`"
+            "`--strict-config` is not supported for `web2codex app-server proxy`"
         );
     }
 

@@ -14,7 +14,7 @@ Scenario: Clear context and implement the approved plan in a fresh thread.
     [03] <COLLABORATION_MODE>
     [04] <tools>
         Deferred tool namespaces:
-        - codex_tui: Manage Codex tasks available through the connected app server.
+        - codex_tui: Manage Web2Codex tasks available through the connected app server.
         </tools>
 02:message/user:
     <ENVIRONMENT_CONTEXT>

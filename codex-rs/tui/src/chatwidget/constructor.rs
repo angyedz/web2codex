@@ -4,8 +4,17 @@ use super::*;
 
 impl ChatWidget {
     pub(crate) fn new_with_app_event(common: ChatWidgetInit) -> Self {
+        #[cfg(not(test))]
+        let open_first_run_setup =
+            crate::bottom_pane::McpTunnelSetupView::should_offer_first_run_setup();
+        #[cfg(test)]
+        let open_first_run_setup = false;
+
         let mut widget = Self::new_with_op_target(common, CodexOpTarget::AppEvent);
         widget.bottom_pane.enable_agents_navigation();
+        if open_first_run_setup {
+            widget.open_mcp_tunnel_setup();
+        }
         widget
     }
 
@@ -134,6 +143,7 @@ impl ChatWidget {
             has_codex_backend_auth,
             model_catalog,
             model_popup_request_id: None,
+            effort_catalog_request: None,
             permission_popup_pending: false,
             permission_popup_request_id: None,
             permission_discovery: None,

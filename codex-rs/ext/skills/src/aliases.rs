@@ -91,7 +91,8 @@ impl SkillAliasState {
             let selector = match kind {
                 SkillSourceKind::Cloud => SkillToolAuthoritySelector::Cloud,
                 SkillSourceKind::Executor => SkillToolAuthoritySelector::Executor,
-                SkillSourceKind::Host | SkillSourceKind::Custom(_) => continue,
+                SkillSourceKind::Host => SkillToolAuthoritySelector::Host,
+                SkillSourceKind::Custom(_) => continue,
             };
             aliases.extend(selector, [root.as_str()]);
         }
@@ -104,6 +105,7 @@ impl SkillAliasState {
 pub(crate) struct SkillCatalogAliases {
     cloud: Arc<AliasPlan>,
     executor: Arc<AliasPlan>,
+    host: Arc<AliasPlan>,
     budget: AliasBudget,
 }
 
@@ -112,7 +114,8 @@ impl SkillCatalogAliases {
         let plan = match locator.alias_source() {
             Some(SkillSourceKind::Cloud) => &self.cloud,
             Some(SkillSourceKind::Executor) => &self.executor,
-            Some(SkillSourceKind::Host | SkillSourceKind::Custom(_)) | None => return None,
+            Some(SkillSourceKind::Host) => &self.host,
+            Some(SkillSourceKind::Custom(_)) | None => return None,
         };
         plan.expand(locator.as_str())
     }
@@ -125,6 +128,7 @@ impl SkillCatalogAliases {
         let (plan, prefix) = match selector {
             SkillToolAuthoritySelector::Cloud => (&mut self.cloud, "c"),
             SkillToolAuthoritySelector::Executor => (&mut self.executor, "e"),
+            SkillToolAuthoritySelector::Host => (&mut self.host, "r"),
         };
         plan.extend_alias_plan(prefix, roots, &mut self.budget);
     }
@@ -133,6 +137,7 @@ impl SkillCatalogAliases {
         match selector {
             SkillToolAuthoritySelector::Cloud => &self.cloud,
             SkillToolAuthoritySelector::Executor => &self.executor,
+            SkillToolAuthoritySelector::Host => &self.host,
         }
     }
 }

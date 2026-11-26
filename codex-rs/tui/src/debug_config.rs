@@ -806,7 +806,7 @@ interrupt_message = false
     #[test]
     fn debug_config_output_lists_requirement_sources() {
         let requirements_file = if cfg!(windows) {
-            absolute_path("C:\\ProgramData\\OpenAI\\Codex\\requirements.toml")
+            absolute_path("C:\\ProgramData\\OpenAI\\Web2Codex\\requirements.toml")
         } else {
             absolute_path("/etc/codex/requirements.toml")
         };
@@ -1070,7 +1070,7 @@ interrupt_message = false
     #[test]
     fn debug_config_output_filters_sandbox_modes_blocked_by_deny_read_requirements() {
         let requirements_file = if cfg!(windows) {
-            absolute_path("C:\\ProgramData\\OpenAI\\Codex\\requirements.toml")
+            absolute_path("C:\\ProgramData\\OpenAI\\Web2Codex\\requirements.toml")
         } else {
             absolute_path("/etc/codex/requirements.toml")
         };

@@ -1,7 +1,7 @@
-use super::windows_codex_system_dir;
+use super::windows_system_config_dir;
 use std::path::Path;
 
-/// Coarse compatibility result for the default Windows system-config namespace.
+/// Coarse compatibility result for the Windows system-config namespace.
 #[derive(Clone, Copy)]
 pub enum WindowsSystemConfigNamespaceProbe {
     Missing,
@@ -16,10 +16,10 @@ pub enum WindowsSystemConfigNamespaceProbe {
 /// This is not a trust decision: it only checks directory owner and broad
 /// standard-user mutation ACLs.
 pub fn probe_windows_system_config_namespace() -> WindowsSystemConfigNamespaceProbe {
-    let codex_dir = windows_codex_system_dir();
+    let product_dir = windows_system_config_dir();
     let has_system_file = match (
-        codex_dir.join("config.toml").try_exists(),
-        codex_dir.join("requirements.toml").try_exists(),
+        product_dir.join("config.toml").try_exists(),
+        product_dir.join("requirements.toml").try_exists(),
     ) {
         (Ok(true), _) | (_, Ok(true)) => true,
         (Ok(false), Ok(false)) => false,
@@ -28,18 +28,18 @@ pub fn probe_windows_system_config_namespace() -> WindowsSystemConfigNamespacePr
     if !has_system_file {
         return WindowsSystemConfigNamespaceProbe::Missing;
     }
-    let Some(openai_dir) = codex_dir.parent() else {
+    let Some(parent_dir) = product_dir.parent() else {
         return WindowsSystemConfigNamespaceProbe::CheckError;
     };
     let result = probe_directory(
-        openai_dir,
+        parent_dir,
         codex_windows_sandbox::path_has_standard_user_mutation_allow,
     );
     if !matches!(result, WindowsSystemConfigNamespaceProbe::Expected) {
         return result;
     }
     let result = probe_directory(
-        codex_dir.as_path(),
+        product_dir.as_path(),
         codex_windows_sandbox::path_or_child_file_has_standard_user_mutation_allow,
     );
     if !matches!(result, WindowsSystemConfigNamespaceProbe::Expected) {

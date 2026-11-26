@@ -15,7 +15,7 @@ Warning notice:
 
 
 
-› Ask Codex to do anything
+› Ask Web2Codex to do anything
 
   GPT-5.6-Sol default · /tmp/project
   ? for shortcuts                                     ⚠ 2 warnings · f2 to view
@@ -27,7 +27,7 @@ First warning details:
 
   Warnings · 1 of 2 · Startup
 
-  Codex could not update marketplace `team`: upgraded marketplace name `other`
+  Web2Codex could not update marketplace `team`: upgraded marketplace name `other`
   does not match configured marketplace `team`
 
 
@@ -45,7 +45,7 @@ Second warning details:
 
   Warnings · 2 of 2 · Startup
 
-  Codex could not update marketplace `work`: upgraded marketplace name `other`
+  Web2Codex could not update marketplace `work`: upgraded marketplace name `other`
   does not match configured marketplace `work`
 
 

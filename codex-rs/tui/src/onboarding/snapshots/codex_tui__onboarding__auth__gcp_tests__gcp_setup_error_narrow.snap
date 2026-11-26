@@ -5,7 +5,7 @@ expression: terminal.backend().to_string()
 > Set up Google Cloud Vertex AI
 
   Enter an absolute file path on the
-host running Codex, or press Enter to
+host running Web2Codex, or press Enter to
 use Application Default Credentials
 (ADC).
 

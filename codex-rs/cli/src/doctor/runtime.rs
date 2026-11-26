@@ -1,4 +1,4 @@
-//! Captures how this Codex process was launched.
+//! Captures how this Web2Codex process was launched.
 //!
 //! Runtime diagnostics answer provenance questions that are hard to infer from
 //! user reports: which binary is running, which install channel it resembles,
@@ -28,7 +28,10 @@ pub(super) fn runtime_check() -> DoctorCheck {
     let platform = format!("{os}-{arch}");
     let install_method = install_method_name(&install_context);
     let mut details = vec![
-        format!("version: {}", env!("CARGO_PKG_VERSION")),
+        format!(
+            "version: {}",
+            codex_build_info::runtime_version(env!("CARGO_PKG_VERSION"))
+        ),
         format!("platform: {platform}"),
         format!(
             "install method: {}",
@@ -99,7 +102,7 @@ pub(super) fn search_check() -> DoctorCheck {
     };
     let mut check = DoctorCheck::new("runtime.search", "search", status, summary).details(details);
     if status != CheckStatus::Ok {
-        check = check.remediation("Install ripgrep or repair the bundled Codex package.");
+        check = check.remediation("Install ripgrep or repair the bundled Web2Codex package.");
     }
     check
 }

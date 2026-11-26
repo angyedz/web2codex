@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tao::event_loop::EventLoopProxy;
 use uuid::Uuid;
 
-use crate::turn_broker::{NativeEvent, TurnBroker};
+use crate::turn_broker::{NativeEvent, ReasoningHeading, TurnBroker, TurnIdentity};
 use crate::{
     BrowserEvent, INFERENCE_TIMEOUT, ParsedHttpRequest, client_connection_closed,
     completed_response_object, json_error, parse_text_only_responses_request,
@@ -21,20 +21,66 @@ use crate::{
 
 struct Observer<'a> {
     token: String,
+    epoch: u64,
     request_id: String,
     broker: &'a TurnBroker,
-    event_proxy: &'a EventLoopProxy<BrowserEvent>,
+    dispatch: &'a dyn Fn(BrowserEvent) -> bool,
     keep_turn: bool,
+    cancel_browser: bool,
+    retired: bool,
+}
+
+#[derive(Default)]
+struct ReasoningStreamState {
+    item_id: Option<String>,
+    output_index: Option<usize>,
+    summary: Vec<String>,
+}
+
+impl ReasoningStreamState {
+    fn append(&mut self, heading: &ReasoningHeading, message_started: bool) {
+        if self.item_id.is_none() {
+            self.item_id = Some(heading.item_id.clone());
+            self.output_index = Some(message_started as usize);
+        }
+        self.summary.push(heading.text.clone());
+    }
+
+    fn message_output_index(&self) -> usize {
+        (self.output_index == Some(0)) as usize
+    }
+
+    fn output_item(&self) -> Option<Value> {
+        let id = self.item_id.as_ref()?;
+        Some(json!({
+            "id": id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": self.summary.iter().map(|text| json!({"type":"summary_text", "text":text})).collect::<Vec<_>>(),
+            "content": [],
+            "encrypted_content": null
+        }))
+    }
+}
+
+impl Observer<'_> {
+    fn retire(&mut self) {
+        if self.retired || self.keep_turn {
+            return;
+        }
+        self.retired = true;
+        if self.broker.retire_observer(&self.token, self.epoch) {
+            if self.cancel_browser {
+                (self.dispatch)(BrowserEvent::CancelResponses(self.request_id.clone()));
+            }
+            (self.dispatch)(BrowserEvent::ReleaseResponses(self.request_id.clone()));
+        }
+    }
 }
 
 impl Drop for Observer<'_> {
     fn drop(&mut self) {
-        if !self.keep_turn {
-            self.broker.retire(&self.token);
-            let _ = self
-                .event_proxy
-                .send_event(BrowserEvent::ReleaseResponses(self.request_id.clone()));
-        }
+        self.retire();
     }
 }
 
@@ -79,10 +125,11 @@ pub(super) fn handle_connector(
             return;
         }
     };
-    let result = if request.path == "/bridge/tools" {
-        broker.inventory(&body)
-    } else {
-        broker.invoke(&body, || client_connection_closed(stream))
+    let result = match request.path.as_str() {
+        "/bridge/tools" => broker.inventory(&body),
+        "/bridge/tool-result" => broker.poll_result(&body, || client_connection_closed(stream)),
+        "/bridge/invoke" => broker.invoke(&body, || client_connection_closed(stream)),
+        _ => return,
     };
     match result {
         Ok(value) => {
@@ -104,6 +151,20 @@ pub(super) fn handle(
     event_proxy: &EventLoopProxy<BrowserEvent>,
     broker: &Arc<TurnBroker>,
 ) {
+    handle_with_dispatch(
+        stream,
+        request,
+        &|event| event_proxy.send_event(event).is_ok(),
+        broker,
+    );
+}
+
+fn handle_with_dispatch(
+    stream: &mut TcpStream,
+    request: &ParsedHttpRequest,
+    dispatch: &dyn Fn(BrowserEvent) -> bool,
+    broker: &TurnBroker,
+) {
     if !json_content_type(request) {
         let _ = write_json_response(
             stream,
@@ -122,7 +183,7 @@ pub(super) fn handle(
             let _ = write_json_response(
                 stream,
                 status,
-                &json_error("invalid_request_error", code, message),
+                &json_error("invalid_request_error", code, &message),
             );
             return;
         }
@@ -130,7 +191,16 @@ pub(super) fn handle(
     if client_connection_closed(stream) {
         return;
     }
-    let resumed = match broker.resume(&parsed.outputs, &parsed.tools) {
+    let identity = if let Some(agent) = &parsed.agent {
+        TurnIdentity::Thread(agent.thread_id.clone())
+    } else if parsed.setup_smoke_test {
+        TurnIdentity::SetupSmokeTest
+    } else if let Some(thread_id) = &parsed.conversation_id {
+        TurnIdentity::Thread(thread_id.clone())
+    } else {
+        TurnIdentity::Anonymous
+    };
+    let resumed = match broker.resume_scoped(&parsed.outputs, &parsed.tools, &identity) {
         Ok(resumed) => resumed,
         Err(message) => {
             let _ = write_json_response(
@@ -141,8 +211,8 @@ pub(super) fn handle(
             return;
         }
     };
-    let (token, request_id, fresh) = match resumed {
-        Some((token, request_id)) => (token, request_id, false),
+    let (token, request_id, epoch, fresh) = match resumed {
+        Some((token, request_id, epoch)) => (token, request_id, epoch, false),
         None if parsed.expects_continuation => {
             let _ = write_json_response(
                 stream,
@@ -157,8 +227,8 @@ pub(super) fn handle(
         }
         None => {
             let request_id = Uuid::new_v4().to_string();
-            match broker.begin(request_id.clone(), parsed.tools, parsed.tool_choice.clone()) {
-                Ok(token) => (token, request_id, true),
+            match broker.begin_scoped(request_id.clone(), parsed.tools, identity) {
+                Ok(token) => (token, request_id, 0, true),
                 Err(message) => {
                     let _ = write_json_response(
                         stream,
@@ -172,46 +242,59 @@ pub(super) fn handle(
     };
     let mut observer = Observer {
         token,
+        epoch,
         request_id,
         broker,
-        event_proxy,
+        dispatch,
         keep_turn: false,
+        cancel_browser: true,
+        retired: false,
     };
-    if let Err(message) = broker.begin_response(&observer.token) {
-        let _ = write_json_response(
-            stream,
-            "409 Conflict",
-            &json_error("bridge_error", "turn_resume_failed", &message),
-        );
-        return;
-    }
     if fresh {
         // Only connector selection and a turn capability are added to the text.
         // Tool definitions are available exclusively through the MCP connector.
-        let choice_guidance = match parsed.tool_choice {
-            crate::ToolChoice::None => {
-                "Do not invoke tools through the Web2Codex connector for this response.\n\n"
+        let wrap_prompt = |content: &str| {
+            if !parsed.compaction_stages.is_empty() {
+                return content.to_owned();
             }
-            crate::ToolChoice::Required | crate::ToolChoice::Named { .. } => {
-                "Invoke an available tool through the Web2Codex connector before answering. Tool availability is provided by MCP discovery.\n\n"
+            if parsed.connector_required {
+                format!(
+                    "{} turn_token: {}. Copy it unchanged in connector calls.\n\n{}",
+                    parsed.tool_choice.instructions(),
+                    observer.token,
+                    content
+                )
+            } else {
+                format!(
+                    "{}\n\n{}",
+                    parsed.tool_choice.instructions(),
+                    content
+                )
             }
-            crate::ToolChoice::Auto => "",
         };
-        let prompt = format!(
-            "You are continuing a Web2Codex coding-agent conversation. Use the selected Web2Codex connector when tools are needed. Current harness turn_token: {}. Copy it unchanged in connector calls. Return user-facing answers in ordinary prose.\n\n{}",
-            observer.token,
-            format!("{choice_guidance}{}", parsed.prompt)
-        );
-        if event_proxy
-            .send_event(BrowserEvent::ResponsesRequest {
-                request_id: observer.request_id.clone(),
-                model: parsed.model.clone(),
-                reasoning_effort: parsed.reasoning_effort.clone(),
-                prompt,
-                attachments: parsed.attachments.clone(),
-            })
-            .is_err()
-        {
+        let prompt = wrap_prompt(&parsed.prompt);
+        let resume_prompt = wrap_prompt(&parsed.resume_prompt);
+        let stages = parsed.compaction_stages.iter().map(|stage| {
+            json!({"prompt":stage.prompt,"acknowledgement":stage.acknowledgement})
+        }).collect::<Vec<_>>();
+        if !dispatch(BrowserEvent::ResponsesRequest {
+            request_id: observer.request_id.clone(),
+            conversation_id: parsed.conversation_id.clone(),
+            conversation_epoch: parsed.conversation_epoch.clone(),
+            agent: parsed.agent.clone(),
+            setup_smoke_test: parsed.setup_smoke_test,
+            model: parsed.model.clone(),
+            reasoning_effort: parsed.reasoning_effort.clone(),
+            connector_required: parsed.connector_required,
+            mcp_required: parsed.mcp_required,
+            mcp_action_required: parsed.mcp_action_required,
+            tool_work_expected: parsed.tool_work_expected,
+            prompt,
+            stages,
+            resume_prompt,
+            attachments: parsed.attachments.clone(),
+            resume_attachments: parsed.resume_attachments.clone(),
+        }) {
             let _ = write_json_response(
                 stream,
                 "503 Service Unavailable",
@@ -228,6 +311,7 @@ pub(super) fn handle(
     let message_item_id = format!("msg_{}", Uuid::new_v4().simple());
     let mut message_started = false;
     let mut streamed_text = String::new();
+    let mut reasoning = ReasoningStreamState::default();
     if parsed.stream {
         if write_sse_header(stream).is_err() {
             return;
@@ -240,24 +324,64 @@ pub(super) fn handle(
         if client_connection_closed(stream) {
             return;
         }
-        match broker.next_event(&observer.token) {
+        match broker.next_event(&observer.token, observer.epoch) {
             Ok(Some(event)) => {
-                if let Some(delta) = event.text_delta.as_deref() {
+                if let Some(heading) = event.reasoning_heading.as_ref() {
+                    reasoning.append(heading, message_started);
                     if parsed.stream
-                        && write_text_delta(
-                            stream,
-                            &message_item_id,
-                            delta,
-                            &mut message_started,
-                            &mut streamed_text,
-                        )
-                        .is_err()
+                        && write_reasoning_heading(stream, &mut reasoning, heading).is_err()
                     {
                         return;
                     }
                     continue;
                 }
+                if let Some(delta) = event.text_delta.as_deref() {
+                    if parsed.stream {
+                        if write_text_delta(
+                            stream,
+                            &message_item_id,
+                            delta,
+                            reasoning.message_output_index(),
+                            &mut message_started,
+                            &mut streamed_text,
+                        )
+                        .is_err()
+                        {
+                            return;
+                        }
+                    } else if !delta.is_empty() {
+                        // The first observed text fixes the output order for
+                        // both streamed and non-streamed Responses.
+                        message_started = true;
+                    }
+                    continue;
+                }
                 let end_turn = event.end_turn;
+                if let Err(message) = parsed.tool_choice.check_output(&event.item, end_turn) {
+                    observer.retire();
+                    if parsed.stream {
+                        let _ = write_sse_error(
+                            stream,
+                            &response_id,
+                            "tool_choice_unsatisfied",
+                            message,
+                        );
+                        let _ = finish_sse(stream);
+                    } else {
+                        let _ = write_json_response(
+                            stream,
+                            "502 Bad Gateway",
+                            &json_error("bridge_error", "tool_choice_unsatisfied", message),
+                        );
+                    }
+                    return;
+                }
+                if end_turn {
+                    // Queue release before exposing terminal completion to the client.
+                    // A new request can arrive immediately after that completion.
+                    observer.cancel_browser = false;
+                    observer.retire();
+                }
                 let result = if parsed.stream {
                     write_completion(
                         stream,
@@ -265,6 +389,7 @@ pub(super) fn handle(
                         &parsed.model,
                         &event,
                         &message_item_id,
+                        &mut reasoning,
                         &mut message_started,
                         &mut streamed_text,
                     )
@@ -275,7 +400,7 @@ pub(super) fn handle(
                         &completed_response_object(
                             &response_id,
                             &parsed.model,
-                            response_output_items(&event, &message_item_id),
+                            response_output_items(&event, &message_item_id, &reasoning),
                             event.end_turn,
                         ),
                     )
@@ -283,11 +408,18 @@ pub(super) fn handle(
                 // A fully delivered native call transfers observation to Codex's
                 // next request. A disconnect/cancel retires the browser and MCP waiters.
                 observer.keep_turn = result.is_ok() && !end_turn;
+                observer.cancel_browser = !result.is_ok();
                 return;
             }
             Err(message) => {
+                observer.retire();
                 if parsed.stream {
-                    let _ = write_sse_error(stream, "chatgpt_web_request_failed", &message);
+                    let _ = write_sse_error(
+                        stream,
+                        &response_id,
+                        "chatgpt_web_request_failed",
+                        &message,
+                    );
                     let _ = finish_sse(stream);
                 } else {
                     let _ = write_json_response(
@@ -301,9 +433,11 @@ pub(super) fn handle(
             Ok(None) => {}
         }
         if Instant::now() >= deadline {
+            observer.retire();
             if parsed.stream {
                 let _ = write_sse_error(
                     stream,
+                    &response_id,
                     "chatgpt_web_timeout",
                     "ChatGPT did not settle this request; it was cancelled without retry",
                 );
@@ -322,11 +456,11 @@ pub(super) fn handle(
             return;
         }
         if parsed.stream && last_heartbeat.elapsed() >= Duration::from_secs(10) {
-            if stream
-                .write_all(b"E\r\n: keep-alive\n\n\r\n")
-                .and_then(|()| stream.flush())
-                .is_err()
-            {
+            // The Responses client resets its idle deadline only after a full
+            // SSE data event; comment heartbeats are discarded by EventSource.
+            // Send an ignorable Responses event so long subagent/tool waits keep
+            // the stream alive until ChatGPT produces its final answer.
+            if write_sse_event(stream, &json!({"type":"codex.response.keepalive"})).is_err() {
                 return;
             }
             last_heartbeat = Instant::now();
@@ -341,12 +475,28 @@ fn write_completion(
     model: &str,
     event: &NativeEvent,
     message_item_id: &str,
+    reasoning: &ReasoningStreamState,
     message_started: &mut bool,
     streamed_text: &mut String,
 ) -> std::io::Result<()> {
-    let output_items = response_output_items(event, message_item_id);
+    let output_items = response_output_items(event, message_item_id, reasoning);
     for (output_index, item) in output_items.iter().enumerate() {
-        if item["type"] == "message" {
+        if item["type"] == "reasoning" {
+            let item_id = item["id"].as_str().unwrap_or_default();
+            for (summary_index, summary) in
+                item["summary"].as_array().into_iter().flatten().enumerate()
+            {
+                let text = summary["text"].as_str().unwrap_or_default();
+                write_sse_event(
+                    stream,
+                    &json!({"type":"response.reasoning_summary_text.done", "item_id":item_id, "output_index":output_index, "summary_index":summary_index, "text":text}),
+                )?;
+                write_sse_event(
+                    stream,
+                    &json!({"type":"response.reasoning_summary_part.done", "item_id":item_id, "output_index":output_index, "summary_index":summary_index, "part":{"type":"summary_text", "text":text}}),
+                )?;
+            }
+        } else if item["type"] == "message" {
             if !*message_started {
                 write_sse_event(
                     stream,
@@ -365,6 +515,7 @@ fn write_completion(
             let Some(suffix) = text.strip_prefix(streamed_text.as_str()) else {
                 let _ = write_sse_error(
                     stream,
+                    response_id,
                     "chatgpt_stream_revised",
                     "ChatGPT changed text after it was sent to the client",
                 );
@@ -379,6 +530,7 @@ fn write_completion(
                     stream,
                     message_item_id,
                     suffix,
+                    output_index,
                     message_started,
                     streamed_text,
                 )?;
@@ -413,6 +565,7 @@ fn write_text_delta(
     stream: &mut TcpStream,
     message_item_id: &str,
     delta: &str,
+    output_index: usize,
     message_started: &mut bool,
     streamed_text: &mut String,
 ) -> std::io::Result<()> {
@@ -423,17 +576,17 @@ fn write_text_delta(
         let item = message_item(message_item_id, "");
         write_sse_event(
             stream,
-            &json!({"type":"response.output_item.added", "output_index":0, "item":response_item_for_added(&item)}),
+            &json!({"type":"response.output_item.added", "output_index":output_index, "item":response_item_for_added(&item)}),
         )?;
         write_sse_event(
             stream,
-            &json!({"type":"response.content_part.added", "item_id":message_item_id, "output_index":0, "content_index":0, "part":{"type":"output_text", "text":"", "annotations":[]}}),
+            &json!({"type":"response.content_part.added", "item_id":message_item_id, "output_index":output_index, "content_index":0, "part":{"type":"output_text", "text":"", "annotations":[]}}),
         )?;
         *message_started = true;
     }
     write_sse_event(
         stream,
-        &json!({"type":"response.output_text.delta", "item_id":message_item_id, "output_index":0, "content_index":0, "delta":delta}),
+        &json!({"type":"response.output_text.delta", "item_id":message_item_id, "output_index":output_index, "content_index":0, "delta":delta}),
     )?;
     streamed_text.push_str(delta);
     Ok(())
@@ -449,16 +602,58 @@ fn message_item(message_item_id: &str, text: &str) -> Value {
     })
 }
 
-fn response_output_items(event: &NativeEvent, message_item_id: &str) -> Vec<Value> {
+fn write_reasoning_heading(
+    stream: &mut TcpStream,
+    reasoning: &ReasoningStreamState,
+    heading: &ReasoningHeading,
+) -> std::io::Result<()> {
+    let output_index = reasoning.output_index.unwrap_or(0);
+    if heading.summary_index == 0 {
+        let item = json!({
+            "id": heading.item_id,
+            "type": "reasoning",
+            "summary": [],
+            "content": [],
+            "encrypted_content": null,
+            "status": "in_progress"
+        });
+        write_sse_event(
+            stream,
+            &json!({"type":"response.output_item.added", "output_index":output_index, "item":item}),
+        )?;
+    } else {
+        write_sse_event(
+            stream,
+            &json!({"type":"response.reasoning_summary_part.added", "item_id":heading.item_id, "output_index":output_index, "summary_index":heading.summary_index}),
+        )?;
+    }
+    write_sse_event(
+        stream,
+        &json!({"type":"response.reasoning_summary_text.delta", "item_id":heading.item_id, "output_index":output_index, "summary_index":heading.summary_index, "delta":heading.text}),
+    )
+}
+
+fn response_output_items(
+    event: &NativeEvent,
+    message_item_id: &str,
+    reasoning: &ReasoningStreamState,
+) -> Vec<Value> {
     let has_message = event.item["type"] == "message" || !event.segment_text.is_empty();
-    let mut output = Vec::with_capacity(2);
+    let mut indexed = Vec::with_capacity(3);
+    if let Some(item) = reasoning.output_item() {
+        indexed.push((reasoning.output_index.unwrap_or(0), item));
+    }
     if has_message {
-        output.push(message_item(message_item_id, &event.segment_text));
+        indexed.push((
+            reasoning.message_output_index(),
+            message_item(message_item_id, &event.segment_text),
+        ));
     }
     if !event.item.is_null() && event.item["type"] != "message" {
-        output.push(event.item.clone());
+        indexed.push((indexed.len(), event.item.clone()));
     }
-    output
+    indexed.sort_by_key(|(index, _)| *index);
+    indexed.into_iter().map(|(_, item)| item).collect()
 }
 
 fn finish_sse(stream: &mut TcpStream) -> std::io::Result<()> {
@@ -468,101 +663,302 @@ fn finish_sse(stream: &mut TcpStream) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        ReasoningStreamState, finish_sse, response_output_items, write_completion, write_sse_error,
+        write_sse_header, write_text_delta,
+    };
+    use crate::turn_broker::{NativeEvent, ReasoningHeading};
+    use serde_json::json;
     use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
 
-    fn read_chunked_body(mut stream: TcpStream) -> String {
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).unwrap();
-        let raw = String::from_utf8(raw).unwrap();
-        let mut body = raw.split_once("\r\n\r\n").unwrap().1.as_bytes();
-        let mut decoded = Vec::new();
-        loop {
-            let line_end = body.windows(2).position(|bytes| bytes == b"\r\n").unwrap();
-            let chunk_size =
-                usize::from_str_radix(std::str::from_utf8(&body[..line_end]).unwrap(), 16).unwrap();
-            body = &body[line_end + 2..];
-            if chunk_size == 0 {
-                break;
+    #[test]
+    fn parallel_agent_http_streams_complete_and_release_independently() {
+        use super::handle_with_dispatch;
+        use crate::{BrowserEvent, ParsedHttpRequest, turn_broker::TurnBroker};
+        use std::collections::{HashMap, HashSet};
+        use std::net::Shutdown;
+        use std::sync::{Arc, mpsc};
+        use std::time::{Duration, Instant};
+
+        let broker = Arc::new(TurnBroker::default());
+        let (sender, receiver) = mpsc::channel();
+        // The actual HTTP handler receives overlapping parent and child turns,
+        // with only the platform-specific WebView event dispatcher replaced.
+        for round in [
+            vec!["parent", "architecture", "purpose", "stream"],
+            vec!["parent"],
+        ] {
+            let mut workers = Vec::new();
+            for name in &round {
+                let name = *name;
+                let mut metadata = json!({"thread_id":name});
+                if name != "parent" {
+                    metadata["x-openai-subagent"] = json!("collab_spawn");
+                    metadata["x-codex-turn-metadata"] =
+                        json!(json!({"agent_name":format!("/root/{name}")}).to_string());
+                }
+                let request = ParsedHttpRequest {
+                    method: "POST".into(),
+                    path: "/v1/responses".into(),
+                    authorization: String::new(),
+                    content_type: Some("application/json".into()),
+                    body: serde_json::to_vec(&json!({
+                        "model":"test-model", "input":format!("request-{name}"),
+                        "stream":true, "client_metadata":metadata,
+                    }))
+                    .unwrap(),
+                };
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                client
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                client.shutdown(Shutdown::Write).unwrap();
+                let (mut server, _) = listener.accept().unwrap();
+                let broker = Arc::clone(&broker);
+                let sender = sender.clone();
+                workers.push((
+                    name,
+                    client,
+                    thread::spawn(move || {
+                        handle_with_dispatch(
+                            &mut server,
+                            &request,
+                            &|event| sender.send(event).is_ok(),
+                            &broker,
+                        );
+                    }),
+                ));
             }
-            decoded.extend_from_slice(&body[..chunk_size]);
-            body = &body[chunk_size + 2..];
+
+            let mut requests = HashMap::new();
+            for _ in &round {
+                let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+                let BrowserEvent::ResponsesRequest {
+                    request_id,
+                    conversation_id,
+                    agent,
+                    ..
+                } = event
+                else {
+                    panic!("expected independent browser request");
+                };
+                let name = conversation_id.unwrap();
+                assert!(round.contains(&name.as_str()));
+                if name == "parent" {
+                    assert!(agent.is_none());
+                } else {
+                    assert_eq!(agent.unwrap().thread_id, name);
+                }
+                assert!(requests.insert(name, request_id).is_none());
+            }
+            for name in &round {
+                assert!(broker.append_text(&requests[*name], format!("reply-{name}")));
+            }
+            // Complete in reverse order while every observer remains active.
+            let deadline = Instant::now() + Duration::from_secs(8);
+            for name in round.iter().rev() {
+                let id = &requests[*name];
+                let revision = broker.snapshot(id)["revision"].as_u64().unwrap();
+                while !broker.complete(id, Some(revision), Ok(format!("reply-{name}-done"))) {
+                    assert!(Instant::now() < deadline, "turn did not settle: {name}");
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+            let mut released = HashSet::new();
+            for _ in &round {
+                let BrowserEvent::ReleaseResponses(id) =
+                    receiver.recv_timeout(Duration::from_secs(5)).unwrap()
+                else {
+                    panic!("successful completion must release the browser without cancelling it");
+                };
+                assert!(released.insert(id));
+            }
+            assert_eq!(released, requests.into_values().collect());
+            for (name, mut client, worker) in workers {
+                let mut output = String::new();
+                client.read_to_string(&mut output).unwrap();
+                worker.join().unwrap();
+                assert!(output.ends_with("0\r\n\r\n"));
+                let events: Vec<serde_json::Value> = output
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                let deltas: String = events
+                    .iter()
+                    .filter(|event| event["type"] == "response.output_text.delta")
+                    .map(|event| event["delta"].as_str().unwrap())
+                    .collect();
+                assert_eq!(deltas, format!("reply-{name}-done"));
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event["type"] == "response.completed")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    events.last().unwrap()["response"]["output"][0]["content"][0]["text"],
+                    format!("reply-{name}-done")
+                );
+            }
+            assert!(receiver.try_recv().is_err());
         }
-        String::from_utf8(decoded).unwrap()
     }
 
     #[test]
-    fn sse_keeps_text_before_native_call_and_emits_codex_tool_item_shape() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    fn short_streamed_reply_is_completed_exactly_once() {
+        let reply = "Понял))";
+        for prefix in ["", "Понял", reply] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let reader = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut output = String::new();
+                stream.read_to_string(&mut output).unwrap();
+                output
+            });
+            let mut stream = TcpStream::connect(address).unwrap();
+            write_sse_header(&mut stream).unwrap();
+            let mut message_started = false;
+            let mut streamed_text = String::new();
+            let mut reasoning = ReasoningStreamState::default();
+            write_text_delta(
+                &mut stream,
+                "msg_short",
+                prefix,
+                0,
+                &mut message_started,
+                &mut streamed_text,
+            )
+            .unwrap();
+            let event = NativeEvent {
+                item: json!({"type":"message"}),
+                end_turn: true,
+                text_delta: None,
+                reasoning_heading: None,
+                segment_text: reply.into(),
+            };
+            write_completion(
+                &mut stream,
+                "resp_short",
+                "test-model",
+                &event,
+                "msg_short",
+                &mut reasoning,
+                &mut message_started,
+                &mut streamed_text,
+            )
+            .unwrap();
+            drop(stream);
+
+            let output = reader.join().unwrap();
+            assert!(output.ends_with("0\r\n\r\n"));
+            let events: Vec<serde_json::Value> = output
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .map(|data| serde_json::from_str(data).unwrap())
+                .collect();
+            let deltas: String = events
+                .iter()
+                .filter(|event| event["type"] == "response.output_text.delta")
+                .map(|event| event["delta"].as_str().unwrap())
+                .collect();
+            assert_eq!(deltas, reply);
+            assert_eq!(streamed_text, reply);
+            for event_type in [
+                "response.output_item.added",
+                "response.output_text.done",
+                "response.output_item.done",
+                "response.completed",
+            ] {
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event["type"] == event_type)
+                        .count(),
+                    1,
+                    "prefix {prefix:?}, event {event_type}"
+                );
+            }
+            let completed = events.last().unwrap();
+            assert_eq!(completed["type"], "response.completed");
+            assert_eq!(
+                completed["response"]["output"][0]["content"][0]["text"],
+                reply
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_summary_is_a_native_item_and_keeps_event_output_order() {
+        let heading = ReasoningHeading {
+            item_id: "rs_visible_heading".into(),
+            summary_index: 0,
+            text: "**Thought for 4 seconds**\n\n<!-- -->".into(),
+        };
+        let mut reasoning = ReasoningStreamState::default();
+        reasoning.append(&heading, false);
+        let event = NativeEvent {
+            item: json!({"type":"message"}),
+            end_turn: true,
+            text_delta: None,
+            reasoning_heading: None,
+            segment_text: "Answer".into(),
+        };
+
+        let output = response_output_items(&event, "msg_answer", &reasoning);
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(output[0]["summary"][0]["text"], heading.text);
+        assert_eq!(output[1]["type"], "message");
+    }
+
+    #[test]
+    fn reasoning_heading_arriving_after_text_uses_a_distinct_output_index() {
+        let heading = ReasoningHeading {
+            item_id: "rs_late_heading".into(),
+            summary_index: 0,
+            text: "**Planning the response**\n\n<!-- -->".into(),
+        };
+        let mut reasoning = ReasoningStreamState::default();
+        reasoning.append(&heading, true);
+        assert_eq!(reasoning.output_index, Some(1));
+        assert_eq!(reasoning.message_output_index(), 0);
+    }
+
+    #[test]
+    fn streamed_bridge_errors_are_failed_events_not_text_output() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let reader = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            read_chunked_body(stream)
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            bytes
         });
+
         let mut stream = TcpStream::connect(address).unwrap();
-        let event = NativeEvent {
-            item: json!({
-                "id":"tool_1",
-                "type":"function_call",
-                "status":"completed",
-                "call_id":"call_1",
-                "namespace":"mcp__workspace",
-                "name":"read_file",
-                "arguments":"{\"path\":\"README.md\"}"
-            }),
-            end_turn: false,
-            text_delta: None,
-            segment_text: "I will inspect the project first.".into(),
-        };
-        let mut message_started = false;
-        let mut streamed_text = String::new();
         write_sse_header(&mut stream).unwrap();
-        write_completion(
+        write_sse_error(
             &mut stream,
-            "resp_test",
-            "GPT-6",
-            &event,
-            "msg_test",
-            &mut message_started,
-            &mut streamed_text,
+            "resp_test_error",
+            "chatgpt_web_request_failed",
+            "ChatGPT changed previously streamed text",
         )
         .unwrap();
+        finish_sse(&mut stream).unwrap();
         drop(stream);
-        let body = reader.join().unwrap();
-        let events = body
-            .lines()
-            .filter_map(|line| line.strip_prefix("data: "))
-            .map(|data| serde_json::from_str::<Value>(data).unwrap())
-            .collect::<Vec<_>>();
-        let kinds = events
-            .iter()
-            .filter_map(|event| event["type"].as_str())
-            .collect::<Vec<_>>();
-        let text_delta = kinds
-            .iter()
-            .position(|kind| *kind == "response.output_text.delta")
-            .unwrap();
-        let tool_added = events.iter().position(|event| {
-            event["type"] == "response.output_item.added"
-                && event.pointer("/item/type").and_then(Value::as_str) == Some("function_call")
-        });
-        assert!(text_delta < tool_added.unwrap());
-        let tool_done = events
-            .iter()
-            .find(|event| {
-                event["type"] == "response.output_item.done"
-                    && event.pointer("/item/type").and_then(Value::as_str) == Some("function_call")
-            })
-            .unwrap();
-        assert_eq!(tool_done["item"]["status"], "completed");
-        assert_eq!(tool_done["item"]["call_id"], "call_1");
-        assert_eq!(tool_done["item"]["namespace"], "mcp__workspace");
-        assert_eq!(tool_done["item"]["name"], "read_file");
-        assert_eq!(tool_done["item"]["arguments"], "{\"path\":\"README.md\"}");
-        assert!(
-            events
-                .iter()
-                .any(|event| event["type"] == "response.completed")
-        );
+
+        let output = String::from_utf8(reader.join().unwrap()).unwrap();
+        assert!(output.contains("event: response.failed\n"));
+        assert!(output.contains("\"type\":\"response.failed\""));
+        assert!(output.contains("\"code\":\"chatgpt_web_request_failed\""));
+        assert!(output.contains("\"message\":\"ChatGPT changed previously streamed text\""));
+        assert!(!output.contains("\"type\":\"message\""));
+        assert!(!output.contains("\"output_text\""));
+        assert!(!output.contains("\"delta\""));
     }
 }

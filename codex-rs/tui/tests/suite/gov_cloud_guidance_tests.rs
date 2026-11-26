@@ -24,7 +24,7 @@ fn gov_cloud_startup_persists_only_acknowledgment() -> Result<()> {
         );
         std::fs::write(&path, &config)?;
         let mut terminal = PtyCodex::start(&cwd, home, &args)?;
-        terminal.wait_for_screen("Using Codex with AWS GovCloud")?;
+        terminal.wait_for_screen("Using Web2Codex with AWS GovCloud")?;
         let original = std::fs::read_to_string(&path)?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
@@ -36,7 +36,7 @@ fn gov_cloud_startup_persists_only_acknowledgment() -> Result<()> {
                     ensure!(status.success(), "quit exited with {status}");
                     break;
                 }
-            } else if terminal.screen_contains("OpenAI Codex") {
+            } else if terminal.screen_contains("Web2Codex") {
                 break;
             }
             ensure!(Instant::now() < deadline, "{action} did not complete");
@@ -53,7 +53,7 @@ fn gov_cloud_startup_persists_only_acknowledgment() -> Result<()> {
             let mut restarted = PtyCodex::start(&cwd, home, &args)?;
             // The startup draft says "loading"; the actual model appears after guidance.
             restarted.wait_for_screen("gpt-5.6-terra")?;
-            assert!(!restarted.screen_contains("Using Codex with AWS GovCloud"));
+            assert!(!restarted.screen_contains("Using Web2Codex with AWS GovCloud"));
         } else {
             assert_eq!(saved, original);
         }

@@ -31,7 +31,7 @@ pub(super) async fn run(http: &impl InstallerHttp, legacy: &Daemon) -> Result<Up
         .0
         .parent()
         .and_then(Path::parent)
-        .context("package root has no Codex home")?;
+        .context("package root has no Web2Codex home")?;
     let root = home.join("packages/app-server-daemon");
     let settings = legacy.load_settings().await?;
     let running = legacy.running_backend_instance(&settings).await?;

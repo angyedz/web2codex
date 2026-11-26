@@ -25,7 +25,7 @@ pub(crate) fn parse(text: &str) -> Option<Vec<AsyncQuestionReply>> {
     let text = text.trim();
     // JSON strings escape newlines, so this cannot match a delimiter inside an answer.
     let text = if text.starts_with("# Context from my IDE setup:\n") {
-        text.rsplit_once("\n## My request for Codex:\n")?.1.trim()
+        text.rsplit_once("\n## My request for Web2Codex:\n")?.1.trim()
     } else {
         text
     };

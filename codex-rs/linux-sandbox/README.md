@@ -2,10 +2,10 @@
 
 This crate is responsible for producing:
 
-- a `codex-linux-sandbox` standalone executable for Linux that is bundled with the Node.js version of the Codex CLI
+- a `codex-linux-sandbox` standalone executable for Linux that is bundled with the Node.js version of the Web2Codex CLI
 - a lib crate that exposes the business logic of the executable as `run_main()` so that
   - the `codex-exec` CLI can check if its arg0 is `codex-linux-sandbox` and, if so, execute as if it were `codex-linux-sandbox`
-  - this should also be true of the `codex` multitool CLI
+  - this should also be true of the `web2codex` multitool CLI
 
 The helper uses bubblewrap for filesystem and namespace isolation, and seccomp
 for syscall filtering. `src/seccomp.rs` installs `PR_SET_NO_NEW_PRIVS` and the
@@ -106,7 +106,7 @@ commands that would enter the bubblewrap path.
   inside the sandbox can differ from those exposed by `/proc`. Default invocations
   send no new helper flags and remain compatible with older helpers.
 - Trusted provisioning of a dedicated environment can start
-  `codex exec-server --linux-sandbox-pid-namespace=inherit`. This startup-only
+  `web2codex exec-server --linux-sandbox-pid-namespace=inherit`. This startup-only
   setting applies to both process and filesystem helpers; repository config and
   command environment variables cannot enable it. The helper receives the new
   `--inherit-pid-namespace` option, which requires an updated helper; deploy the

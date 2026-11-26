@@ -11,7 +11,7 @@ provider_error_local_80
 
 provider_error_mismatch_local_80
   🔒   Continue in a new chat
-      This chat uses Team Gateway, but Codex now uses Amazon Bedrock Runtime,
+      This chat uses Team Gateway, but Web2Codex now uses Amazon Bedrock Runtime,
       so this chat is read-only.
 
   c continue in new chat · n start fresh · esc other chats
@@ -19,7 +19,7 @@ provider_error_mismatch_local_80
 provider_error_mismatch_local_40
   🔒   Continue in a new chat
       This chat uses Team Gateway, but
-      Codex now uses Amazon Bedrock
+      Web2Codex now uses Amazon Bedrock
       Runtime, so this chat is read-
       only.
 
@@ -28,7 +28,7 @@ provider_error_mismatch_local_40
 
 provider_error_mismatch_remote_80
   🔒   Continue in a new chat
-      This chat uses Team Gateway, but Codex now uses Amazon Bedrock Runtime,
+      This chat uses Team Gateway, but Web2Codex now uses Amazon Bedrock Runtime,
       so this chat is read-only.
       Configuration on ws://devbox.example.com:4500/
 

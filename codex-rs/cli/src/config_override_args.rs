@@ -10,7 +10,8 @@ pub(super) fn try_parse_from(
     args: impl IntoIterator<Item = impl Into<OsString>>,
 ) -> Result<MultitoolCli, clap::Error> {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
-    let mut command = MultitoolCli::command();
+    let mut command = MultitoolCli::command()
+        .version(codex_build_info::runtime_version(env!("CARGO_PKG_VERSION")));
     let mut matches = command.try_get_matches_from_mut(&args)?;
     crate::queue_cmd::validate_options(&command, &matches)?;
     let mut cli = MultitoolCli::from_arg_matches_mut(&mut matches)

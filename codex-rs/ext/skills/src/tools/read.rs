@@ -104,12 +104,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadTool {
         if !self.context.step_state.discovery_v2 {
             return skill_function_tool::<ReadArgs, ReadResponse<LegacyReadMetadata>>(
                 TOOL_NAME,
-                "Read one page from a skill. Pass its provided package directly; root aliases are resolved automatically. Omit resource to read SKILL.md; to read another file, use the same package and pass the file's complete skill:// identifier as resource. For executor-backed skills, skill_root is the skill's absolute directory in the executor filesystem and can be used to locate bundled scripts. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor to continue the same snapshot while it is cached; omit cursor to read again.",
+                "Read one page from a skill. Pass its provided package directly; root aliases are resolved automatically. Omit resource to read SKILL.md; executor-backed skills can read supporting resources with a package-contained skill:// identifier. Host skills return their installed SKILL.md only. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor to continue the same snapshot while it is cached; omit cursor to read again.",
             );
         }
         skill_function_tool::<ReadInstallationArgs, ReadResponse<InstallationReadMetadata>>(
             TOOL_NAME,
-            "Read one page from a skill. Pass its provided package directly; root aliases are resolved automatically. Omit resource to read SKILL.md; to read another file, use the same package and pass the file's complete skill:// identifier as resource. Use source {kind: cloud} for Cloud or {kind: executor, environment_id: ...} for one environment. Omit source to read the first matching location. The installations list contains Cloud locators (package and resource, passed directly to skills.read) or executor locations (environment_id and skill_root, the absolute directory containing instructions and supporting files such as scripts). If installations_truncated is true, use skills.installations with the same package to retrieve all locations. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor with the same package, source, and resource to continue the same snapshot while it is cached; omit cursor to read again.",
+            "Read one page from a skill. Pass its provided package directly; root aliases are resolved automatically. Omit resource to read SKILL.md; executor-backed skills can read supporting resources with a package-contained skill:// identifier. Host skills return their installed SKILL.md only. Use source {kind: cloud}, {kind: host}, or {kind: executor, environment_id: ...} to choose a location. Omit source to read the first matching location. The installations list contains Cloud locators, host skill roots, or executor locations. If installations_truncated is true, use skills.installations with the same package to retrieve all locations. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor with the same package, source, and resource to continue the same snapshot while it is cached; omit cursor to read again.",
         )
     }
 
@@ -207,6 +207,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadTool {
                     tool_namespace = SKILLS_NAMESPACE,
                     tool_name = TOOL_NAME,
                     skill_source = match output_authority {
+                        SkillToolAuthoritySelector::Host => "host",
                         SkillToolAuthoritySelector::Cloud => "cloud",
                         SkillToolAuthoritySelector::Executor => "executor",
                     },
@@ -244,6 +245,32 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadTool {
                                 )
                             })?;
                         (SkillReadContext::Executor { fs }, Some(fs.cache_key()))
+                    }
+                    SkillToolAuthoritySelector::Host => {
+                        let host_snapshot = self
+                            .context
+                            .step_state
+                            .host_snapshot
+                            .clone()
+                            .ok_or_else(|| {
+                                outcome = "host_snapshot_unavailable";
+                                FunctionCallError::RespondToModel(
+                                    "host skill snapshot is not available for this callback"
+                                        .to_string(),
+                                )
+                            })?;
+                        let accessors = call
+                            .environments
+                            .iter()
+                            .map(codex_extension_api::ToolEnvironment::fs)
+                            .collect();
+                        (
+                            SkillReadContext::Host {
+                                host_snapshot: Some(host_snapshot),
+                                accessors,
+                            },
+                            None,
+                        )
                     }
                 };
                 let cursor_start = |contents: &str| {
@@ -367,13 +394,17 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadTool {
                         installations_truncated,
                     })
                 } else {
-                    let skill_root = if output_authority == SkillToolAuthoritySelector::Executor {
-                        main_prompt
+                    let skill_root = match output_authority {
+                        SkillToolAuthoritySelector::Executor => main_prompt
                             .environment_path()
                             .and_then(|(_, path)| path.parent())
-                            .map(|path| path.inferred_native_path_string())
-                    } else {
-                        None
+                            .map(|path| path.inferred_native_path_string()),
+                        SkillToolAuthoritySelector::Host => {
+                            std::path::Path::new(main_prompt.as_str())
+                                .parent()
+                                .map(|path| path.to_string_lossy().into_owned())
+                        }
+                        SkillToolAuthoritySelector::Cloud => None,
                     };
                     ReadMetadata::Legacy(LegacyReadMetadata { skill_root })
                 };

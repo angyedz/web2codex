@@ -65,6 +65,9 @@ mod allow;
 mod app_package;
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
+pub use app_package::process_has_package_identity;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
 pub use app_package::registered_core_needs_refresh;
 #[cfg(target_os = "windows")]
 #[doc(hidden)]

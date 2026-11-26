@@ -8,6 +8,7 @@ use super::*;
 const ULTRA_REASONING_CONCURRENCY_WARNING_THRESHOLD: usize = 8;
 pub(super) const MODEL_OPTIONS_VIEW_ID: &str = "model-options";
 pub(super) const MODEL_LOADING_VIEW_ID: &str = "model-loading";
+pub(super) const EFFORT_LOADING_VIEW_ID: &str = "effort-loading";
 pub(super) const MODEL_SELECTION_VIEW_ID: &str = "model-selection";
 pub(super) const ALL_MODELS_SELECTION_VIEW_ID: &str = "all-models-selection";
 
@@ -615,6 +616,224 @@ impl ChatWidget {
         });
     }
 
+    /// Open the compact effort picker used by `/effort`.
+    ///
+    /// The selected value is stored as the model's standard reasoning effort;
+    /// Web2Codex applies it to ChatGPT's native effort control on the next turn.
+    pub(crate) fn open_effort_profile_popup(&mut self) {
+        if self.request_effort_catalog_refresh(None) {
+            return;
+        }
+        self.open_effort_profile_popup_from_catalog();
+    }
+
+    pub(super) fn open_effort_profile_popup_from_catalog(&mut self) {
+        let Some(preset) = self.current_effort_profile_preset() else {
+            return;
+        };
+        let choices = Self::effort_profile_choices(&preset);
+        if choices.is_empty() {
+            self.add_info_message(
+                "Effort levels were not detected for the current ChatGPT model. If the model has an effort control, reload the ChatGPT page in Web2Codex and try /effort again."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+
+        let current_effort =
+            if self.collaboration_modes_enabled() && self.active_mode_kind() == ModeKind::Plan {
+                self.config
+                    .plan_mode_reasoning_effort
+                    .clone()
+                    .or_else(|| self.effective_reasoning_effort())
+            } else {
+                self.effective_reasoning_effort()
+            };
+        let initial_selected_idx = choices
+            .iter()
+            .position(|choice| Some(choice) == current_effort.as_ref());
+        let model_slug = preset.model.to_string();
+        let model_label = preset.display_name;
+        let items = choices
+            .iter()
+            .map(|effort| {
+                let effort_for_action = effort.clone();
+                let should_prompt_plan_mode_scope = self.should_prompt_plan_mode_reasoning_scope(
+                    model_slug.as_str(),
+                    Some(effort_for_action.clone()),
+                );
+                SelectionItem {
+                    name: Self::effort_profile_label(effort).to_string(),
+                    description: Some(Self::effort_profile_description(effort).to_string()),
+                    is_current: Some(effort) == current_effort.as_ref(),
+                    secondary_action: self.session_model_selection_action(
+                        model_slug.clone(),
+                        Some(effort_for_action.clone()),
+                    ),
+                    actions: self.model_selection_actions(
+                        model_slug.clone(),
+                        Some(effort_for_action),
+                        should_prompt_plan_mode_scope,
+                    ),
+                    dismiss_on_select: true,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let header = Paragraph::new(vec![
+            Line::from("Choose Effort".bold()),
+            Line::from(
+                format!("Applied through ChatGPT's native effort control for {model_label}.").dim(),
+            ),
+        ])
+        .wrap(Wrap { trim: false });
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            view_id: Some(MODEL_OPTIONS_VIEW_ID),
+            header: Box::new(header),
+            items,
+            initial_selected_idx,
+            ..SelectionViewParams::picker()
+        });
+    }
+
+    /// Apply an effort selected with `/effort instant|medium|high|xhigh|max`.
+    pub(crate) fn select_effort_profile(&mut self, requested: &str) {
+        let effort = match requested.trim().to_ascii_lowercase().as_str() {
+            "instant" | "low" => ReasoningEffortConfig::Low,
+            "medium" => ReasoningEffortConfig::Medium,
+            "high" => ReasoningEffortConfig::High,
+            "xhigh" | "extra high" | "extra-high" => ReasoningEffortConfig::XHigh,
+            "max" => ReasoningEffortConfig::Max,
+            _ => {
+                self.add_error_message(
+                    "Usage: /effort [instant|medium|high|xhigh|max]".to_string(),
+                );
+                return;
+            }
+        };
+        if self.request_effort_catalog_refresh(Some(effort.clone())) {
+            return;
+        }
+        self.select_effort_profile_from_catalog(effort);
+    }
+
+    pub(super) fn select_effort_profile_from_catalog(&mut self, effort: ReasoningEffortConfig) {
+        let Some(preset) = self.current_effort_profile_preset() else {
+            return;
+        };
+        let choices = Self::effort_profile_choices(&preset);
+        if !choices.contains(&effort) {
+            let available = choices
+                .iter()
+                .map(Self::effort_profile_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = if available.is_empty() {
+                format!(
+                    "Effort levels were not detected for the current ChatGPT model ({}). If the model has an effort control, reload the ChatGPT page in Web2Codex and try /effort again.",
+                    preset.display_name
+                )
+            } else {
+                format!(
+                    "{} effort is unavailable for {}. Available: {available}.",
+                    Self::effort_profile_label(&effort),
+                    preset.display_name
+                )
+            };
+            self.add_info_message(message, /*hint*/ None);
+            return;
+        }
+
+        let model = preset.model.to_string();
+        let should_prompt_plan_mode_scope =
+            self.should_prompt_plan_mode_reasoning_scope(model.as_str(), Some(effort.clone()));
+        for action in
+            self.model_selection_actions(model, Some(effort), should_prompt_plan_mode_scope)
+        {
+            action(&self.app_event_tx);
+        }
+    }
+
+    fn current_effort_profile_preset(&mut self) -> Option<ModelPreset> {
+        if !self.is_session_configured() {
+            self.add_info_message(
+                "Effort selection is disabled until startup completes.".to_string(),
+                /*hint*/ None,
+            );
+            return None;
+        }
+        if let Some(message) = self.model_picker_unavailable() {
+            self.add_info_message(message, /*hint*/ None);
+            return None;
+        }
+        let models = match self.model_catalog.try_list_models() {
+            Ok(models) => models,
+            Err(_) => {
+                self.add_info_message(
+                    "Models are being updated; please try /effort again in a moment.".to_string(),
+                    /*hint*/ None,
+                );
+                return None;
+            }
+        };
+        let current_model = self.current_model();
+        models
+            .into_iter()
+            .find(|preset| preset.model.as_str() == current_model)
+            .or_else(|| {
+                self.add_info_message(
+                    "The current model is not in ChatGPT's detected model list. Use /model to choose an available model first.".to_string(),
+                    /*hint*/ None,
+                );
+                None
+            })
+    }
+
+    fn effort_profile_choices(preset: &ModelPreset) -> Vec<ReasoningEffortConfig> {
+        let mut supported = preset
+            .supported_reasoning_efforts
+            .iter()
+            .map(|option| option.effort.clone())
+            .collect::<Vec<_>>();
+        if supported.is_empty() {
+            supported.push(preset.default_reasoning_effort.clone());
+        }
+        [
+            ReasoningEffortConfig::Low,
+            ReasoningEffortConfig::Medium,
+            ReasoningEffortConfig::High,
+            ReasoningEffortConfig::XHigh,
+            ReasoningEffortConfig::Max,
+        ]
+        .into_iter()
+        .filter(|effort| supported.contains(effort))
+        .collect()
+    }
+
+    fn effort_profile_label(effort: &ReasoningEffortConfig) -> &'static str {
+        match effort {
+            ReasoningEffortConfig::Low => "Instant",
+            ReasoningEffortConfig::Medium => "Medium",
+            ReasoningEffortConfig::High => "High",
+            ReasoningEffortConfig::XHigh => "Extra High",
+            ReasoningEffortConfig::Max => "Max",
+            _ => unreachable!("effort profile choices contain only supported web effort levels"),
+        }
+    }
+
+    fn effort_profile_description(effort: &ReasoningEffortConfig) -> &'static str {
+        match effort {
+            ReasoningEffortConfig::Low => "Fastest responses with light reasoning",
+            ReasoningEffortConfig::Medium => "Balanced speed and reasoning",
+            ReasoningEffortConfig::High => "More thorough reasoning for complex tasks",
+            ReasoningEffortConfig::XHigh => "Extra reasoning for difficult tasks",
+            ReasoningEffortConfig::Max => "Maximum available reasoning effort",
+            _ => unreachable!("effort profile choices contain only supported web effort levels"),
+        }
+    }
+
     /// Open the explicit Max/Ultra effort picker for the given model.
     pub(crate) fn open_advanced_reasoning_popup(&mut self, preset: ModelPreset) {
         let mut choices = preset
@@ -644,9 +863,7 @@ impl ChatWidget {
                 ReasoningEffortConfig::Max => {
                     "For difficult problems when quality matters more than speed"
                 }
-                ReasoningEffortConfig::Ultra => {
-                    "For demanding work using multiple agents"
-                }
+                ReasoningEffortConfig::Ultra => "For demanding work using multiple agents",
                 _ => unreachable!("advanced choices are limited to Max and Ultra"),
             };
             let should_prompt_plan_mode_scope = self
@@ -669,8 +886,8 @@ impl ChatWidget {
             });
         }
 
-        let header = Paragraph::new(Line::from("Advanced Reasoning".bold()))
-            .wrap(Wrap { trim: false });
+        let header =
+            Paragraph::new(Line::from("Advanced Reasoning".bold())).wrap(Wrap { trim: false });
         self.bottom_pane.show_selection_view(SelectionViewParams {
             view_id: Some(MODEL_OPTIONS_VIEW_ID),
             header: Box::new(header),

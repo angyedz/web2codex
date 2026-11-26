@@ -159,6 +159,7 @@ mod file_search_popup;
 mod footer;
 mod list_selection_view;
 mod memories_settings_view;
+mod mcp_tunnel_setup;
 mod mention_usage;
 pub(crate) use mention_usage::MentionUsage;
 mod mentions_v2;
@@ -193,6 +194,7 @@ pub(crate) use list_selection_view::SideContentWidth;
 pub(crate) use list_selection_view::popup_content_width;
 pub(crate) use list_selection_view::side_by_side_layout_widths;
 pub(crate) use memories_settings_view::MemoriesSettingsView;
+pub(crate) use mcp_tunnel_setup::McpTunnelSetupView;
 use slash_commands::ServiceTierCommand;
 mod feedback_note_view;
 mod feedback_view;
@@ -2036,6 +2038,39 @@ impl BottomPane {
         self.composer.handle_mouse(event)
     }
 
+    pub(crate) fn handle_active_view_mouse(
+        &mut self,
+        event: crossterm::event::MouseEvent,
+    ) -> bool {
+        let (handled, complete, completion) = {
+            let Some(view) = self.view_stack.last_mut() else {
+                return false;
+            };
+            (
+                view.handle_mouse_event(event),
+                view.is_complete(),
+                view.completion(),
+            )
+        };
+        if complete {
+            self.pop_active_view_with_completion(completion);
+        }
+        if handled {
+            self.request_redraw();
+        }
+        handled
+    }
+
+    pub(crate) fn handle_mcp_tunnel_setup_action_completed(
+        &mut self,
+        action: crate::app_event::McpTunnelSetupAction,
+        succeeded: bool,
+    ) -> bool {
+        self.view_stack
+            .last_mut()
+            .is_some_and(|view| view.handle_mcp_tunnel_setup_action_completed(action, succeeded))
+    }
+
     pub(crate) fn show_view(&mut self, view: Box<dyn BottomPaneView>) {
         self.push_view(view);
     }
@@ -2763,7 +2798,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst,
             animations_enabled: true,
             effects: Default::default(),
@@ -3100,7 +3135,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: true,
             animations_enabled: true,
             effects: Default::default(),
@@ -3126,7 +3161,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: true,
             animations_enabled: true,
             effects: Default::default(),
@@ -3160,7 +3195,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3503,7 +3538,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3551,7 +3586,7 @@ mod tests {
             for x in 0..area.width {
                 row.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
             }
-            if row.contains("Ask Codex") {
+            if row.contains("Ask Web2Codex") {
                 found_composer = true;
                 break;
             }
@@ -3571,7 +3606,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3646,7 +3681,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3678,7 +3713,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3702,7 +3737,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3732,7 +3767,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3770,7 +3805,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3803,7 +3838,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3835,7 +3870,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3865,7 +3900,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3889,7 +3924,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -3938,7 +3973,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -4007,7 +4042,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -4044,7 +4079,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -4093,7 +4128,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -4219,7 +4254,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -4268,7 +4303,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),
@@ -4347,7 +4382,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             has_input_focus: true,
             enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
+            placeholder_text: "Ask Web2Codex to do anything".to_string(),
             disable_paste_burst: false,
             animations_enabled: true,
             effects: Default::default(),

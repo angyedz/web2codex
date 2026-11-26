@@ -2,7 +2,7 @@
 
 use super::McpToolCallCell;
 use super::NodeReplExecOutput;
-use super::result::McpResultKind;
+use super::result::{McpResultKind, is_json_value};
 use crate::history_cell::activity_preview::DETAIL_PREVIEW_LINES;
 use crate::history_cell::activity_preview::clipped_line;
 use crate::live_wrap::take_prefix_by_width;
@@ -75,7 +75,11 @@ impl McpToolCallCell {
             match result {
                 Ok(result) => {
                     for block in result.content.iter().rev() {
-                        let output = if self.result_kind() == McpResultKind::NodeRepl
+                        let node_repl = self.result_kind() == McpResultKind::NodeRepl;
+                        if node_repl && block.is_json_fallback() && block.text().is_none() {
+                            continue;
+                        }
+                        let output = if node_repl
                             && status == Some(true)
                             && let Some(text) = block.text()
                         {
@@ -91,8 +95,12 @@ impl McpToolCallCell {
                             } else {
                                 Cow::Borrowed(block.render_full())
                             }
-                        } else {
+                        } else if node_repl {
                             Cow::Borrowed(block.render_full())
+                        } else if let Some(text) = block.compact_preview_text() {
+                            Cow::Borrowed(text)
+                        } else {
+                            continue;
                         };
                         push_tail(&mut details, &output);
                         // A code-mode image can also carry text; its marker precedes that output.
@@ -108,13 +116,16 @@ impl McpToolCallCell {
                     }
                 }
                 Err(error) => {
-                    push_tail(&mut details, error);
-                    if error.lines().take(DETAIL_PREVIEW_LINES + 1).count() <= DETAIL_PREVIEW_LINES
-                    {
-                        if let Some(first) = details.front_mut() {
-                            first.insert_str(0, "Error: ");
-                        } else {
-                            details.push_front("Error: ".to_owned());
+                    if !is_json_value(error) {
+                        push_tail(&mut details, error);
+                        if error.lines().take(DETAIL_PREVIEW_LINES + 1).count()
+                            <= DETAIL_PREVIEW_LINES
+                        {
+                            if let Some(first) = details.front_mut() {
+                                first.insert_str(0, "Error: ");
+                            } else {
+                                details.push_front("Error: ".to_owned());
+                            }
                         }
                     }
                 }

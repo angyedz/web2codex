@@ -5,7 +5,7 @@ expression: "snapshots.join(\"\\n---\\n\")"
 resume lookup fallback:
 before:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ Web2Codex (v<VERSION>)
      loading
   Resuming session…
 
@@ -13,7 +13,7 @@ before:
 
 after:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ Web2Codex (v<VERSION>)
      loading
 
 
@@ -23,7 +23,7 @@ after:
 fork lookup fallback:
 before:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ Web2Codex (v<VERSION>)
      loading
   Forking session…
 
@@ -31,7 +31,7 @@ before:
 
 after:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ Web2Codex (v<VERSION>)
      loading
 
 
@@ -43,11 +43,11 @@ before:
 hidden while picker owns input
 after:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ Web2Codex (v<VERSION>)
      loading
 
 
-› Ask Codex to do anything
+› Ask Web2Codex to do anything
 
   ? for shortcuts
 ---
@@ -56,10 +56,10 @@ before:
 hidden while picker owns input
 after:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ Web2Codex (v<VERSION>)
      loading
 
 
-› Ask Codex to do anything
+› Ask Web2Codex to do anything
 
   ? for shortcuts

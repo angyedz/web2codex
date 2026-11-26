@@ -255,6 +255,7 @@ mod activity_groups;
 mod activity_presentation;
 mod command_lifecycle;
 mod config_panel;
+mod context_window_slider;
 mod connector_mentions;
 mod connectors;
 mod constructor;
@@ -544,6 +545,7 @@ pub(crate) struct ChatWidget {
     has_codex_backend_auth: bool,
     model_catalog: Arc<ModelCatalog>,
     model_popup_request_id: Option<uuid::Uuid>,
+    effort_catalog_request: Option<(uuid::Uuid, Option<ReasoningEffortConfig>)>,
     /// An app event has been queued to open the permissions picker, but no view exists yet.
     pub(crate) permission_popup_pending: bool,
     permission_popup_request_id: Option<uuid::Uuid>,
@@ -987,6 +989,33 @@ impl ChatWidget {
             }
         };
         self.add_info_message(unavailable.to_string(), /*hint*/ None);
+    }
+
+    pub(crate) fn open_mcp_tunnel_setup(&mut self) {
+        self.bottom_pane.show_view(Box::new(
+            crate::bottom_pane::McpTunnelSetupView::new(self.app_event_tx.clone()),
+        ));
+        self.request_redraw();
+    }
+
+    pub(crate) fn handle_mcp_tunnel_setup_action_completed(
+        &mut self,
+        action: crate::app_event::McpTunnelSetupAction,
+        succeeded: bool,
+    ) {
+        if self
+            .bottom_pane
+            .handle_mcp_tunnel_setup_action_completed(action, succeeded)
+        {
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn handle_bottom_pane_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
+        if !self.bottom_pane.has_active_modal() {
+            return false;
+        }
+        self.bottom_pane.handle_active_view_mouse(event)
     }
 
     pub(crate) fn open_feedback_note(
@@ -2077,6 +2106,12 @@ impl ChatWidget {
         &self.config
     }
 
+    pub(crate) fn set_model_context_window(&mut self, context_window: i64) {
+        self.config.model_context_window = Some(context_window);
+        self.config.model_auto_compact_token_limit = None;
+        self.config.model_auto_compact_token_limit_scope = Default::default();
+    }
+
     pub(crate) fn new_status_indicator(
         &self,
     ) -> crate::status_indicator_widget::StatusIndicatorWidget {
@@ -2121,7 +2156,7 @@ impl Drop for ChatWidget {
     }
 }
 
-const PLACEHOLDER: &str = "Ask Codex to do anything";
+const PLACEHOLDER: &str = "Ask Web2Codex to do anything";
 const SIDE_PLACEHOLDER: &str = "Ask a follow-up question";
 
 // Extract the first bold (Markdown) element in the form **...** from `s`.

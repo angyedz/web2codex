@@ -341,7 +341,7 @@ impl App {
             Err(external_editor::EditorError::MissingEditor) => {
                 self.chat_widget
                     .add_to_history(history_cell::new_error_event(
-                    "Cannot open external editor: set $VISUAL or $EDITOR before starting Codex."
+                    "Cannot open external editor: set $VISUAL or $EDITOR before starting Web2Codex."
                         .to_string(),
                 ));
                 self.reset_external_editor_state(tui);
@@ -390,36 +390,149 @@ impl App {
         tui.frame_requester().schedule_frame();
     }
 
-    pub(super) async fn launch_mcp_tunnel_setup(&mut self, tui: &mut tui::Tui) {
-        let cwd = self.chat_widget.config_ref().cwd.as_path().to_path_buf();
-        let result = tui
-            .with_restored(tui::TerminalHandoff::KeepScreen, || async move {
-                let executable = std::env::current_exe()?;
-                tokio::process::Command::new(executable)
-                    .args(["web", "tunnel", "configure"])
-                    .current_dir(cwd)
-                    .stdin(Stdio::inherit())
-                    .stdout(Stdio::inherit())
-                    .stderr(Stdio::inherit())
-                    .status()
-                    .await
-            })
-            .await;
+    pub(super) fn open_mcp_setup_page(&mut self, url: String) {
+        self.launch_mcp_tunnel_setup_command(
+            crate::app_event::McpTunnelSetupAction::OpenPlatformPage,
+            vec!["web".to_owned(), "tab".to_owned(), "open".to_owned(), url],
+            std::time::Duration::from_secs(25),
+            None,
+        );
+    }
 
+    pub(super) fn start_mcp_tunnel_setup(&mut self) {
+        self.launch_mcp_tunnel_setup_command(
+            crate::app_event::McpTunnelSetupAction::StartTunnel,
+            vec!["web".to_owned(), "tunnel".to_owned(), "start".to_owned()],
+            std::time::Duration::from_secs(75),
+            None,
+        );
+    }
+
+    pub(super) fn run_mcp_tunnel_smoke_test(
+        &mut self,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) {
+        self.launch_mcp_tunnel_setup_command(
+            crate::app_event::McpTunnelSetupAction::SmokeTest,
+            vec![
+                "web".to_owned(),
+                "tunnel".to_owned(),
+                "smoke-test".to_owned(),
+            ],
+            // The CLI allows up to 150 seconds for all visible model checks,
+            // then may need to restart the MCP tunnel before it exits.
+            std::time::Duration::from_secs(240),
+            Some(cancellation),
+        );
+    }
+
+    fn launch_mcp_tunnel_setup_command(
+        &self,
+        action: crate::app_event::McpTunnelSetupAction,
+        args: Vec<String>,
+        timeout: std::time::Duration,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) {
+        let cwd = self.chat_widget.config_ref().cwd.as_path().to_path_buf();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let succeeded = run_hidden_web2codex_command(cwd, args, timeout, cancellation).await;
+            app_event_tx.send(crate::app_event::AppEvent::McpTunnelSetupActionCompleted {
+                action,
+                succeeded,
+            });
+        });
+    }
+
+    pub(super) async fn manage_web_browser(
+        &mut self,
+        tui: &mut tui::Tui,
+        action: crate::app_event::WebBrowserAction,
+    ) {
+        let cwd = self.chat_widget.config_ref().cwd.as_path().to_path_buf();
+        let result: std::io::Result<std::process::Output> = async {
+            let mut command = tokio::process::Command::new(std::env::current_exe()?);
+            command
+                .args(["web", action.argument()])
+                .current_dir(cwd)
+                .stdin(Stdio::null())
+                .kill_on_drop(true);
+            #[cfg(windows)]
+            command.creation_flags(0x08000000);
+            tokio::time::timeout(std::time::Duration::from_secs(25), command.output())
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "The Web2Codex browser command did not respond",
+                    )
+                })?
+        }
+        .await;
         match result {
-            Ok(status) if status.success() => {}
-            Ok(status) => self
-                .chat_widget
-                .add_to_history(history_cell::new_error_event(format!(
-                    "MCP tunnel setup exited with status {status}."
-                ))),
+            Ok(output) if output.status.success() => {
+                let message = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                if !message.is_empty() {
+                    self.chat_widget.add_info_message(message, None);
+                }
+            }
+            Ok(output) => {
+                let error = String::from_utf8_lossy(&output.stderr);
+                self.chat_widget
+                    .add_to_history(history_cell::new_error_event(format!(
+                        "Browser command failed ({}): {}",
+                        output.status,
+                        error.trim()
+                    )));
+            }
             Err(error) => self
                 .chat_widget
                 .add_to_history(history_cell::new_error_event(format!(
-                    "Could not start the MCP tunnel setup: {error}"
+                    "Could not manage the Web2Codex browser: {error}"
                 ))),
         }
         tui.frame_requester().schedule_frame();
+    }
+
+    pub(super) async fn close_web_browser_agent_tab(
+        &mut self,
+        thread_id: String,
+        agent_path: String,
+    ) {
+        let result: std::io::Result<std::process::Output> = async {
+            let mut command = tokio::process::Command::new(std::env::current_exe()?);
+            command
+                .args(["web", "tab", "close-agent"])
+                .arg(&thread_id)
+                .arg("--agent-path")
+                .arg(&agent_path)
+                .stdin(Stdio::null())
+                .kill_on_drop(true);
+            #[cfg(windows)]
+            command.creation_flags(0x08000000);
+            tokio::time::timeout(std::time::Duration::from_secs(8), command.output())
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "the background browser tab cleanup timed out",
+                    )
+                })?
+        }
+        .await;
+        match result {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => tracing::debug!(
+                %thread_id,
+                status = %output.status,
+                "could not close a completed subagent browser tab"
+            ),
+            Err(error) => tracing::debug!(
+                %thread_id,
+                %error,
+                "could not close a completed subagent browser tab"
+            ),
+        }
     }
 
     pub(super) fn request_external_editor_launch(&mut self, tui: &mut tui::Tui) {
@@ -640,17 +753,17 @@ impl App {
                     items: [
                         (
                             "Cancel task",
-                            "Stop the current task and stay in Codex",
+                            "Stop the current task and stay in Web2Codex",
                             RunningTaskExitAction::CancelTask,
                         ),
                         (
                             "Run in background",
-                            "Exit Codex and leave the task running",
+                            "Exit Web2Codex and leave the task running",
                             RunningTaskExitAction::RunInBackground,
                         ),
                         (
                             "Exit",
-                            "Stop the current task and exit Codex",
+                            "Stop the current task and exit Web2Codex",
                             RunningTaskExitAction::Exit,
                         ),
                     ]
@@ -916,6 +1029,78 @@ impl App {
     pub(super) fn refresh_status_line(&mut self) {
         self.chat_widget.refresh_status_line();
     }
+}
+
+async fn run_hidden_web2codex_command(
+    cwd: std::path::PathBuf,
+    args: Vec<String>,
+    timeout: std::time::Duration,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+) -> bool {
+    let Ok(executable) = std::env::current_exe() else {
+        return false;
+    };
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    {
+        command.creation_flags(0x08000000);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    if let Some(cancellation) = cancellation {
+        let result = tokio::select! {
+            result = tokio::time::timeout(timeout, child.wait()) => Some(result),
+            _ = cancellation.cancelled() => None,
+        };
+        match result {
+            Some(Ok(Ok(status))) => status.success(),
+            Some(Ok(Err(_))) | Some(Err(_)) | None => {
+                kill_setup_command_tree(&mut child).await;
+                false
+            }
+        }
+    } else {
+        match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(status)) => status.success(),
+            _ => {
+                kill_setup_command_tree(&mut child).await;
+                false
+            }
+        }
+    }
+}
+
+async fn kill_setup_command_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // The child was started in its own process group above.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let mut taskkill = tokio::process::Command::new("taskkill.exe");
+        taskkill
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        taskkill.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let _ = taskkill.status().await;
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 #[cfg(test)]

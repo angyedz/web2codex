@@ -4,14 +4,14 @@ assertion_line: 1093
 expression: "normalize_voice_snapshot_directory(&rendered, &app.config.cwd)"
 ---
 
-  >_ OpenAI Codex (v0.0.0)
+  >_ Web2Codex (v0.0.0)
      /tmp/project
 
   To get started, describe a task or try one of these commands:
 
-  /init - create an AGENTS.md file with instructions for Codex
+  /init - create an AGENTS.md file with instructions for Web2Codex
   /status - show current session configuration
-  /permissions - choose what Codex is allowed to do
+  /permissions - choose what Web2Codex is allowed to do
   /model - choose what model and reasoning effort to use
   /review - review any changes and find issues
 • Earlier answer

@@ -1598,6 +1598,9 @@ fn estimate_function_output_bytes(
                 FunctionCallOutputContentItem::InputAudio { audio } => {
                     estimate_audio_reference_bytes(audio, audio_durations)
                 }
+                FunctionCallOutputContentItem::InputFile { file_url, filename } => {
+                    text_bytes(file_url).saturating_add(text_bytes(filename))
+                }
                 FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
                     i64::try_from(estimate_encrypted_function_output_length(
                         encrypted_content.len(),

@@ -38,10 +38,18 @@ pub(super) async fn updates_check(config: &Config) -> DoctorCheck {
     match fetch_latest_github_release_version(&client).await {
         Ok(latest_version) => {
             details.push(format!("latest version: {latest_version}"));
-            if is_newer(&latest_version, env!("CARGO_PKG_VERSION")) == Some(true) {
-                details.push("latest version status: newer version is available".to_string());
-            } else {
-                details.push("latest version status: current version is not older".to_string());
+            match codex_build_info::is_newer_stable_release(
+                &latest_version,
+                codex_build_info::runtime_version(env!("CARGO_PKG_VERSION")),
+            ) {
+                Some(true) => {
+                    details.push("latest version status: newer version is available".to_string())
+                }
+                Some(false) => {
+                    details.push("latest version status: current version is not older".to_string())
+                }
+                None => details
+                    .push("latest version status: versions could not be compared".to_string()),
             }
         }
         Err(err) => {
@@ -99,7 +107,10 @@ where
             .request(Method::GET, url)
             .header(
                 http::header::USER_AGENT,
-                concat!("web2codex-doctor/", env!("CARGO_PKG_VERSION")),
+                format!(
+                    "web2codex-doctor/{}",
+                    codex_build_info::runtime_version(env!("CARGO_PKG_VERSION"))
+                ),
             )
             .send()
             .await
@@ -140,21 +151,6 @@ fn push_cached_version_details(details: &mut Vec<String>, version_file: &Path) {
         }
         Err(err) => details.push(format!("version cache read: {err}")),
     }
-}
-
-fn is_newer(latest: &str, current: &str) -> Option<bool> {
-    match (parse_version(latest), parse_version(current)) {
-        (Some(latest), Some(current)) => Some(latest > current),
-        (Some(_), None) | (None, Some(_)) | (None, None) => None,
-    }
-}
-
-fn parse_version(value: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = value.trim().split('.');
-    let major = parts.next()?.parse::<u64>().ok()?;
-    let minor = parts.next()?.parse::<u64>().ok()?;
-    let patch = parts.next()?.parse::<u64>().ok()?;
-    Some((major, minor, patch))
 }
 
 #[derive(Deserialize)]

@@ -167,7 +167,7 @@ impl ChatWidget {
                 match &ev.action {
                     GuardianAssessmentAction::WriteStdin { .. } => {
                         history_cell::new_guardian_timed_out_action_request(format!(
-                            "codex could {}",
+                            "Web2Codex could {}",
                             auto_review_denials::action_summary(&ev.action)
                         ))
                     }
@@ -181,16 +181,16 @@ impl ChatWidget {
                     GuardianAssessmentAction::McpToolCall {
                         server, tool_name, ..
                     } => history_cell::new_guardian_timed_out_action_request(format!(
-                        "codex could call MCP tool {server}.{tool_name}"
+                        "Web2Codex could call MCP tool {server}.{tool_name}"
                     )),
                     GuardianAssessmentAction::NetworkAccess { target, .. } => {
                         history_cell::new_guardian_timed_out_action_request(format!(
-                            "codex could access {target}"
+                            "Web2Codex could access {target}"
                         ))
                     }
                     GuardianAssessmentAction::RequestPermissions { reason, .. } => {
                         history_cell::new_guardian_timed_out_action_request(
-                            permission_request_summary("codex could request permissions", reason),
+                            permission_request_summary("Web2Codex could request permissions", reason),
                         )
                     }
                     GuardianAssessmentAction::Command { .. } => unreachable!(),
@@ -217,7 +217,7 @@ impl ChatWidget {
             match &ev.action {
                 GuardianAssessmentAction::WriteStdin { .. } => {
                     history_cell::new_guardian_denied_action_request(format!(
-                        "codex to {}",
+                        "Web2Codex to {}",
                         auto_review_denials::action_summary(&ev.action)
                     ))
                 }
@@ -231,16 +231,16 @@ impl ChatWidget {
                 GuardianAssessmentAction::McpToolCall {
                     server, tool_name, ..
                 } => history_cell::new_guardian_denied_action_request(format!(
-                    "codex to call MCP tool {server}.{tool_name}"
+                    "Web2Codex to call MCP tool {server}.{tool_name}"
                 )),
                 GuardianAssessmentAction::NetworkAccess { target, .. } => {
                     history_cell::new_guardian_denied_action_request(format!(
-                        "codex to access {target}"
+                        "Web2Codex to access {target}"
                     ))
                 }
                 GuardianAssessmentAction::RequestPermissions { reason, .. } => {
                     history_cell::new_guardian_denied_action_request(permission_request_summary(
-                        "codex to request permissions",
+                        "Web2Codex to request permissions",
                         reason,
                     ))
                 }

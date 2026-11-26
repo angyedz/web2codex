@@ -126,7 +126,7 @@ impl UpdatePromptScreen {
             request_frame,
             latest_version,
             release_notes_url: crate::update_versions::latest_release_url(),
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            current_version: crate::version::runtime_version().to_string(),
             update_action,
             highlighted: UpdateSelection::UpdateNow,
             selection: None,

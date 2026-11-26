@@ -1201,7 +1201,7 @@ async fn sqlite_recovery_warning_shows_backup_and_metadata_limitations() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.handle_server_notification(
         ServerNotification::ConfigWarning(ConfigWarningNotification {
-            summary: "Codex rebuilt its local database".into(),
+            summary: "Web2Codex rebuilt its local database".into(),
             details: Some("Damaged local databases were rebuilt. Saved conversations remain in rollout files and can restore the thread list and history. Some database-only metadata may be unavailable. The original database files were preserved at the backup locations below.\n\nDatabase path: /codex/state_5.sqlite\nBackup folder: /codex/db-backups/recovery".into()),
             path: None,
             range: None,
@@ -1232,7 +1232,7 @@ async fn startup_config_warning_is_not_repeated_by_thread() {
                     is_managed_daemon: managed_daemon,
                 });
         }
-        let message = "Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.";
+        let message = "Web2Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.";
         for notification in [
             ServerNotification::ConfigWarning(ConfigWarningNotification {
                 summary: message.to_string(),
@@ -2027,7 +2027,7 @@ async fn live_app_server_server_overloaded_error_renders_error() {
         let rendered = lines_to_single_string(&cells[0]);
         insta::allow_duplicates! {
             if message.is_empty() {
-                insta::assert_snapshot!(rendered, @"■ Codex is currently experiencing high load.");
+                insta::assert_snapshot!(rendered, @"■ Web2Codex is currently experiencing high load.");
             } else {
                 insta::assert_snapshot!(rendered, @"■ server overloaded");
             }
@@ -2340,7 +2340,7 @@ async fn sqlite_log_write_warning_is_visible_in_warnings() {
     chat.handle_server_notification(
         ServerNotification::Warning(WarningNotification {
             thread_id: None,
-            message: "Codex couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Codex, or run `codex doctor` for diagnostics.".to_string(),
+            message: "Web2Codex couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Web2Codex, or run `web2codex doctor` for diagnostics.".to_string(),
         }),
         /*replay_kind*/ None,
     );

@@ -3109,7 +3109,7 @@ async fn experimental_features_popup_snapshot() {
             key: "voice_conversations".to_string(),
             writable: true,
             name: "Voice conversations".to_string(),
-            description: "Talk with Codex using /voice.".to_string(),
+            description: "Talk with Web2Codex using /voice.".to_string(),
             enabled: false,
         },
     ];
@@ -3236,7 +3236,7 @@ async fn experimental_popup_available_snapshot() {
     };
     let features = [
         ("network_proxy", "Network proxy", "Apply network proxy restrictions to sandboxed sessions that already have network access."),
-        ("prevent_idle_sleep", "Prevent sleep while running", "Keep your computer awake while Codex is running a thread."),
+        ("prevent_idle_sleep", "Prevent sleep while running", "Keep your computer awake while Web2Codex is running a thread."),
     ]
     .into_iter()
     .map(|(name, display_name, description)| codex_app_server_protocol::ExperimentalFeature {
@@ -3314,7 +3314,7 @@ async fn memories_reset_confirmation_snapshot() {
     assert_chatwidget_snapshot!("memories_reset_confirmation", popup);
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
-    assert!(render_bottom_popup(&chat, /*width*/ 80).contains("Choose how Codex uses"));
+    assert!(render_bottom_popup(&chat, /*width*/ 80).contains("Choose how Web2Codex uses"));
     chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
     assert!(chat.no_modal_or_popup_active());
 }

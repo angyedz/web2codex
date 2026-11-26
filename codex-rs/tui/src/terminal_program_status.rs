@@ -185,7 +185,7 @@ pub(crate) fn clear_terminal_program_status() -> io::Result<()> {
 
 /// Forgets the cached state after another process has owned the terminal.
 ///
-/// The next active draw will re-emit Codex's current status even if its
+/// The next active draw will re-emit Web2Codex's current status even if its
 /// lifecycle state did not change during the handoff.
 pub(crate) fn invalidate_terminal_program_status() {
     SESSION_STATUS_STATE.invalidate();

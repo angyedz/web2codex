@@ -4,7 +4,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,7 +46,9 @@ const MAX_RELEASE_JSON: usize = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
-const CONNECTOR_NAME: &str = "Web2Codex";
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 16 * 1024;
+const TUNNEL_DOCTOR_TIMEOUT: Duration = Duration::from_secs(12);
+static STOP_ON_HARNESS_EXIT: AtomicBool = AtomicBool::new(false);
 
 #[derive(Deserialize)]
 struct Release {
@@ -80,6 +84,14 @@ impl Drop for RemoveFileOnDrop {
 }
 
 pub(crate) fn start(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow::Result<()> {
+    std::thread::scope(|scope| {
+        scope.spawn(|| start_blocking(tunnel_id, api_key, workspace))
+            .join()
+            .map_err(|_| anyhow::anyhow!("tunnel startup thread panicked"))?
+    })
+}
+
+fn start_blocking(tunnel_id: &str, api_key: &str, workspace: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
         !api_key.is_empty(),
         "OpenAI tunnel API key must not be empty"
@@ -110,6 +122,7 @@ fn start_locked(
         && fs::read_to_string(&paths.signature)
             .is_ok_and(|saved| saved.trim() == signature.as_str())
     {
+        STOP_ON_HARNESS_EXIT.store(true, Ordering::Release);
         remove_file_if_exists(&paths.api_key)
             .context("failed to remove a stale temporary tunnel API key file")?;
         println!("OpenAI Secure MCP Tunnel is already running for this harness.");
@@ -140,8 +153,8 @@ fn start_locked(
     remove_file_if_exists(&paths.api_key)
         .context("failed to clear a stale temporary tunnel API key file")?;
     let client = install_tunnel_client()?;
-    remove_obsolete_client_versions(paths, &client);
-    let codex = std::env::current_exe().context("failed to locate the Codex executable")?;
+    remove_obsolete_client_versions(&paths, &client);
+    let codex = std::env::current_exe().context("failed to locate the Web2Codex executable")?;
     let _api_key_cleanup = RemoveFileOnDrop(paths.api_key.clone());
     if let Err(error) = write_private_file(&paths.api_key, api_key.as_bytes()) {
         return Err(error).context("failed to write the temporary tunnel API key file");
@@ -169,12 +182,15 @@ fn start_locked(
         .current_dir(workspace)
         .env_clear()
         .envs(safe_subprocess_environment())
+        // Complete MCP initialization even when the upstream connector does not
+        // forward the initialized notification to the stdio server.
+        .env("MCP_STDIO_SEND_INITIALIZED_NOTIFICATION", "true")
         .stdin(Stdio::null())
-        // The setup command exits after readiness. Pipes owned by that command
-        // would then close underneath the long-lived tunnel process. Discard
-        // output so the tunnel survives and logs cannot fill the disk.
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // Capture bounded startup diagnostics in memory. Reader threads keep
+        // draining after readiness so the long-lived child cannot block on a
+        // full pipe; storage stops as soon as startup succeeds.
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -198,11 +214,22 @@ fn start_locked(
             });
         }
     };
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = force_terminate_tunnel_process(child.id());
+        let _ = child.wait();
+        remove_runtime_state(&paths)
+            .context("failed to clean runtime state after tunnel-client pipe setup failed")?;
+        bail!("could not capture tunnel-client startup output");
+    };
+    let stdout_capture = StartupOutputCapture::spawn(stdout);
+    let stderr_capture = StartupOutputCapture::spawn(stderr);
     let pid = child.id();
     let Some(process_start) = process_start_token(pid) else {
         let _ = force_terminate_tunnel_process(pid);
         let _ = child.wait();
-        remove_runtime_state(paths)
+        let _ = stdout_capture.collect();
+        let _ = stderr_capture.collect();
+        remove_runtime_state(&paths)
             .context("failed to clean runtime state after process identity lookup failed")?;
         bail!("could not record the tunnel-client process identity; refusing to start without it");
     };
@@ -212,7 +239,9 @@ fn start_locked(
     {
         let _ = terminate_tunnel_process(pid);
         let _ = child.wait();
-        return Err(match remove_runtime_state(paths) {
+        let _ = stdout_capture.collect();
+        let _ = stderr_capture.collect();
+        return Err(match remove_runtime_state(&paths) {
             Ok(()) => error.context("failed to save tunnel-client process state"),
             Err(cleanup_error) => error.context(format!(
                 "failed to save tunnel-client process state; cleanup also failed: {cleanup_error:#}"
@@ -224,7 +253,9 @@ fn start_locked(
             if let Err(error) = fs::remove_file(&paths.api_key) {
                 let _ = force_terminate_tunnel_process(pid);
                 let _ = child.wait();
-                return Err(match remove_runtime_state(paths) {
+                let _ = stdout_capture.collect();
+                let _ = stderr_capture.collect();
+                return Err(match remove_runtime_state(&paths) {
                     Ok(()) => anyhow::Error::new(error)
                         .context("failed to remove the temporary tunnel API key file"),
                     Err(cleanup_error) => anyhow::Error::new(error).context(format!(
@@ -232,7 +263,10 @@ fn start_locked(
                     )),
                 });
             }
-            remove_obsolete_client_versions(paths, &client);
+            stdout_capture.stop_retaining();
+            stderr_capture.stop_retaining();
+            remove_obsolete_client_versions(&paths, &client);
+            STOP_ON_HARNESS_EXIT.store(true, Ordering::Release);
             println!("OpenAI Secure MCP Tunnel runtime is ready.");
             print_connector_instructions(tunnel_id);
             print_mcp_observation(&paths.health_url);
@@ -242,18 +276,26 @@ fn start_locked(
             Ok(Some(status)) => {
                 let _ = force_terminate_tunnel_process(pid);
                 let _ = child.wait();
-                let diagnostic = read_tail(&paths.log_file, 64 * 1024)
-                    .unwrap_or_default()
-                    .replace(api_key, "[redacted]");
-                remove_runtime_state(paths)
-                    .context("failed to clean runtime state after tunnel-client exited")?;
-                let diagnostic = diagnostic.trim();
-                if diagnostic.is_empty() {
-                    bail!(
-                        "tunnel-client exited during startup with {status}; check the tunnel ID, runtime key, and network connection"
-                    );
+                let mut diagnostic = String::new();
+                append_diagnostic_stream(&mut diagnostic, "run stdout", stdout_capture.collect());
+                append_diagnostic_stream(&mut diagnostic, "run stderr", stderr_capture.collect());
+                if !api_key.is_empty() {
+                    diagnostic = diagnostic.replace(api_key, "[redacted]");
                 }
-                bail!("tunnel-client exited during startup with {status}: {diagnostic}");
+                let doctor =
+                    run_tunnel_doctor(&client, &paths.profile, &workspace, api_key);
+                if !diagnostic.is_empty() {
+                    diagnostic.push_str("\n\n");
+                }
+                diagnostic.push_str("doctor:\n");
+                diagnostic.push_str(&doctor);
+                diagnostic = limit_diagnostic(diagnostic);
+                remove_runtime_state(&paths)
+                    .context("failed to clean runtime state after tunnel-client exited")?;
+                bail!(
+                    "{}",
+                    tunnel_start_failure_message(status, Some(diagnostic.as_str()))
+                );
             }
             Ok(None) => {}
             Err(error) => {
@@ -268,16 +310,294 @@ fn start_locked(
     }
     let _ = force_terminate_tunnel_process(pid);
     let _ = child.wait();
-    remove_runtime_state(paths).context("failed to clean runtime state after startup timeout")?;
+    let mut diagnostic = String::new();
+    append_diagnostic_stream(&mut diagnostic, "run stdout", stdout_capture.collect());
+    append_diagnostic_stream(&mut diagnostic, "run stderr", stderr_capture.collect());
+    if !api_key.is_empty() {
+        diagnostic = diagnostic.replace(api_key, "[redacted]");
+    }
+    let doctor = run_tunnel_doctor(&client, &paths.profile, &workspace, api_key);
+    if !diagnostic.is_empty() {
+        diagnostic.push_str("\n\n");
+    }
+    diagnostic.push_str("doctor:\n");
+    diagnostic.push_str(&doctor);
+    diagnostic = limit_diagnostic(diagnostic);
+    remove_runtime_state(&paths).context("failed to clean runtime state after startup timeout")?;
     bail!(
-        "tunnel-client did not become ready within 30 seconds; check the tunnel ID, runtime key, and network connection"
+        "{}",
+        tunnel_start_timeout_message(Some(diagnostic.as_str()))
     );
+}
+
+/// Run the tunnel client's one-shot validator only after startup fails. This
+/// gives us actionable diagnostics without keeping an unbounded daemon log on
+/// disk or changing its detached stdio after it has become ready.
+fn run_tunnel_doctor(
+    client: &Path,
+    profile: &Path,
+    workspace: &Path,
+    api_key: &str,
+) -> String {
+    let mut command = Command::new(client);
+    command
+        .arg("doctor")
+        .arg("--profile-file")
+        .arg(profile)
+        .arg("--explain")
+        .arg("--json")
+        .current_dir(workspace)
+        .env_clear()
+        .envs(safe_subprocess_environment())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return format!("could not start tunnel-client doctor: {error}");
+        }
+    };
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = force_terminate_tunnel_process(child.id());
+        let _ = child.wait();
+        return "tunnel-client doctor started without capturable output pipes".to_string();
+    };
+    let stdout_reader = thread::spawn(move || read_capped_output(stdout));
+    let stderr_reader = thread::spawn(move || read_capped_output(stderr));
+    let deadline = Instant::now() + TUNNEL_DOCTOR_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
+            Ok(None) | Err(_) => {
+                let _ = force_terminate_tunnel_process(child.id());
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+
+    let stdout = stdout_reader.join();
+    let stderr = stderr_reader.join();
+    let mut diagnostic = String::new();
+    match stdout {
+        Ok(Ok(stdout)) => append_diagnostic_stream(&mut diagnostic, "stdout", stdout),
+        Ok(Err(error)) => {
+            diagnostic.push_str(&format!("failed to read doctor stdout: {error}"));
+        }
+        Err(_) => {
+            diagnostic.push_str("failed to collect doctor stdout: reader thread panicked");
+        }
+    }
+    match stderr {
+        Ok(Ok(stderr)) => append_diagnostic_stream(&mut diagnostic, "stderr", stderr),
+        Ok(Err(error)) => {
+            if !diagnostic.is_empty() {
+                diagnostic.push('\n');
+            }
+            diagnostic.push_str(&format!("failed to read doctor stderr: {error}"));
+        }
+        Err(_) => {
+            if !diagnostic.is_empty() {
+                diagnostic.push('\n');
+            }
+            diagnostic.push_str("failed to collect doctor stderr: reader thread panicked");
+        }
+    }
+    if !api_key.is_empty() {
+        diagnostic = diagnostic.replace(api_key, "[redacted]");
+    }
+    let diagnostic = diagnostic.trim();
+    if diagnostic.is_empty() {
+        return status.map_or_else(
+            || "tunnel-client doctor timed out without returning output".to_string(),
+            |status| {
+                if status.success() {
+                    "tunnel-client doctor completed without diagnostic details".to_string()
+                } else {
+                    format!("tunnel-client doctor exited with {status} and returned no details")
+                }
+            },
+        );
+    }
+
+    let mut diagnostic = limit_diagnostic(diagnostic.to_string());
+    if status.is_none() {
+        diagnostic.push_str("\n[tunnel-client doctor timed out after 12 seconds]");
+    } else if let Some(status) = status.filter(|status| !status.success()) {
+        diagnostic.push_str(&format!("\n[tunnel-client doctor exited with {status}]"));
+    }
+    diagnostic
+}
+
+fn limit_diagnostic(diagnostic: String) -> String {
+    let mut characters = diagnostic.chars();
+    let mut bounded = characters.by_ref().take(4_000).collect::<String>();
+    if characters.next().is_some() {
+        bounded.push_str("\n[diagnostic output truncated]");
+    }
+    bounded
+}
+
+fn read_capped_output(mut reader: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut output = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(output.len());
+        let kept = read.min(remaining);
+        output.extend_from_slice(&buffer[..kept]);
+        truncated |= kept < read;
+    }
+    Ok((output, truncated))
+}
+
+#[derive(Default)]
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+struct StartupOutputState {
+    retain: AtomicBool,
+    output: Mutex<CapturedOutput>,
+}
+
+/// Keeps only the most recent startup output in memory while always draining
+/// the pipe. After readiness, `stop_retaining` disables storage but leaves the
+/// reader alive until the daemon exits.
+struct StartupOutputCapture {
+    state: Arc<StartupOutputState>,
+    reader: Option<thread::JoinHandle<()>>,
+}
+
+impl StartupOutputCapture {
+    fn spawn(mut reader: impl Read + Send + 'static) -> Self {
+        let state = Arc::new(StartupOutputState {
+            retain: AtomicBool::new(true),
+            output: Mutex::new(CapturedOutput::default()),
+        });
+        let reader_state = Arc::clone(&state);
+        let reader = thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => count,
+                };
+                if !reader_state.retain.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let Ok(mut output) = reader_state.output.lock() else {
+                    continue;
+                };
+                let overflow = output
+                    .bytes
+                    .len()
+                    .saturating_add(count)
+                    .saturating_sub(MAX_CAPTURED_OUTPUT_BYTES);
+                if overflow > 0 {
+                    let remove = overflow.min(output.bytes.len());
+                    output.bytes.drain(..remove);
+                    output.truncated = true;
+                }
+                let start = count.saturating_sub(MAX_CAPTURED_OUTPUT_BYTES);
+                output.bytes.extend_from_slice(&buffer[start..count]);
+                if start > 0 {
+                    output.truncated = true;
+                }
+            }
+        });
+        Self {
+            state,
+            reader: Some(reader),
+        }
+    }
+
+    fn stop_retaining(&self) {
+        self.state.retain.store(false, Ordering::Relaxed);
+    }
+
+    fn collect(mut self) -> (Vec<u8>, bool) {
+        self.stop_retaining();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        self.state
+            .output
+            .lock()
+            .map(|output| (output.bytes.clone(), output.truncated))
+            .unwrap_or_else(|_| (Vec::new(), true))
+    }
+}
+
+impl Drop for StartupOutputCapture {
+    fn drop(&mut self) {
+        self.stop_retaining();
+    }
+}
+
+fn append_diagnostic_stream(
+    diagnostic: &mut String,
+    name: &str,
+    (bytes, truncated): (Vec<u8>, bool),
+) {
+    let text = String::from_utf8_lossy(&bytes);
+    if !text.trim().is_empty() {
+        if !diagnostic.is_empty() {
+            diagnostic.push('\n');
+        }
+        diagnostic.push_str(name);
+        diagnostic.push_str(":\n");
+        diagnostic.push_str(text.trim());
+    }
+    if truncated {
+        diagnostic.push_str("\n[stream truncated after 16 KiB]");
+    }
+}
+
+fn tunnel_start_failure_message(status: ExitStatus, diagnostic: Option<&str>) -> String {
+    let mut message = format!(
+        "tunnel-client exited during startup with {status}; check the tunnel ID, runtime key, and network connection"
+    );
+    append_tunnel_diagnostic(&mut message, diagnostic);
+    message
+}
+
+fn tunnel_start_timeout_message(diagnostic: Option<&str>) -> String {
+    let mut message =
+        "tunnel-client did not become ready within 30 seconds; check the tunnel ID, runtime key, and network connection".to_string();
+    append_tunnel_diagnostic(&mut message, diagnostic);
+    message
+}
+
+fn append_tunnel_diagnostic(message: &mut String, diagnostic: Option<&str>) {
+    if let Some(diagnostic) = diagnostic.filter(|diagnostic| !diagnostic.trim().is_empty()) {
+        message.push_str("\n\n`tunnel-client doctor` diagnostics:\n");
+        message.push_str(diagnostic);
+    }
 }
 
 pub(crate) fn status() -> anyhow::Result<()> {
     if runtime_ready() {
         println!("OpenAI Secure MCP Tunnel runtime is ready.");
-        println!("Connector name: {CONNECTOR_NAME}");
+        println!("Connector name: {}", crate::web_browser::connector_name());
         let paths = runtime_paths()?;
         print_mcp_observation(&paths.health_url);
     } else {
@@ -351,6 +671,17 @@ fn stop_locked(paths: &RuntimePaths) -> anyhow::Result<()> {
         thread::sleep(Duration::from_millis(100));
     }
     bail!("tunnel-client process {pid} did not stop; its PID and health records were retained")
+}
+
+/// Stop the Web2Codex tunnel when its harness session exits. Explicit
+/// `web tunnel start/configure` commands run without a `BrowserSession` and
+/// keep their tunnel alive until a harness session adopts and closes it.
+pub(crate) fn stop_auto_started() {
+    if STOP_ON_HARNESS_EXIT.swap(false, Ordering::AcqRel)
+        && let Err(error) = stop()
+    {
+        eprintln!("Web2Codex could not stop its automatic MCP tunnel: {error:#}");
+    }
 }
 
 fn remove_runtime_state(paths: &RuntimePaths) -> anyhow::Result<()> {
@@ -512,7 +843,7 @@ fn force_terminate_tunnel_process(pid: u32) -> anyhow::Result<()> {
 }
 
 fn print_connector_instructions(tunnel_id: &str) {
-    println!("In ChatGPT, add an MCP connector named `{CONNECTOR_NAME}` using Connection: Tunnel.");
+    println!("In ChatGPT, add an MCP connector named `{}` using Connection: Tunnel.", crate::web_browser::connector_name());
     println!("Tunnel ID: {tunnel_id}");
 }
 
@@ -684,22 +1015,11 @@ fn write_profile(
     let profile = format!(
         concat!(
             "config_version: 1\n",
-            "control_plane:\n",
-            "  tunnel_id: {}\n",
-            "  api_key: {}\n",
-            "health:\n",
-            "  listen_addr: {}\n",
-            "  url_file: {}\n",
-            "admin_ui:\n",
-            "  open_browser: false\n",
-            "log:\n",
-            "  level: warn\n",
-            "  format: json\n",
-            "  file: {}\n",
-            "mcp:\n",
-            "  commands:\n",
-            "    - channel: main\n",
-            "      command: {}\n",
+            "control_plane:\n  tunnel_id: {}\n  api_key: {}\n",
+            "health:\n  listen_addr: {}\n  url_file: {}\n",
+            "admin_ui:\n  open_browser: false\n",
+            "log:\n  level: info\n  format: json\n",
+            "mcp:\n  commands:\n  - channel: main\n    command: {}\n",
         ),
         yaml_string(tunnel_id),
         yaml_string(&format!("file:{}", api_key_file.to_string_lossy())),

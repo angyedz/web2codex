@@ -68,6 +68,9 @@ fn mcp_output_item(block: &JsonValue) -> Result<OutputItem, String> {
         FunctionCallOutputContentItem::EncryptedContent { .. } => {
             Err("content cannot emit encrypted MCP text".to_string())
         }
+        FunctionCallOutputContentItem::InputFile { filename, .. } => Err(format!(
+            "content cannot emit MCP file `{filename}` because Code Mode does not support file output"
+        )),
         FunctionCallOutputContentItem::InputImage {
             image: ImageReference::File { .. },
             ..

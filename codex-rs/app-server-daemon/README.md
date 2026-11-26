@@ -3,7 +3,7 @@
 > `codex-app-server-daemon` is experimental and its lifecycle contract may
 > change while the remote-management flow is still being developed.
 
-`codex-app-server-daemon` backs the machine-readable `codex app-server`
+`codex-app-server-daemon` backs the machine-readable `web2codex app-server`
 lifecycle commands used by remote clients such as the desktop and mobile apps.
 It is intended for Codex instances launched over SSH, including fresh developer
 machines that should expose app-server with `remote_control` enabled.
@@ -30,14 +30,14 @@ initialize the connection, the TUI starts an embedded server instead. Explicit
 ## Commands
 
 ```sh
-codex app-server daemon start
-codex app-server daemon restart
-codex app-server daemon update
-codex app-server daemon enable-remote-control
-codex app-server daemon disable-remote-control
-codex app-server daemon stop
-codex app-server daemon version
-codex app-server daemon bootstrap --remote-control
+web2codex app-server daemon start
+web2codex app-server daemon restart
+web2codex app-server daemon update
+web2codex app-server daemon enable-remote-control
+web2codex app-server daemon disable-remote-control
+web2codex app-server daemon stop
+web2codex app-server daemon version
+web2codex app-server daemon bootstrap --remote-control
 ```
 
 On success, every command writes exactly one JSON object to stdout. Consumers
@@ -58,7 +58,7 @@ default. Edit `CODEX_HOME/app-server-daemon/settings.json` to change this:
 
 Positive minute intervals have no configured cap. `daemon restart` applies the
 enabled state; the next updater wait reads a new interval. The preference does
-not affect an explicit `codex update` command or `daemon update`.
+not affect an explicit `web2codex update` command or `daemon update`.
 
 `daemon update` selects the latest stable release, even with automatic updates
 disabled. It also returns pinned or local managed packages to production update
@@ -81,7 +81,7 @@ For a new Linux or macOS machine:
 
 ```sh
 curl -fsSL https://github.com/OWNER/REPOSITORY/releases/latest/download/install.sh | sh
-$HOME/.codex/packages/standalone/current/codex app-server daemon bootstrap --remote-control
+$HOME/.web2codex/packages/standalone/current/web2codex app-server daemon bootstrap --remote-control
 ```
 
 On Windows, use a non-elevated PowerShell terminal whose host allows breakaway:
@@ -158,7 +158,7 @@ other tool updates the managed binary path:
   once that replacement starts successfully
 - if the updater was absent during a same-version binary replacement, a later
   managed start recovers it but cannot infer the running server's previous
-  executable identity; use `codex app-server daemon restart` to refresh the server
+  executable identity; use `web2codex app-server daemon restart` to refresh the server
 
 ## Lifecycle semantics
 

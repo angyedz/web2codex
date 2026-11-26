@@ -962,6 +962,136 @@ mod tests {
 
     impl CoreToolRuntime for ImmediateHandler {}
 
+    struct ParallelBarrierHandler {
+        tool_name: codex_tools::ToolName,
+        active_calls: Arc<std::sync::atomic::AtomicUsize>,
+        active_updates: tokio::sync::watch::Sender<usize>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl ToolExecutor<ToolInvocation> for ParallelBarrierHandler {
+        fn tool_name(&self) -> codex_tools::ToolName {
+            self.tool_name.clone()
+        }
+
+        fn supports_parallel_tool_calls(&self) -> bool {
+            true
+        }
+
+        fn spec(&self) -> codex_tools::ToolSpec {
+            codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+                name: self.tool_name.name.clone(),
+                description: "Parallel test tool.".to_string(),
+                strict: false,
+                defer_loading: None,
+                parameters: codex_tools::JsonSchema::default(),
+                output_schema: None,
+            })
+        }
+
+        fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+        where
+            ToolInvocation: 'a,
+        {
+            let active_calls = Arc::clone(&self.active_calls);
+            let active_updates = self.active_updates.clone();
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                let active = active_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                active_updates.send_replace(active);
+                let permit = release
+                    .acquire()
+                    .await
+                    .expect("test should release each parallel handler");
+                permit.forget();
+                let remaining = active_calls.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1;
+                active_updates.send_replace(remaining);
+                Ok(
+                    Box::new(FunctionToolOutput::from_text("ok".to_string(), Some(true)))
+                        as Box<dyn crate::tools::context::ToolOutput>,
+                )
+            })
+        }
+    }
+
+    impl CoreToolRuntime for ParallelBarrierHandler {}
+
+    #[tokio::test]
+    async fn parallel_tool_calls_enter_the_handler_concurrently() -> anyhow::Result<()> {
+        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let tool_name = codex_tools::ToolName::plain("parallel_test_tool");
+        let active_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (active_updates, mut active_rx) = tokio::sync::watch::channel(0usize);
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let handler = Arc::new(ParallelBarrierHandler {
+            tool_name: tool_name.clone(),
+            active_calls,
+            active_updates,
+            release: Arc::clone(&release),
+        }) as Arc<dyn CoreToolRuntime>;
+        let step_context = StepContext::for_test(Arc::clone(&turn_context));
+        let router = Arc::new(ToolRouter::from_parts(
+            ToolRegistry::from_tools([handler]),
+            Vec::new(),
+            ToolMode::Direct,
+            BTreeMap::new(),
+            /*exec_definitions*/ None,
+            /*tool_namespaces_info*/ None,
+            &[],
+        ));
+        let step_context = step_context.with_tool_router_for_test(router);
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let runtime = ToolCallRuntime::new(session, step_context, tracker);
+        let cancellation_token = CancellationToken::new();
+        let make_call = |call_id: &str| ToolCall {
+            tool_name: tool_name.clone(),
+            call_id: call_id.to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: None,
+            native_call: None,
+        };
+
+        let first = tokio::spawn(
+            runtime
+                .clone()
+                .handle_tool_call(make_call("parallel-call-1"), cancellation_token.clone()),
+        );
+        let second = tokio::spawn(
+            runtime.handle_tool_call(make_call("parallel-call-2"), cancellation_token),
+        );
+        let both_started = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if *active_rx.borrow_and_update() >= 2 {
+                    break;
+                }
+                active_rx
+                    .changed()
+                    .await
+                    .expect("parallel handlers should report their start");
+            }
+        })
+        .await
+        .is_ok();
+
+        release.add_permits(2);
+        for (name, task) in [("first", first), ("second", second)] {
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("parallel handler should finish")
+                .unwrap_or_else(|_| panic!("{name} dispatch task should join"))
+                .expect("parallel handler should return a tool result");
+        }
+        assert!(
+            both_started,
+            "supported tool calls should overlap in the dispatcher"
+        );
+        Ok(())
+    }
+
     struct BlockingFinishContributor {
         records: Arc<std::sync::Mutex<Vec<ToolCallOutcome>>>,
         finish_started: std::sync::Mutex<Option<oneshot::Sender<()>>>,

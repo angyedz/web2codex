@@ -1,5 +1,5 @@
 # sandbox_smoketests.py
-# Run a suite of smoke tests against the Windows sandbox via the Codex CLI
+# Run a suite of smoke tests against the Windows sandbox via the Web2Codex CLI
 # Requires: Python 3.8+ on Windows. No pip requirements.
 
 import os
@@ -15,26 +15,26 @@ from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
 
-def _resolve_codex_cmd() -> List[str]:
-    """Resolve the Codex CLI to invoke `codex sandbox windows`.
+def _resolve_web2codex_cmd() -> List[str]:
+    """Resolve the Web2Codex CLI to invoke `web2codex sandbox windows`.
 
     Prefer local builds (debug first), then fall back to PATH.
-    Returns the argv prefix to run Codex.
+    Returns the argv prefix to run Web2Codex.
     """
     root = Path(__file__).parent
     ws_root = root.parent
     cargo_target = os.environ.get("CARGO_TARGET_DIR")
 
     candidates = [
-        ws_root / "target" / "debug" / "codex.exe",
-        ws_root / "target" / "release" / "codex.exe",
+        ws_root / "target" / "debug" / "web2codex.exe",
+        ws_root / "target" / "release" / "web2codex.exe",
     ]
     if cargo_target:
         cargo_base = Path(cargo_target)
         candidates.extend(
             [
-                cargo_base / "debug" / "codex.exe",
-                cargo_base / "release" / "codex.exe",
+                cargo_base / "debug" / "web2codex.exe",
+                cargo_base / "release" / "web2codex.exe",
             ]
         )
 
@@ -42,19 +42,19 @@ def _resolve_codex_cmd() -> List[str]:
         if candidate.exists():
             return [str(candidate)]
 
-    if shutil.which("codex"):
-        return ["codex"]
+    if shutil.which("web2codex"):
+        return ["web2codex"]
 
     raise FileNotFoundError(
-        "Codex CLI not found. Build it first, e.g.\n"
+        "Web2Codex CLI not found. Build it first, e.g.\n"
         "  cargo build -p codex-cli --release\n"
         "or for debug:\n"
         "  cargo build -p codex-cli\n"
     )
 
 
-CODEX_CMD = _resolve_codex_cmd()
-print(CODEX_CMD)
+WEB2CODEX_CMD = _resolve_web2codex_cmd()
+print(WEB2CODEX_CMD)
 TIMEOUT_SEC = 20
 
 WS_ROOT = Path(os.environ["USERPROFILE"]) / "sbx_ws_tests"
@@ -101,7 +101,7 @@ def run_sbx(
         ]
 
     argv = [
-        *CODEX_CMD,
+        *WEB2CODEX_CMD,
         "sandbox",
         "windows",
         *policy_flags,

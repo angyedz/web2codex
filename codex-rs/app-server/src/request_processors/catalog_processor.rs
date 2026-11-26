@@ -313,13 +313,14 @@ impl CatalogRequestProcessor {
             include_hidden,
             model_provider: _,
         } = params;
+        let refresh_strategy = if config.model_provider_id == "web2codex" {
+            codex_models_manager::manager::RefreshStrategy::Online
+        } else {
+            codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
+        };
         let presets = self
             .model_catalog
-            .list_models_from_snapshot(
-                config,
-                models_manager,
-                codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
-            )
+            .list_models_from_snapshot(config, models_manager, refresh_strategy)
             .await
             .map_err(|err| config_load_error(&err))?;
         let models = supported_models(presets, include_hidden.unwrap_or(false));

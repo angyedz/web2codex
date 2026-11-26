@@ -25,9 +25,11 @@ pub(crate) async fn prepare_catalogs(
     let mut cloud = cloud_enabled
         .then(|| thread_state.available_cloud_catalog())
         .flatten();
+    let host_snapshot = HostSkillsSnapshot::for_step(input.step_store, input.turn_store)
+        .filter(|_| providers.has_host_provider());
     let (mut executor, host_catalog) = futures::join!(
         discover_executor_catalog(thread_state, providers, input, &config, cloud_enabled),
-        discover_host_catalog(providers, input, &config),
+        discover_host_catalog(providers, input, host_snapshot.clone()),
     );
     if discovery_v2 {
         apply_plugin_denials(&mut executor, input.selected_plugins);
@@ -44,13 +46,19 @@ pub(crate) async fn prepare_catalogs(
     } else {
         CatalogStatus::Disabled
     };
+    // When automatic catalogs are hidden, keep host skills available on demand through MCP.
+    let host_skills_tools_enabled = !config.include_instructions && host_catalog.is_some();
+    let catalog =
+        thread_state.prepare_step_catalog(cloud, executor, host_catalog.clone(), discovery_v2);
     SkillsStepState {
         discovery_v2,
         tools_enabled: cloud_enabled
             || !input.ready_selected_capability_roots.is_empty()
-            || discovery_v2,
-        catalog: thread_state.prepare_step_catalog(cloud, executor, discovery_v2),
+            || discovery_v2
+            || host_skills_tools_enabled,
+        catalog,
         host_catalog,
+        host_snapshot,
         cloud_status,
         config,
     }
@@ -85,13 +93,9 @@ async fn discover_executor_catalog(
 async fn discover_host_catalog(
     providers: &SkillProviders,
     input: &StepPreparationInput<'_>,
-    config: &SkillsExtensionConfig,
+    host_snapshot: Option<std::sync::Arc<HostSkillsSnapshot>>,
 ) -> Option<SkillCatalog> {
-    let host_snapshot = HostSkillsSnapshot::for_step(input.step_store, input.turn_store)
-        .filter(|_| providers.has_host_provider())?;
-    if !config.include_instructions && !config.shadow_selection_enabled {
-        return Some(SkillCatalog::default());
-    }
+    let host_snapshot = host_snapshot?;
     Some(
         providers
             .list_host_for_turn(SkillListQuery {

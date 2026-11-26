@@ -1,3 +1,3 @@
-# Getting started with Codex CLI
+# Getting started with Web2Codex
 
-For an overview of Codex CLI features, see [this documentation](https://developers.openai.com/codex/cli/features#running-in-interactive-mode).
+For first-run setup, browser sign-in, MCP tunnel configuration, and available commands, see the [Web2Codex README](../README.md).

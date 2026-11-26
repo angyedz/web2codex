@@ -139,6 +139,22 @@ impl McpContentBlock {
         }
     }
 
+    /// Keep compact standard MCP activity readable without exposing structured payloads.
+    /// Full content remains available in the expanded transcript.
+    pub(super) fn compact_preview_text(&self) -> Option<&str> {
+        match &self.display {
+            McpContentDisplay::Text(text) if is_json_value(text) => None,
+            McpContentDisplay::Text(text) => Some(text),
+            McpContentDisplay::Summary(summary) => Some(summary),
+            McpContentDisplay::Json(_) => None,
+        }
+    }
+
+    /// Unknown or malformed MCP wire blocks are retained as JSON only for expanded details.
+    pub(super) fn is_json_fallback(&self) -> bool {
+        matches!(&self.display, McpContentDisplay::Json(_))
+    }
+
     /// Formats the complete text or fallback JSON. The caller applies a single preview limit
     /// across all blocks, while transcript and raw output retain the full result.
     pub(super) fn render(&self) -> Cow<'_, str> {
@@ -151,6 +167,17 @@ impl McpContentBlock {
             McpContentDisplay::Summary(summary) => Cow::Borrowed(summary),
         }
     }
+}
+
+pub(super) fn is_json_value(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    // Avoid parsing large tool results just to decide whether a collapsed preview should hide
+    // them. Oversized JSON-looking values are safer to leave in expanded details.
+    if trimmed.len() > 16 * 1024 {
+        return matches!(trimmed.as_bytes().first(), Some(b'{' | b'['))
+            || (trimmed.starts_with('"') && trimmed.ends_with('"'));
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
 }
 
 /// Fully decodes an MCP image before exposing an image preview in computer activity.

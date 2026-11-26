@@ -1,9 +1,9 @@
 //! Exercise managed preference trust checks with injected reads and in-memory values.
 
-use super::MANAGED_PREFERENCES_APPLICATION_ID;
 use super::MANAGED_PREFERENCES_CONFIG_KEY;
 use super::MANAGED_PREFERENCES_REQUIREMENTS_KEY;
 use super::load_managed_preference_with;
+use super::managed_preferences_application_id;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use core_foundation::array::CFArray;
@@ -26,6 +26,7 @@ fn unforced_preferences_are_ignored_without_reading() {
         assert_eq!(
             load_managed_preference_with(
                 key,
+                managed_preferences_application_id(),
                 || false,
                 || panic!("unforced preference must not be read"),
             )
@@ -42,8 +43,13 @@ fn forced_preferences_without_a_value_are_absent() {
         MANAGED_PREFERENCES_REQUIREMENTS_KEY,
     ] {
         assert_eq!(
-            load_managed_preference_with(key, || true, || None)
-                .expect("load absent forced preference"),
+            load_managed_preference_with(
+                key,
+                managed_preferences_application_id(),
+                || true,
+                || None,
+            )
+            .expect("load absent forced preference"),
             None
         );
     }
@@ -63,6 +69,7 @@ fn preferences_that_become_unforced_during_read_are_ignored() {
             assert_eq!(
                 load_managed_preference_with(
                     key,
+                    managed_preferences_application_id(),
                     || forced.get(),
                     || {
                         forced.set(/*val*/ false);
@@ -87,6 +94,7 @@ fn forced_string_preferences_preserve_contents() {
             assert_eq!(
                 load_managed_preference_with(
                     key,
+                    managed_preferences_application_id(),
                     || true,
                     || Some(CFString::new(contents).as_CFType()),
                 )
@@ -122,15 +130,15 @@ fn forced_non_string_preferences_return_redacted_errors() {
         MANAGED_PREFERENCES_REQUIREMENTS_KEY,
     ] {
         for (type_name, value) in &values {
-            let error = load_managed_preference_with(key, || true, || Some(value.clone()))
-                .expect_err("reject non-string preference");
+            let application_id = managed_preferences_application_id();
+            let error =
+                load_managed_preference_with(key, application_id, || true, || Some(value.clone()))
+                    .expect_err("reject non-string preference");
             assert_eq!(
                 (error.kind(), error.to_string()),
                 (
                     io::ErrorKind::InvalidData,
-                    format!(
-                        "Managed preference {MANAGED_PREFERENCES_APPLICATION_ID}:{key} must be a string"
-                    ),
+                    format!("Managed preference {application_id}:{key} must be a string"),
                 ),
                 "unexpected diagnostic for {type_name} preference {key}"
             );

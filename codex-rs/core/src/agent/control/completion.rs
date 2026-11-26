@@ -22,6 +22,16 @@ use codex_rollout_trace::AgentResultTracePayload;
 use codex_rollout_trace::ThreadTraceContext;
 use tracing::debug;
 
+fn terminal_activity_kind(status: &AgentStatus) -> Option<SubAgentActivityKind> {
+    match status {
+        AgentStatus::Completed(_) => Some(SubAgentActivityKind::Completed),
+        AgentStatus::Interrupted | AgentStatus::Errored(_) | AgentStatus::Shutdown => {
+            Some(SubAgentActivityKind::Interrupted)
+        }
+        AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::NotFound => None,
+    }
+}
+
 impl LocalAgentControl {
     /// Routes a captured terminal outcome without retaining the child's live turn context.
     pub(crate) async fn notify_parent_of_terminal_turn(
@@ -47,7 +57,7 @@ impl LocalAgentControl {
             return;
         };
 
-        if matches!(status, AgentStatus::Completed(_))
+        if let Some(activity_kind) = terminal_activity_kind(&status)
             && let Some(parent_turn_id) = outcome.parent_turn_id
         {
             let initiating_thread_id = match outcome.initiating_agent_path.as_ref() {
@@ -75,8 +85,19 @@ impl LocalAgentControl {
                         SubAgentActivityItem {
                             model: None,
                             reasoning_effort: None,
-                            id: format!("subagent-completed-{}", outcome.turn_id),
-                            kind: SubAgentActivityKind::Completed,
+                            id: match activity_kind {
+                                SubAgentActivityKind::Completed => {
+                                    format!("subagent-completed-{}", outcome.turn_id)
+                                }
+                                SubAgentActivityKind::Interrupted => {
+                                    format!("subagent-interrupted-{}", outcome.turn_id)
+                                }
+                                SubAgentActivityKind::Started
+                                | SubAgentActivityKind::Interacted => {
+                                    unreachable!("terminal activity kind is never non-terminal")
+                                }
+                            },
+                            kind: activity_kind,
                             agent_thread_id: outcome.thread_id,
                             agent_path: child_agent_path.clone(),
                         },
@@ -150,6 +171,41 @@ impl LocalAgentControl {
                     status: &status,
                 },
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_activity_kind;
+    use codex_protocol::protocol::{AgentStatus, SubAgentActivityKind};
+
+    #[test]
+    fn terminal_agent_statuses_emit_tab_lifecycle_activity() {
+        assert_eq!(
+            terminal_activity_kind(&AgentStatus::Completed(None)),
+            Some(SubAgentActivityKind::Completed)
+        );
+        for status in [
+            AgentStatus::Interrupted,
+            AgentStatus::Errored("failed".to_owned()),
+            AgentStatus::Shutdown,
+        ] {
+            assert_eq!(
+                terminal_activity_kind(&status),
+                Some(SubAgentActivityKind::Interrupted)
+            );
+        }
+    }
+
+    #[test]
+    fn non_terminal_agent_statuses_do_not_emit_tab_lifecycle_activity() {
+        for status in [
+            AgentStatus::PendingInit,
+            AgentStatus::Running,
+            AgentStatus::NotFound,
+        ] {
+            assert_eq!(terminal_activity_kind(&status), None);
         }
     }
 }

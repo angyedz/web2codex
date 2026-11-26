@@ -50,7 +50,7 @@ pub(super) async fn run_main_inner(
         }
         if cli.fork_picker || cli.fork_last {
             return Err(std::io::Error::other(
-                "`codex fork --worktree` requires an explicit session ID",
+                "`web2codex fork --worktree` requires an explicit session ID",
             ));
         }
     }
@@ -104,7 +104,7 @@ pub(super) async fn run_main_inner(
     let codex_home = match find_codex_home() {
         Ok(codex_home) => codex_home.to_path_buf(),
         Err(err) => {
-            eprintln!("Error finding codex home: {err}");
+            eprintln!("Error finding Web2Codex home: {err}");
             std::process::exit(1);
         }
     };

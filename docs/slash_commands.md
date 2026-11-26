@@ -1,3 +1,3 @@
-# Slash commands
+# Web2Codex slash commands
 
-For an overview of Codex CLI slash commands, see [this documentation](https://developers.openai.com/codex/cli/slash-commands).
+Type `/` in the Web2Codex chat to open the command picker and see the available commands.

@@ -190,7 +190,7 @@ fn recovery_view(
                     require_explicit_confirmation: true,
                     is_disabled: !can_restart,
                     disabled_reason: if !managed_daemon {
-                        Some("This server is not managed by Codex.".to_string())
+                        Some("This server is not managed by Web2Codex.".to_string())
                     } else if issue.restart_features.is_none() {
                         Some("Restart cannot resolve this compatibility check.".to_string())
                     } else {

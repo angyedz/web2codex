@@ -68,6 +68,123 @@ fn oauth_client_secret_requires_url_and_client_id_without_disclosure() {
     }
 }
 
+#[test]
+fn mcp_add_parses_server_runtime_and_tool_exposure_options() {
+    let cli = McpCli::try_parse_from([
+        "mcp",
+        "add",
+        "workspace",
+        "--url",
+        "https://example.com/mcp",
+        "--env-header",
+        "Authorization=WORKSPACE_MCP_TOKEN",
+        "--startup-timeout-sec",
+        "30",
+        "--tool-timeout-sec",
+        "90",
+        "--required",
+        "--parallel-tools",
+        "--startup-readiness",
+        "catalog",
+        "--enable-tool",
+        "search",
+        "--enable-tool",
+        "read",
+        "--disable-tool",
+        "delete",
+    ])
+    .expect("parse MCP server options");
+    let McpSubcommand::Add(args) = cli.subcommand else {
+        panic!("expected MCP add");
+    };
+
+    assert_eq!(args.startup_timeout_sec, Some(30));
+    assert_eq!(args.tool_timeout_sec, Some(90));
+    assert!(args.required);
+    assert!(args.parallel_tools);
+    assert!(matches!(
+        args.startup_readiness,
+        super::StartupReadinessArg::Catalog
+    ));
+    assert_eq!(
+        args.enabled_tools,
+        vec!["search".to_string(), "read".to_string()]
+    );
+    assert_eq!(args.disabled_tools, vec!["delete".to_string()]);
+    let http = args
+        .transport_args
+        .streamable_http
+        .expect("streamable HTTP transport");
+    assert_eq!(
+        http.env_http_headers,
+        vec![("Authorization".to_string(), "WORKSPACE_MCP_TOKEN".to_string())]
+    );
+}
+
+#[test]
+fn mcp_env_header_requires_a_valid_header_and_environment_variable() {
+    assert_eq!(
+        super::parse_env_http_header("X-Workspace-Key=WORKSPACE_MCP_TOKEN")
+            .expect("valid environment-backed header"),
+        (
+            "X-Workspace-Key".to_string(),
+            "WORKSPACE_MCP_TOKEN".to_string()
+        )
+    );
+
+    for invalid in [
+        "X Workspace-Key=WORKSPACE_MCP_TOKEN",
+        "X-Workspace-Key=9WORKSPACE_TOKEN",
+        "X-Workspace-Key=WORKSPACE-TOKEN",
+        "X-Workspace-Key=",
+    ] {
+        assert!(
+            super::parse_env_http_header(invalid).is_err(),
+            "expected {invalid:?} to be rejected"
+        );
+    }
+}
+
+#[test]
+fn mcp_env_headers_reject_case_insensitive_duplicates() {
+    let duplicate = super::collect_env_http_headers(vec![
+        ("Authorization".to_string(), "WORKSPACE_TOKEN".to_string()),
+        ("authorization".to_string(), "SECOND_TOKEN".to_string()),
+    ])
+    .expect_err("duplicate HTTP headers must not silently override each other");
+    assert!(duplicate.to_string().contains("configured more than once"));
+}
+
+#[test]
+fn mcp_http_auth_methods_reject_conflicting_authorization_sources() {
+    let authorization = std::collections::HashMap::from([(
+        "authorization".to_string(),
+        "WORKSPACE_TOKEN".to_string(),
+    )]);
+    let error = super::validate_http_auth_options(
+        None,
+        Some("registered-client"),
+        Some(&authorization),
+    )
+    .expect_err("OAuth and a custom Authorization header must not compete");
+    assert!(error.to_string().contains("choose one authorization method"));
+
+    let bearer_error = super::validate_http_auth_options(
+        Some("WORKSPACE_TOKEN"),
+        None,
+        Some(&authorization),
+    )
+    .expect_err("the bearer option and Authorization header must not compete");
+    assert!(bearer_error.to_string().contains("cannot be combined"));
+
+    let api_key = std::collections::HashMap::from([(
+        "X-API-Key".to_string(),
+        "PROJECTS_TOKEN".to_string(),
+    )]);
+    super::validate_http_auth_options(None, Some("registered-client"), Some(&api_key))
+        .expect("OAuth may be combined with a separate API key header");
+}
+
 async fn isolated_test_home(test_name: &str) -> anyhow::Result<Option<PathBuf>> {
     const CHILD: &str = "CODEX_MCP_NETWORK_TEST_CHILD";
     let test_name = format!("mcp_cmd::tests::{test_name}");

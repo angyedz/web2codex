@@ -1190,7 +1190,7 @@ impl App {
                     subtitle: Some("Quitting this TUI will stop its running sessions.".into()),
                     items: vec![
                         SelectionItem {
-                            name: "Stay in Codex".into(),
+                            name: "Stay in Web2Codex".into(),
                             dismiss_on_select: true,
                             ..Default::default()
                         },
@@ -2395,7 +2395,23 @@ impl App {
                     self.launch_external_editor(tui).await;
                 }
             }
-            AppEvent::OpenMcpTunnelSetup => self.launch_mcp_tunnel_setup(tui).await,
+            AppEvent::OpenMcpTunnelSetup => self.chat_widget.open_mcp_tunnel_setup(),
+            AppEvent::OpenMcpSetupPage(url) => self.open_mcp_setup_page(url),
+            AppEvent::StartMcpTunnelSetup => self.start_mcp_tunnel_setup(),
+            AppEvent::RunMcpTunnelSmokeTest { cancellation } => {
+                self.run_mcp_tunnel_smoke_test(cancellation)
+            }
+            AppEvent::McpTunnelSetupActionCompleted { action, succeeded } => {
+                self.chat_widget
+                    .handle_mcp_tunnel_setup_action_completed(action, succeeded);
+            }
+            AppEvent::ManageWebBrowser(action) => self.manage_web_browser(tui, action).await,
+            AppEvent::CloseWebBrowserAgentTab {
+                thread_id,
+                agent_path,
+            } => {
+                self.close_web_browser_agent_tab(thread_id, agent_path).await;
+            }
             AppEvent::RefreshWindowsSandbox { thread_id } => {
                 #[cfg(any(target_os = "windows", test))]
                 self.refresh_windows_sandbox_for_thread(app_server, thread_id).await;
@@ -2528,7 +2544,7 @@ impl App {
                                     Line::from(vec!["• ".dim(), "Sandbox ready".into()]),
                                     Line::from(vec![
                                         "  ".into(),
-                                        "Codex can now safely edit files and execute commands in your computer"
+                                        "Web2Codex can now safely edit files and execute commands in your computer"
                                             .dark_gray(),
                                     ]),
                                 ]);

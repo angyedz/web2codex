@@ -5627,6 +5627,9 @@ mod tests {
                 .expect("canonical docs/public");
         let expected_dot_codex = AbsolutePathBuf::from_absolute_path(canonical_cwd.join(".codex"))
             .expect("canonical .codex");
+        let expected_dot_web2codex =
+            AbsolutePathBuf::from_absolute_path(canonical_cwd.join(".web2codex"))
+                .expect("canonical .web2codex");
         let policy = FileSystemSandboxPolicy::restricted(vec![
             FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
@@ -5655,6 +5658,7 @@ mod tests {
                     canonical_cwd,
                     vec![
                         expected_dot_codex.to_path_buf(),
+                        expected_dot_web2codex.to_path_buf(),
                         expected_docs.to_path_buf()
                     ],
                 ),

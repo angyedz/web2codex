@@ -639,7 +639,8 @@ inherits = "dev"
 opt-level = 0
 debug = "none"
 strip = "symbols"
-incremental = false
+# Reuse unchanged compilation units on subsequent local builds.
+incremental = true
 # The TUI keeps its directory-trust onboarding in non-debug builds. Match that
 # compile-time behavior while keeping this profile fast and small.
 debug-assertions = false

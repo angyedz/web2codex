@@ -1,3 +1,3 @@
 ## Sandbox & approvals
 
-For information about Codex sandboxing and approvals, see [this documentation](https://developers.openai.com/codex/security).
+For information about Web2Codex sandboxing and approvals, see the upstream [OpenAI Codex security reference](https://developers.openai.com/codex/security).

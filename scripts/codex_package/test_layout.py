@@ -24,6 +24,33 @@ from codex_package.targets import default_target
 
 
 class PackageLayoutTest(unittest.TestCase):
+    def test_web2codex_windows_launcher_clears_inherited_registered_core_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package_dir = root / "package"
+            package_dir.mkdir()
+            inputs = PackageInputs(
+                entrypoint_bin=touch_executable(root / "web2codex.exe"),
+                code_mode_host_bin=touch_executable(root / "codex-code-mode-host.exe"),
+                exec_server_bin=touch_executable(root / "codex-exec-server.exe"),
+                rg_bin=touch_executable(root / "rg.exe"),
+                bwrap_bin=None,
+                codex_command_runner_bin=touch_executable(
+                    root / "codex-command-runner.exe"
+                ),
+                codex_windows_sandbox_setup_bin=touch_executable(
+                    root / "codex-windows-sandbox-setup.exe"
+                ),
+            )
+            variant = PACKAGE_VARIANTS["web2codex"]
+            spec = TARGET_SPECS["x86_64-pc-windows-msvc"]
+
+            build_package_dir(package_dir, "0.0.0", variant, spec, inputs)
+            validate_package_dir(package_dir, variant, spec)
+
+            launcher = (package_dir / "web2codex.cmd").read_text(encoding="utf-8")
+            self.assertIn('set "CODEX_WINDOWS_REGISTERED_CORE=0"', launcher)
+
     @unittest.skipIf(sys.platform == "win32", "MSVC symbols are separate PDB files")
     def test_strip_policy_preserves_inputs_and_runs_packaged_executables(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

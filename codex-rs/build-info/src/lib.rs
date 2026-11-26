@@ -11,6 +11,29 @@ use sha2::Digest;
 use sha2::Sha256;
 
 static BUILD_INFO: OnceLock<BuildInfo> = OnceLock::new();
+static PACKAGE_VERSION: OnceLock<Option<String>> = OnceLock::new();
+
+/// The installed package version, with a caller's compiled version as fallback.
+pub fn runtime_version(compiled_version: &'static str) -> &'static str {
+    PACKAGE_VERSION
+        .get_or_init(|| {
+            InstallContext::current()
+                .package_manifest()
+                .map(|manifest| manifest.version.to_string())
+        })
+        .as_deref()
+        .unwrap_or(compiled_version)
+}
+
+/// Compare the latest stable release with the installed version, including prereleases.
+pub fn is_newer_stable_release(latest: &str, current: &str) -> Option<bool> {
+    let latest = Version::parse(latest.trim()).ok()?;
+    let current = Version::parse(current.trim()).ok()?;
+    if !latest.pre.is_empty() {
+        return None;
+    }
+    Some(latest.cmp_precedence(&current).is_gt())
+}
 
 /// Initialize build information from the commit stamped into the calling executable.
 ///

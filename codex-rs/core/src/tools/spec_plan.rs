@@ -1506,11 +1506,10 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 #[instrument(level = "trace", skip_all)]
 fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistry) {
     let turn_context = context.turn_context;
+    let can_spawn_agents = !turn_context.session_source.is_non_root_agent();
     if collab_tools_enabled(turn_context, context.model_info) {
         if multi_agent_v2_enabled(turn_context) {
             let model_messages = ResolvedModelMessages::from_model(context.model_info);
-            let spawn_agent_description =
-                model_messages.multi_agent_tool_description_override("spawn_agent");
             let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
                 ToolExposure::DirectModelOnly
             } else {
@@ -1529,40 +1528,45 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 agent_type_description(turn_context, context.default_agent_type_description);
             let hide_spawn_agent_metadata =
                 turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
-            registry.register_trusted_with_native_review(
-                multi_agent_v2_handler(
-                    SpawnAgentHandlerV2::new(
-                        SpawnAgentToolOptions {
-                            available_models: turn_context.available_models.clone(),
-                            multi_agent_version: turn_context.multi_agent_version,
-                            model_catalog_in_context: turn_context
-                                .config
-                                .features
-                                .enabled(Feature::ModelCatalogInContext),
-                            agent_type_description,
-                            expose_agent_type: !turn_context.config.agent_roles.is_empty(),
-                            hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
-                            expose_spawn_agent_model_overrides: turn_context
-                                .config
-                                .multi_agent_v2
-                                .expose_spawn_agent_model_overrides,
-                            usage_hint_text: turn_context
-                                .config
-                                .multi_agent_v2
-                                .usage_hint_text
-                                .clone(),
-                        },
-                        spawn_agent_description.map(str::to_owned),
+            // Delegation stays at the root; child turns can still coordinate existing agents.
+            if can_spawn_agents {
+                let spawn_agent_description =
+                    model_messages.multi_agent_tool_description_override("spawn_agent");
+                registry.register_trusted_with_native_review(
+                    multi_agent_v2_handler(
+                        SpawnAgentHandlerV2::new(
+                            SpawnAgentToolOptions {
+                                available_models: turn_context.available_models.clone(),
+                                multi_agent_version: turn_context.multi_agent_version,
+                                model_catalog_in_context: turn_context
+                                    .config
+                                    .features
+                                    .enabled(Feature::ModelCatalogInContext),
+                                agent_type_description,
+                                expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                                hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
+                                expose_spawn_agent_model_overrides: turn_context
+                                    .config
+                                    .multi_agent_v2
+                                    .expose_spawn_agent_model_overrides,
+                                usage_hint_text: turn_context
+                                    .config
+                                    .multi_agent_v2
+                                    .usage_hint_text
+                                    .clone(),
+                            },
+                            spawn_agent_description.map(str::to_owned),
+                        ),
+                        tool_namespace,
+                        // Spawn composes the selected description with inheritance and usage guidance.
+                        /*description_override*/
+                        None,
+                        model_messages.multi_agent_tool_parameters_override("spawn_agent"),
                     ),
-                    tool_namespace,
-                    // Spawn composes the selected description with inheritance and usage guidance.
-                    /*description_override*/
-                    None,
-                    model_messages.multi_agent_tool_parameters_override("spawn_agent"),
-                ),
-                exposure,
-                native_review,
-            );
+                    exposure,
+                    native_review,
+                );
+            }
             if !turn_context.config.multi_agent_v2.disable_direct_message {
                 registry.register_trusted_with_native_review(
                     multi_agent_v2_handler(
@@ -1623,22 +1627,24 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             } else {
                 ToolExposure::Direct
             };
-            registry.add_with_exposure(
-                SpawnAgentHandler::new(SpawnAgentToolOptions {
-                    available_models: turn_context.available_models.clone(),
-                    multi_agent_version: turn_context.multi_agent_version,
-                    model_catalog_in_context: turn_context
-                        .config
-                        .features
-                        .enabled(Feature::ModelCatalogInContext),
-                    agent_type_description,
-                    expose_agent_type: !turn_context.config.agent_roles.is_empty(),
-                    hide_agent_type_model_reasoning: false,
-                    expose_spawn_agent_model_overrides: true,
-                    usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
-                }),
-                exposure,
-            );
+            if can_spawn_agents {
+                registry.add_with_exposure(
+                    SpawnAgentHandler::new(SpawnAgentToolOptions {
+                        available_models: turn_context.available_models.clone(),
+                        multi_agent_version: turn_context.multi_agent_version,
+                        model_catalog_in_context: turn_context
+                            .config
+                            .features
+                            .enabled(Feature::ModelCatalogInContext),
+                        agent_type_description,
+                        expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                        hide_agent_type_model_reasoning: false,
+                        expose_spawn_agent_model_overrides: true,
+                        usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+                    }),
+                    exposure,
+                );
+            }
             registry.add_with_exposure(SendInputHandler, exposure);
             registry.add_with_exposure(ResumeAgentHandler, exposure);
             registry

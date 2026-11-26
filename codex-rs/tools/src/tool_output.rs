@@ -275,9 +275,15 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
                 FunctionCallOutputContentItem::InputAudio {
                     audio: AudioReference::File { file_id },
                 } if !file_id.trim().is_empty() => Some(file_id.clone()),
+                FunctionCallOutputContentItem::InputFile { file_url, filename }
+                    if !file_url.trim().is_empty() =>
+                {
+                    Some(format!("{filename}: {file_url}"))
+                }
                 FunctionCallOutputContentItem::InputText { .. }
                 | FunctionCallOutputContentItem::InputImage { .. }
                 | FunctionCallOutputContentItem::InputAudio { .. }
+                | FunctionCallOutputContentItem::InputFile { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
             })
             .collect::<Vec<_>>()

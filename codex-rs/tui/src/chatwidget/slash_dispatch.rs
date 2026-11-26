@@ -5,6 +5,7 @@
 //! dispatch step and records the staged entry once the command has been handled, so
 //! slash-command recall follows the same submitted-input rule as ordinary text.
 
+use super::context_window_slider::parse_context_window_profile;
 use super::*;
 use crate::app::WindowsSandboxHost;
 use crate::app_event::ManagedWorktreeMode;
@@ -104,36 +105,19 @@ impl ChatWidget {
     }
 
     fn show_context_window_profile(&mut self) {
-        let context_window = self.config.model_context_window.unwrap_or(200_000);
-        let tier = match context_window {
-            200_000 => "Stable",
-            270_000 => "Expanded",
-            400_000 => "Unstable",
-            _ => "Custom",
-        };
-        let compact_at = context_window.saturating_mul(9) / 10;
-        self.add_info_message(
-            format!(
-                "Context level: {tier} ({context_window} tokens). Automatic compaction starts around {compact_at} tokens. Choose with /context stable, /context expanded, or /context unstable."
-            ),
-            /*hint*/ None,
-        );
+        self.open_context_window_slider();
     }
 
     fn select_context_window_profile(&mut self, args: &str) {
-        let selection = match args.trim().to_ascii_lowercase().as_str() {
-            "stable" => Some(("Stable", 200_000)),
-            "expanded" => Some(("Expanded", 270_000)),
-            "unstable" => Some(("Unstable", 400_000)),
-            _ => None,
-        };
-        let Some((tier, context_window)) = selection else {
-            self.add_error_message("Usage: /context [stable|expanded|unstable]".to_string());
+        let Some(profile) = parse_context_window_profile(args) else {
+            self.add_error_message(
+                "Usage: /context [small|normal|above normal|unstable]".to_string(),
+            );
             return;
         };
         self.app_event_tx.send(AppEvent::PersistModelContextWindow {
-            tier: tier.to_string(),
-            context_window,
+            tier: profile.label.to_string(),
+            context_window: profile.context_window,
         });
     }
 
@@ -577,6 +561,10 @@ impl ChatWidget {
                     .send(AppEvent::OpenUsageStatistics { view: None });
             }
             SlashCommand::Context => self.show_context_window_profile(),
+            SlashCommand::Effort => self.open_effort_profile_popup(),
+            SlashCommand::Web => self.app_event_tx.send(AppEvent::ManageWebBrowser(
+                crate::app_event::WebBrowserAction::Open,
+            )),
             SlashCommand::Ide => {
                 self.handle_ide_command();
             }
@@ -612,6 +600,9 @@ impl ChatWidget {
             }
             SlashCommand::Mcp => {
                 self.add_mcp_output(McpServerStatusDetail::ToolsAndAuthOnly);
+            }
+            SlashCommand::Setup => {
+                self.app_event_tx.send(AppEvent::OpenMcpTunnelSetup);
             }
             SlashCommand::Apps => {
                 self.add_connectors_output();
@@ -856,6 +847,23 @@ impl ChatWidget {
                 }
             },
             SlashCommand::Context => self.select_context_window_profile(trimmed),
+            SlashCommand::Effort => self.select_effort_profile(trimmed),
+            SlashCommand::Web => {
+                use crate::app_event::WebBrowserAction;
+                let action = match trimmed.to_ascii_lowercase().as_str() {
+                    "" | "open" => Some(WebBrowserAction::Open),
+                    "login" => Some(WebBrowserAction::Login),
+                    "hide" => Some(WebBrowserAction::Hide),
+                    "models" => Some(WebBrowserAction::Models),
+                    "status" => Some(WebBrowserAction::Status),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    self.app_event_tx.send(AppEvent::ManageWebBrowser(action));
+                } else {
+                    self.add_error_message("Usage: /web [open|login|hide|models|status]".into());
+                }
+            }
             SlashCommand::Voice => match trimmed.to_ascii_lowercase().as_str() {
                 "settings" => self.app_event_tx.send(AppEvent::OpenRealtimeSettings),
                 "mute" => self.app_event_tx.send(AppEvent::VoiceControl {
@@ -876,7 +884,7 @@ impl ChatWidget {
                     self.add_mcp_output(McpServerStatusDetail::Full);
                 } else if matches!(
                     trimmed.to_ascii_lowercase().as_str(),
-                    "tunnel" | "tunnel setup" | "tunnel configure"
+                    "setup" | "tunnel" | "tunnel setup" | "tunnel configure"
                 ) {
                     self.app_event_tx.send(AppEvent::OpenMcpTunnelSetup);
                 } else if let Some((command, name)) = trimmed.split_once(' ')
@@ -895,7 +903,7 @@ impl ChatWidget {
                     }
                 } else {
                     self.add_error_message(
-                        "Usage: /mcp [verbose | login <name> | tunnel]".to_string(),
+                        "Usage: /mcp [setup | verbose | login <name>]".to_string(),
                     );
                 }
             }
@@ -1299,12 +1307,16 @@ impl ChatWidget {
             | SlashCommand::Daemon
             | SlashCommand::Pwd
             | SlashCommand::Usage
+            | SlashCommand::Context
+            | SlashCommand::Effort
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate
             | SlashCommand::Mcp
+            | SlashCommand::Web
+            | SlashCommand::Setup
             | SlashCommand::Apps
             | SlashCommand::Plugins
             | SlashCommand::Rollout

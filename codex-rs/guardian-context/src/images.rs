@@ -159,6 +159,7 @@ impl TranscriptImages {
                                 }
                                 FunctionCallOutputContentItem::InputText { .. }
                                 | FunctionCallOutputContentItem::InputAudio { .. }
+                                | FunctionCallOutputContentItem::InputFile { .. }
                                 | FunctionCallOutputContentItem::EncryptedContent { .. } => {}
                             }
                         }

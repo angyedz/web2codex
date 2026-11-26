@@ -66,7 +66,7 @@ pub(crate) async fn run_codex_thread_interactive(
 ) -> Result<(Arc<Session>, SessionIo), CodexErr> {
     if config.permissions.approval_policy.value() != AskForApproval::Never {
         return Err(CodexErr::InvalidRequest(
-            "Codex delegates require approval policy `never`".to_string(),
+            "Web2Codex delegates require approval policy `never`".to_string(),
         ));
     }
     // Do not let admission or a ready startup error win over prior cancellation.

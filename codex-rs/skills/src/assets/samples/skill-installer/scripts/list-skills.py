@@ -11,8 +11,6 @@ import urllib.error
 
 from github_utils import github_api_contents_url, github_request
 
-DEFAULT_REPO = "openai/skills"
-DEFAULT_PATH = "skills/.curated"
 DEFAULT_REF = "main"
 
 
@@ -21,30 +19,40 @@ class ListError(Exception):
 
 
 class Args(argparse.Namespace):
-    repo: str
-    path: str
+    repo: str | None
+    path: str | None
     ref: str
     format: str
+    installed: bool
 
 
 def _request(url: str) -> bytes:
-    return github_request(url, "codex-skill-list")
+    return github_request(url, "web2codex-skill-list")
 
 
 def _codex_home() -> str:
-    return os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
+    return os.environ.get(
+        "WEB2CODEX_HOME",
+        os.environ.get("CODEX_HOME", os.path.expanduser("~/.web2codex")),
+    )
 
 
 def _installed_skills() -> set[str]:
+    return set(_list_installed_skills())
+
+
+def _list_installed_skills() -> list[str]:
     root = os.path.join(_codex_home(), "skills")
     if not os.path.isdir(root):
-        return set()
-    entries = set()
+        return []
+    skills = []
     for name in os.listdir(root):
         path = os.path.join(root, name)
-        if os.path.isdir(path):
-            entries.add(name)
-    return entries
+        if name == ".system" or not os.path.isdir(path):
+            continue
+        if os.path.isfile(os.path.join(path, "SKILL.md")):
+            skills.append(name)
+    return sorted(skills)
 
 
 def _list_skills(repo: str, path: str, ref: str) -> list[str]:
@@ -65,14 +73,20 @@ def _list_skills(repo: str, path: str, ref: str) -> list[str]:
 
 
 def _parse_args(argv: list[str]) -> Args:
-    parser = argparse.ArgumentParser(description="List skills.")
-    parser.add_argument("--repo", default=DEFAULT_REPO)
+    parser = argparse.ArgumentParser(
+        description="List installed skills or skills in an explicit GitHub repository path."
+    )
+    parser.add_argument("--repo")
     parser.add_argument(
         "--path",
-        default=DEFAULT_PATH,
-        help="Repo path to list (default: skills/.curated)",
+        help="Repository path containing skill directories (required with --repo)",
     )
     parser.add_argument("--ref", default=DEFAULT_REF)
+    parser.add_argument(
+        "--installed",
+        action="store_true",
+        help="List profile-local host skills without network access",
+    )
     parser.add_argument(
         "--format",
         choices=["text", "json"],
@@ -85,6 +99,20 @@ def _parse_args(argv: list[str]) -> Args:
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
     try:
+        if args.installed:
+            if args.repo or args.path:
+                raise ListError("--installed cannot be combined with --repo or --path.")
+            skills = _list_installed_skills()
+            if args.format == "json":
+                print(json.dumps([{"name": name, "installed": True} for name in skills]))
+            elif skills:
+                for idx, name in enumerate(skills, start=1):
+                    print(f"{idx}. {name} (installed)")
+            else:
+                print("No profile-local host skills were found in this Web2Codex profile.")
+            return 0
+        if not args.repo or not args.path:
+            raise ListError("Provide both --repo and --path for remote listing, or use --installed.")
         skills = _list_skills(args.repo, args.path, args.ref)
         installed = _installed_skills()
         if args.format == "json":

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn context_with_fragment(fragment: &str) -> (TempDir, InlineVisualizationContext) {
-    let codex_home = tempfile::tempdir().expect("temp codex home");
+    let codex_home = tempfile::tempdir().expect("temp Web2Codex home");
     let thread_id = ThreadId::new();
     let context = InlineVisualizationContext::new(codex_home.path(), thread_id)
         .expect("UUIDv7 thread id should provide a timestamp");
@@ -42,7 +42,7 @@ fn unterminated_visualization_preview_uses_the_stream_context() {
 
 #[test]
 fn granted_visualization_root_overrides_thread_id_derived_root() {
-    let codex_home = tempfile::tempdir().expect("temp codex home");
+    let codex_home = tempfile::tempdir().expect("temp Web2Codex home");
     let granted_context = InlineVisualizationContext::new(codex_home.path(), ThreadId::new())
         .expect("granted context");
     fs::create_dir_all(&granted_context.thread_dir).expect("create granted directory");
@@ -178,7 +178,7 @@ fn unavailable_or_invalid_content_reference_has_explicit_fallback() {
 
 #[test]
 fn unavailable_artifact_has_explicit_fallback() {
-    let codex_home = tempfile::tempdir().expect("temp codex home");
+    let codex_home = tempfile::tempdir().expect("temp Web2Codex home");
     let context = InlineVisualizationContext::new(codex_home.path(), ThreadId::new())
         .expect("UUIDv7 thread id should provide a timestamp");
 

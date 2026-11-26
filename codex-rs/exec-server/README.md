@@ -1,13 +1,13 @@
 # codex-exec-server
 
-`codex-exec-server` is the library backing `codex exec-server` and the standalone
+`codex-exec-server` is the library backing `web2codex exec-server` and the standalone
 `codex-exec-server` executable, a small
 JSON-RPC server for spawning and controlling subprocesses through
 `codex-utils-pty`.
 
 It provides:
 
-- CLI entrypoints: `codex exec-server` and `codex-exec-server`
+- CLI entrypoints: `web2codex exec-server` and `codex-exec-server`
 - a Rust client: `ExecServerClient`
 - a small protocol module with shared request/response types
 
@@ -63,7 +63,7 @@ Tokens require `wss://` or a loopback destination, are redacted in diagnostics, 
 
 Remote mode registers the local exec-server with the environment registry,
 then reconnects to the service-provided rendezvous websocket as the environment.
-To supply registration credentials independently of Codex login, pass
+To supply registration credentials independently of Web2Codex sign-in, pass
 `--registration-bearer-stdin` and write one newline-terminated bearer to the
 executor's stdin. Exec-server reads it once and requires an HTTPS registry URL
 or an HTTP loopback address. For rotating credentials, use
@@ -80,7 +80,7 @@ Disconnecting either side closes its peer and resets the remote stream. The
 existing harness reconnect flow can then resume a retained destination session.
 The forwarder does not replay requests or persist execution state, so recovery
 is limited by the destination's session and process-output retention.
-It uses the standard Codex ChatGPT sign-in state; run `codex login` first when
+It uses the standard Web2Codex ChatGPT sign-in state; run `web2codex web login` first when
 remote registration needs authentication. Containerized callers that receive an
 Agent Identity JWT in `CODEX_ACCESS_TOKEN` can opt into that auth path with
 `--use-agent-identity-auth`; Codex then registers an Agent task and sends the
@@ -91,7 +91,7 @@ Codex sends it as a bearer token on the registration request. For example:
 
 ```sh
 CODEX_API_KEY="$OPENAI_API_KEY" \
-codex exec-server \
+web2codex exec-server \
   --remote ... \
   --environment-id "$ENVIRONMENT_ID"
 ```
@@ -101,7 +101,7 @@ WebSocket handshake. Select the transport and authentication with executor
 arguments rather than `config.toml` settings:
 
 ```sh
-codex exec-server \
+web2codex exec-server \
   --remote https://example.com \
   --environment-id "$ENVIRONMENT_ID" \
   --remote-transport direct \
@@ -482,7 +482,7 @@ base64 `chunk` of up to 1 MiB at an explicit `offset`.
 
 Path-based filesystem requests accept an optional `sandbox` object. When `sandbox`
 contains a `ReadOnly` or `WorkspaceWrite` policy, the operation runs in a
-hidden helper process launched from the top-level `codex` executable and
+hidden helper process launched from the top-level `web2codex` executable and
 prepared through the shared sandbox transform path. Helper requests and
 responses are passed over stdin/stdout.
 
@@ -520,8 +520,8 @@ The crate exports:
   registration mode
 
 Callers must pass `ExecServerRuntimeOptions` and an explicitly configured
-`HttpClientFactory` to `run_main()`. The top-level `codex exec-server` command
-builds the runtime options from the `codex` arg0 dispatch state and startup flags,
+`HttpClientFactory` to `run_main()`. The top-level `web2codex exec-server` command
+builds the runtime options from the `web2codex` arg0 dispatch state and startup flags,
 and resolves its HTTP client factory from the effective Codex configuration.
 `RemoteEnvironmentConfig::new(...)` also takes the auth provider and HTTP client
 factory that remote registration mode should use; the CLI builds the auth

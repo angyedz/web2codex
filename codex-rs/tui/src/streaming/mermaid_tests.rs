@@ -12,7 +12,7 @@ fn mermaid_stream_closes_resizes_and_preserves_raw_source() {
     let mut stages = Vec::new();
     for chunk in [
         "Before.\n\n```mermaid\n",
-        "flowchart LR\nA[\"Codex reply<br/>completed\"] --> B[\"Rendered in Ghostty\"]\n",
+        "flowchart LR\nA[\"Web2Codex reply<br/>completed\"] --> B[\"Rendered in Ghostty\"]\n",
         "```\n",
         "\nAfter.\n",
     ] {

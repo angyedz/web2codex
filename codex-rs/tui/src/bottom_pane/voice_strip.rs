@@ -159,7 +159,7 @@ impl Renderable for VoiceStrip {
             Color::Cyan,
             self.state.microphone_muted || !self.state.microphone_live,
         );
-        meters.push("  codex ".dim());
+        meters.push("  Web2Codex ".dim());
         append_voice_history(
             &mut meters,
             &self.state.speaker_history,

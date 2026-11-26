@@ -2,7 +2,7 @@
 source: cli/tests/doctor_enterprise_network.rs
 expression: stdout
 ---
-Codex Doctor v0.0.0
+Web2Codex Doctor v0.0.0
 
 Configuration
   [ok] config       loaded
@@ -15,5 +15,5 @@ Connectivity
 -------------------------------------------------------------
 4 ok | 0 warn | 0 fail ok
 
-Run codex doctor without --summary for detailed diagnostics.
+Run web2codex doctor without --summary for detailed diagnostics.
 --all expand truncated lists       --json redacted report

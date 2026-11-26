@@ -75,7 +75,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ListTool {
     fn spec(&self) -> ToolSpec {
         skill_function_tool::<ListArgs, ListResponse>(
             TOOL_NAME,
-            "List skills owned by the requested authority. Returns each skill's authority, package, and main_resource. Pass the package to skills.read, and pass next_cursor back as cursor to continue.",
+            "List skills owned by the requested authority. The host authority contains installed SKILL.md files, including user and project skills. Returns each skill's authority, package, and main_resource. Pass the package to skills.read, and pass next_cursor back as cursor to continue.",
         )
     }
 
@@ -91,11 +91,15 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ListTool {
                 .step_state
                 .catalog
                 .select_from_catalog(args.authority);
+            let include_hidden_host_skills =
+                matches!(args.authority, SkillToolAuthoritySelector::Host);
             let mut omitted_oversized_entry = false;
             let canonical_skills = catalog
                 .entries
                 .into_iter()
-                .filter(SkillCatalogEntry::is_model_visible)
+                .filter(|entry| {
+                    entry.enabled && (include_hidden_host_skills || entry.prompt_visible)
+                })
                 .filter_map(|entry| {
                     let listed = listed_skill(entry);
                     omitted_oversized_entry |= listed.is_none();

@@ -1,19 +1,19 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use tao::dpi::LogicalSize;
+use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 #[cfg(target_os = "linux")]
@@ -24,7 +24,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use uuid::Uuid;
 #[cfg(target_os = "macos")]
 use wry::WebViewBuilderExtDarwin;
-use wry::{WebContext, WebView, WebViewBuilder};
+use wry::{Rect, WebContext, WebView, WebViewBuilder};
 
 #[cfg(test)]
 mod bridge_tests;
@@ -41,9 +41,22 @@ const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
 const MAX_RESPONSE_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PROMPT_TEXT_BYTES: usize = 2 * 1024 * 1024;
+const SESSION_DISCONNECT_GRACE: Duration = Duration::from_secs(2);
 const MAX_TOOL_SCHEMAS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOOL_COUNT: usize = 1024;
 const MAX_TOOL_CALL_INPUT_BYTES: usize = 512 * 1024;
+const PENDING_AGENT_CLOSE_TTL: Duration = Duration::from_secs(300);
+const TUI_TEXT_RENDERING_INSTRUCTIONS: &str =
+    "Use Markdown headings, lists, tables, and code blocks; show URLs directly.";
+const MCP_CHAT_OUTPUT_INSTRUCTIONS: &str = "Keep protocol data private. Summarize completed work and report errors plainly.";
+const TOOL_COMPLETION_INSTRUCTIONS: &str = "For explicitly requested agents, work in parallel, do not recurse, and wait for all final results.";
+const MCP_TOOL_ROUTING_INSTRUCTIONS: &str = "Use only the selected connector's documented tools; do not guess or fall back, and report failures.";
+const MCP_AGENT_TASK_INSTRUCTIONS: &str = "Use only the selected connector's documented tools to complete the assigned task; report only results verified by tool output.";
+// ChatGPT already supplies its own system prompt. Replace only Web2Codex's
+// exact built-in prompt; custom base and project instructions stay intact.
+const DEFAULT_BASE_INSTRUCTIONS: &str =
+    include_str!("../../protocol/src/prompts/base_instructions/default.md");
+const COMPACT_BASE_INSTRUCTIONS: &str = "Act as a coding agent. Follow user and project instructions; use tools when needed and report verified results.";
 const INFERENCE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const ACCOUNT_CAPABILITY_PROBE_SCRIPT: &str = include_str!("model_picker.js");
 const TEMPORARY_CHAT_ENFORCEMENT_SCRIPT: &str = r##"
@@ -83,13 +96,8 @@ const TEMPORARY_CHAT_ENFORCEMENT_SCRIPT: &str = r##"
       if (url != null) {
         const target = new URL(url, location.href);
         if (isChatUrl(target) && (target.origin !== chatOrigin || target.pathname !== "/")) {
-          location.replace(temporaryChatUrl);
-          return;
+          return original.call(this, state, title, temporaryChatUrl);
         }
-      }
-      if (next === temporaryChatUrl) {
-        location.replace(temporaryChatUrl);
-        return;
       }
       return original.call(this, state, title, next ?? url);
     };
@@ -112,7 +120,6 @@ const TEMPORARY_CHAT_ENFORCEMENT_SCRIPT: &str = r##"
         && target.searchParams.get("temporary-chat") === "true";
       if (!isTemporaryEntry && event.cancelable) {
         event.preventDefault();
-        location.replace(temporaryChatUrl);
       }
     }, true);
   }
@@ -237,6 +244,59 @@ struct AccountCapabilities {
     detected_at_unix_seconds: u64,
 }
 
+fn account_capabilities_from_message(message: &serde_json::Value) -> Option<AccountCapabilities> {
+    if message
+        .get("probe_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(5)
+    {
+        return None;
+    }
+    let picker_options = message
+        .get("picker_options")
+        .and_then(serde_json::Value::as_array)?;
+    if picker_options.len() > 40 {
+        return None;
+    }
+    let picker_options = picker_options
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|option| !option.is_empty() && option.len() <= 120)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let reasoning_by_model = message
+        .get("reasoning_by_model")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(label, _)| picker_options.contains(label))
+        .filter_map(|(label, levels)| {
+            let levels = levels.as_array()?;
+            if levels.len() > 5 {
+                return None;
+            }
+            let levels = levels
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|level| matches!(*level, "low" | "medium" | "high" | "xhigh" | "max"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            (!levels.is_empty()).then(|| (label.clone(), levels))
+        })
+        .collect();
+    let detected_at_unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Some(AccountCapabilities {
+        probe_version: 5,
+        picker_options,
+        reasoning_by_model,
+        detected_at_unix_seconds,
+    })
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 struct LocalUsageStats {
@@ -314,13 +374,7 @@ fn record_local_usage(
     );
     let oldest_day = (chrono::Utc::now().date_naive() - chrono::Duration::days(365)).to_string();
     stats.days.retain(|day, _| day >= &oldest_day);
-    fs::write(path, serde_json::to_vec(&stats)?).with_context(|| {
-        format!(
-            "failed to save local usage statistics at {}",
-            path.display()
-        )
-    })?;
-    restrict_file_permissions(path)
+    write_private_json(path, &stats)
 }
 
 fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
@@ -330,15 +384,20 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
     let Ok(capabilities) = serde_json::from_slice::<AccountCapabilities>(&contents) else {
         return serde_json::json!({ "models": [] });
     };
-    if capabilities.probe_version != 4 {
+    model_catalog_from_capabilities(&capabilities)
+}
+
+fn model_catalog_from_capabilities(capabilities: &AccountCapabilities) -> serde_json::Value {
+    if capabilities.probe_version != 5 {
         return serde_json::json!({ "models": [] });
     }
 
     let mut seen = Vec::new();
-    let reasoning_by_model = capabilities.reasoning_by_model;
+    let reasoning_by_model = &capabilities.reasoning_by_model;
     let models = capabilities
         .picker_options
-        .into_iter()
+        .iter()
+        .cloned()
         .enumerate()
         .filter_map(|(priority, label)| {
             let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -361,6 +420,7 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
             } else {
                 levels.first().and_then(|level| level["effort"].as_str())
             };
+            let supports_reasoning_effort_updates = !levels.is_empty();
             Some(serde_json::json!({
                 // The visible picker label is an opaque, account-specific key. The request bridge
                 // checks it against the selected Web model before submitting any prompt.
@@ -379,6 +439,7 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
                 "effective_context_window_percent": 100,
                 "shell_type": "unified_exec",
                 "tool_mode": "direct",
+                "multi_agent_version": "v1",
                 "visibility": "list",
                 "supported_in_api": true,
                 "priority": i32::try_from(priority).unwrap_or(i32::MAX),
@@ -401,11 +462,61 @@ fn model_catalog_from_picker_snapshot(path: &Path) -> serde_json::Value {
                 "supports_search_tool": false,
                 "supports_experimental_context": false,
                 "use_responses_lite": false,
-                "supports_reasoning_effort_updates": false
+                "supports_reasoning_effort_updates": supports_reasoning_effort_updates
             }))
         })
         .collect::<Vec<_>>();
     serde_json::json!({ "models": models })
+}
+
+#[cfg(test)]
+mod model_catalog_tests {
+    use super::*;
+
+    fn capabilities(reasoning_levels: &[&str]) -> AccountCapabilities {
+        AccountCapabilities {
+            probe_version: 5,
+            picker_options: vec!["GPT-6 default".to_string()],
+            reasoning_by_model: BTreeMap::from([(
+                "GPT-6 default".to_string(),
+                reasoning_levels
+                    .iter()
+                    .map(|level| (*level).to_string())
+                    .collect(),
+            )]),
+            detected_at_unix_seconds: 0,
+        }
+    }
+
+    #[test]
+    fn detected_picker_efforts_enable_effort_updates() {
+        let catalog = model_catalog_from_capabilities(&capabilities(&["low", "medium", "high"]));
+        let model = &catalog["models"][0];
+
+        assert_eq!(model["supports_reasoning_effort_updates"], true);
+        assert_eq!(model["multi_agent_version"], "v1");
+        assert_eq!(
+            model["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn absent_picker_efforts_do_not_claim_support() {
+        let catalog = model_catalog_from_capabilities(&capabilities(&[]));
+        let model = &catalog["models"][0];
+
+        assert_eq!(model["supports_reasoning_effort_updates"], false);
+        assert!(
+            model["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -424,38 +535,949 @@ enum BrowserPage {
 }
 
 enum BrowserEvent {
-    Open(BrowserPage, Option<SyncSender<Result<(), String>>>),
+    Chrome(String),
+    SetPowerSliderValue {
+        view_id: String,
+        request_id: String,
+        index: u8,
+        allow_focus: bool,
+    },
+    PowerSliderValueResult {
+        view_id: String,
+        request_id: String,
+        result: Result<(), String>,
+    },
+    NewTab(String),
+    BackgroundTab(String, SyncSender<Result<usize, String>>),
+    ListTabs(SyncSender<Vec<String>>),
+    CloseAgentTab(String, Option<String>, SyncSender<AgentTabCloseOutcome>),
+    Open(BrowserPage, bool, SyncSender<Result<(), String>>),
+    ClientConnected(SyncSender<()>),
+    ClientDisconnected,
     ContinueLogin(AccountTierChoice),
     AccountCapabilities(AccountCapabilities, bool),
-    ResponsesBridgeReady(String),
+    ResponsesBridgeReady {
+        request_id: String,
+        conversation_has_history: bool,
+    },
+    ResponsesBridgeUnavailable {
+        request_id: String,
+        binding: Arc<Mutex<Option<String>>>,
+        document_reloaded: bool,
+        error: String,
+    },
+    ResponsesPromptSubmitted(String),
+    ResponsesAuthRequired(String),
     ResponsesRequest {
         request_id: String,
+        conversation_id: Option<String>,
+        conversation_epoch: Option<String>,
+        agent: Option<AgentRequestIdentity>,
+        setup_smoke_test: bool,
         model: String,
         reasoning_effort: Option<String>,
+        connector_required: bool,
+        mcp_required: bool,
+        mcp_action_required: bool,
+        tool_work_expected: bool,
         prompt: String,
+        stages: Vec<serde_json::Value>,
+        resume_prompt: String,
         attachments: Vec<MediaAttachment>,
+        resume_attachments: Vec<MediaAttachment>,
     },
     ResponsesToolState(String),
     ResponsesText {
         request_id: String,
         delta: String,
     },
+    ResponsesReasoningHeading {
+        request_id: String,
+        heading: String,
+    },
     ResponsesResult {
         request_id: String,
         revision: Option<u64>,
         result: Result<String, String>,
     },
+    CancelResponses(String),
     ReleaseResponses(String),
     Hide,
-    Stop(Option<SyncSender<()>>),
+    Stop(TcpStream),
+}
+
+#[cfg(target_os = "windows")]
+fn power_slider_window_is_foreground(hwnd: usize) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsChild, IsWindowVisible};
+
+    let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        let foreground = GetForegroundWindow();
+        !foreground.is_null() && IsChild(foreground, hwnd) != 0 && IsWindowVisible(hwnd) != 0
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_accessible_power_slider(hwnd: usize, index: u8, allow_focus: bool) -> anyhow::Result<()> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_MULTITHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        IUIAutomation, IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
+        IUIAutomationRangeValuePattern, CUIAutomation, TreeScope_Descendants,
+        UIA_ExpandCollapsePatternId, UIA_InvokePatternId, UIA_MenuItemControlTypeId,
+        UIA_RangeValuePatternId, UIA_SliderControlTypeId,
+    };
+
+    anyhow::ensure!(index <= 2, "ChatGPT power slider index is out of range");
+    let allow_focus = allow_focus && power_slider_window_is_foreground(hwnd);
+    let ensure_foreground = || -> anyhow::Result<()> {
+        anyhow::ensure!(allow_focus && power_slider_window_is_foreground(hwnd), "ChatGPT power slider source is no longer visible in the foreground");
+        Ok(())
+    };
+    let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let result = (|| {
+        let automation: IUIAutomation =
+            unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }?;
+        let root = unsafe { automation.ElementFromHandle(HWND(hwnd as *mut _)) }?;
+        let condition = unsafe { automation.CreateTrueCondition() }?;
+        let find_candidates = || -> anyhow::Result<Vec<(
+            windows::Win32::UI::Accessibility::IUIAutomationElement,
+            IUIAutomationRangeValuePattern,
+            f64,
+        )>> {
+            let elements = unsafe { root.FindAll(TreeScope_Descendants, &condition) }?;
+            let length = unsafe { elements.Length() }?;
+            let mut candidates = Vec::new();
+            for position in 0..length {
+                let Ok(element) = (unsafe { elements.GetElement(position) }) else {
+                    continue;
+                };
+                if unsafe { element.CurrentControlType() }.ok() != Some(UIA_SliderControlTypeId) {
+                    continue;
+                }
+                let Ok(pattern) = (unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                        UIA_RangeValuePatternId,
+                    )
+                }) else {
+                    continue;
+                };
+                let (Ok(minimum), Ok(maximum), Ok(read_only), Ok(offscreen), Ok(enabled), Ok(current)) = (
+                    unsafe { pattern.CurrentMinimum() },
+                    unsafe { pattern.CurrentMaximum() },
+                    unsafe { pattern.CurrentIsReadOnly() },
+                    unsafe { element.CurrentIsOffscreen() },
+                    unsafe { element.CurrentIsEnabled() },
+                    unsafe { pattern.CurrentValue() },
+                ) else {
+                    continue;
+                };
+                if minimum == 0.0
+                    && maximum == 2.0
+                    && [0.0, 1.0, 2.0].contains(&current)
+                    && !read_only.as_bool()
+                    && enabled.as_bool()
+                    && (!allow_focus || !offscreen.as_bool())
+                {
+                    candidates.push((element, pattern, current));
+                }
+            }
+            Ok(candidates)
+        };
+
+        let mut candidates = find_candidates()?;
+        if candidates.is_empty() {
+            // ChatGPT initially exposes its power control as a menu item; the
+            // range slider appears in the UI Automation tree only after that
+            // item is expanded. Expanding through UI Automation does not
+            // activate the browser window. SetFocus remains limited to an
+            // already-foreground source view.
+            let elements = unsafe { root.FindAll(TreeScope_Descendants, &condition) }?;
+            let length = unsafe { elements.Length() }?;
+            for position in 0..length {
+                let Ok(element) = (unsafe { elements.GetElement(position) }) else {
+                    continue;
+                };
+                if unsafe { element.CurrentControlType() }.ok() != Some(UIA_MenuItemControlTypeId) {
+                    continue;
+                }
+                let Ok(name) = (unsafe { element.CurrentName() }) else {
+                    continue;
+                };
+                let normalized_name = name.to_string().to_lowercase();
+                if !normalized_name.contains("power") && !normalized_name.contains("мощ") {
+                    continue;
+                }
+                if allow_focus {
+                    ensure_foreground()?;
+                    let _ = unsafe { element.SetFocus() };
+                }
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                        UIA_ExpandCollapsePatternId,
+                    )
+                } {
+                    if allow_focus {
+                        ensure_foreground()?;
+                    }
+                    let _ = unsafe { pattern.Expand() };
+                }
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                } {
+                    if allow_focus {
+                        ensure_foreground()?;
+                    }
+                    let _ = unsafe { pattern.Invoke() };
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            candidates = find_candidates()?;
+        }
+
+        anyhow::ensure!(
+            candidates.len() == 1,
+            "ChatGPT did not expose one writable three-position power slider in the source view"
+        );
+        if (candidates[0].2 - f64::from(index)).abs() < f64::EPSILON {
+            return Ok(());
+        }
+        // Focus only a source view that was already active and foreground.
+        // For background views use the provider's RangeValue pattern directly,
+        // if it exposes the slider at all. The page must still verify that the
+        // selection persists, since UIA success alone does not prove React committed it.
+        if allow_focus {
+            ensure_foreground()?;
+            let _ = unsafe { candidates[0].0.SetFocus() };
+            ensure_foreground()?;
+        }
+        unsafe { candidates[0].1.SetValue(f64::from(index)) }?;
+        let mut applied = false;
+        for _ in 0..20 {
+            let current = unsafe { candidates[0].1.CurrentValue() }?;
+            if (current - f64::from(index)).abs() < f64::EPSILON {
+                applied = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        anyhow::ensure!(applied, "ChatGPT power slider did not accept the requested value");
+        Ok(())
+    })();
+    if initialized {
+        unsafe { CoUninitialize() };
+    }
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_accessible_power_slider(_hwnd: usize, _index: u8, _allow_focus: bool) -> anyhow::Result<()> {
+    anyhow::bail!("native ChatGPT power slider input is only available on Windows")
 }
 
 struct PendingResponsesRequest {
     model: String,
-    reasoning_effort: Option<String>,
-    prompt: String,
-    attachments: Vec<MediaAttachment>,
+    input_characters: usize,
+    resume_input_characters: Option<usize>,
+    compaction: bool,
+    // Retain the payload until the page confirms the send click. A login
+    // redirect before that point can safely resume the same request.
+    payload: Option<serde_json::Value>,
+    resume_payload: Option<serde_json::Value>,
+    dispatch_started: bool,
+    awaiting_auth: bool,
+    bridge_ready_deadline: Option<Instant>,
     started_at: std::time::Instant,
+}
+
+// Initial composer discovery and the capability probe can take 105 seconds.
+const RESPONSE_BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn response_bridge_wakeup(
+    idle_deadline: Option<Instant>,
+    pending: &HashMap<String, PendingResponsesRequest>,
+) -> ControlFlow {
+    idle_deadline
+        .into_iter()
+        .chain(pending.values().filter_map(|request| request.bridge_ready_deadline))
+        .min()
+        .map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+}
+
+fn response_signal_script(request_id: &str, assignment: &str) -> String {
+    format!(
+        "if (window.__web2codexRequestId === {}) {{ {assignment} }}",
+        serde_json::json!(request_id)
+    )
+}
+
+fn response_bind_script(request_id: &str) -> String {
+    format!(
+        r#"(async () => {{
+            const requestId = {};
+            let accepted = false;
+            try {{ accepted = await window.__web2codexBindRequest?.(requestId); }} catch {{}}
+            if (!accepted) window.ipc.postMessage(JSON.stringify({{ type: 'responses-bind-rejected', request_id: requestId }}));
+        }})();"#,
+        serde_json::json!(request_id)
+    )
+}
+
+const COLLAB_SPAWN_SUBAGENT: &str = "collab_spawn";
+const SETUP_SMOKE_TEST_METADATA_KEY: &str = "web2codex_setup_smoke_test";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentRequestIdentity {
+    thread_id: String,
+    name: String,
+    agent_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentBrowserTab {
+    tab_index: usize,
+    name: String,
+    agent_path: Option<String>,
+    conversation_epoch: Option<String>,
+    active_request_id: Option<String>,
+    close_when_idle: bool,
+}
+
+#[derive(Default)]
+struct AgentTabRegistry {
+    by_thread: HashMap<String, AgentBrowserTab>,
+    request_to_thread: HashMap<String, String>,
+    pending_close: HashMap<String, Instant>,
+    pending_close_by_path: HashMap<String, Instant>,
+    setup_smoke_tab: Option<AgentBrowserTab>,
+    primary_response_tabs: HashMap<String, usize>,
+    primary_by_thread: HashMap<String, AgentBrowserTab>,
+    primary_request_to_thread: HashMap<String, String>,
+    response_request_ids: HashMap<usize, Arc<Mutex<Option<String>>>>,
+    reusable_primary_response_tab: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentTabCloseStatus {
+    Deferred,
+    Ready(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentTabCloseOutcome {
+    NotFound,
+    Deferred,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowserActivationIntent {
+    UserAction,
+    BackgroundWork,
+    BackgroundTabSelection,
+}
+
+fn should_activate_browser(intent: BrowserActivationIntent) -> bool {
+    matches!(intent, BrowserActivationIntent::UserAction)
+}
+
+fn should_apply_background_focus_guard(window_is_foreground: bool) -> bool {
+    !window_is_foreground
+}
+
+const WS_EX_NOACTIVATE_STYLE: isize = 0x08000000;
+
+fn extended_style_with_no_activate(style: isize, prevent_activation: bool) -> isize {
+    if prevent_activation {
+        style | WS_EX_NOACTIVATE_STYLE
+    } else {
+        style & !WS_EX_NOACTIVATE_STYLE
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_window_no_activate(window: &Window, prevent_activation: bool) -> anyhow::Result<()> {
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+
+    use tao::platform::windows::WindowExtWindows;
+    use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
+    };
+
+    let hwnd = window.hwnd() as *mut c_void;
+    let current_style = unsafe {
+        SetLastError(0);
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let error = GetLastError();
+        anyhow::ensure!(
+            style != 0 || error == 0,
+            "could not read the browser window style: Windows error {error}"
+        );
+        style
+    };
+    let updated_style = extended_style_with_no_activate(current_style, prevent_activation);
+    if updated_style == current_style {
+        return Ok(());
+    }
+
+    unsafe {
+        SetLastError(0);
+        let previous = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, updated_style);
+        let error = GetLastError();
+        anyhow::ensure!(
+            previous != 0 || error == 0,
+            "could not update the browser window style: Windows error {error}"
+        );
+    }
+
+    let applied = unsafe {
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
+        )
+    };
+    anyhow::ensure!(
+        applied != 0,
+        "could not apply the browser window activation style"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn browser_window_is_foreground(window: &Window) -> bool {
+    use std::ffi::c_void;
+
+    use tao::platform::windows::WindowExtWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    unsafe { GetForegroundWindow() == window.hwnd() as *mut c_void }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn browser_window_is_foreground(_window: &Window) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_window_no_activate(_window: &Window, _prevent_activation: bool) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn should_select_response_tab(
+    intent: BrowserActivationIntent,
+    active_tab: usize,
+    response_tab: usize,
+) -> bool {
+    intent == BrowserActivationIntent::BackgroundTabSelection
+        || should_activate_browser(intent)
+        || active_tab == response_tab
+}
+
+fn response_tab_starts_in_viewport(
+    intent: BrowserActivationIntent,
+    active_tab: usize,
+    response_tab: usize,
+) -> bool {
+    should_select_response_tab(intent, active_tab, response_tab)
+}
+
+fn session_disconnect_deadline(
+    now: Instant,
+    clients: usize,
+    session_owned: bool,
+) -> Option<Instant> {
+    (clients == 0 && session_owned).then_some(now + SESSION_DISCONNECT_GRACE)
+}
+
+fn activate_browser_window(window: &Window, intent: BrowserActivationIntent) {
+    if should_activate_browser(intent) {
+        if let Err(error) = set_window_no_activate(window, false) {
+            eprintln!("Could not enable browser window activation: {error:#}");
+        }
+        window.set_visible(true);
+        window.set_focus();
+    }
+}
+
+fn release_focus_guard_request(request_id: &str, guarded_requests: &mut HashSet<String>) -> bool {
+    guarded_requests.remove(request_id) && guarded_requests.is_empty()
+}
+
+fn release_background_focus_guard(
+    request_id: &str,
+    window: &Window,
+    guarded_requests: &mut HashSet<String>,
+) {
+    if release_focus_guard_request(request_id, guarded_requests) {
+        if let Err(error) = set_window_no_activate(window, false) {
+            eprintln!("Could not release browser focus guard: {error:#}");
+        }
+    }
+}
+
+fn activate_browser_tab(window: &Window, view: &WebView, intent: BrowserActivationIntent) {
+    let _ = view.set_visible(true);
+    if should_activate_browser(intent) {
+        activate_browser_window(window, intent);
+        let _ = view.focus();
+    }
+}
+
+impl AgentTabRegistry {
+    fn prune_pending_closes(&mut self) {
+        let now = Instant::now();
+        self.pending_close
+            .retain(|_, requested_at| now.duration_since(*requested_at) < PENDING_AGENT_CLOSE_TTL);
+        self.pending_close_by_path
+            .retain(|_, requested_at| now.duration_since(*requested_at) < PENDING_AGENT_CLOSE_TTL);
+    }
+
+    fn tab_index(&self, thread_id: &str) -> Option<usize> {
+        self.by_thread.get(thread_id).map(|tab| tab.tab_index)
+    }
+
+    fn tab_for_thread(&self, thread_id: &str) -> Option<&AgentBrowserTab> {
+        self.by_thread.get(thread_id)
+    }
+
+    fn thread_for_request(&self, request_id: &str) -> Option<&str> {
+        self.request_to_thread.get(request_id).map(String::as_str)
+    }
+
+    fn request_close_for_request(&mut self, request_id: &str) -> Option<AgentTabCloseStatus> {
+        let thread_id = self.thread_for_request(request_id)?.to_owned();
+        Some(self.request_close_internal(&thread_id, None, /*close_active_now*/ false))
+    }
+
+    fn setup_smoke_tab_index(&self) -> Option<usize> {
+        self.setup_smoke_tab.as_ref().map(|tab| tab.tab_index)
+    }
+
+    fn tab_index_for_request(&self, request_id: &str) -> Option<usize> {
+        if let Some(index) = self.primary_response_tabs.get(request_id) {
+            return Some(*index);
+        }
+        if let Some(thread_id) = self.thread_for_request(request_id) {
+            return self.tab_index(thread_id);
+        }
+        self.setup_smoke_tab
+            .as_ref()
+            .filter(|tab| tab.active_request_id.as_deref() == Some(request_id))
+            .map(|tab| tab.tab_index)
+    }
+
+    fn primary_tab_for_thread(&self, thread_id: &str) -> Option<&AgentBrowserTab> {
+        self.primary_by_thread.get(thread_id)
+    }
+
+    fn stale_response_request(
+        &self,
+        request_id: &str,
+        conversation_id: Option<&str>,
+        agent: Option<&AgentRequestIdentity>,
+        setup_smoke_test: bool,
+        broker: &TurnBroker,
+    ) -> Option<String> {
+        let tab = if let Some(agent) = agent {
+            self.tab_for_thread(&agent.thread_id)
+        } else if setup_smoke_test {
+            self.setup_smoke_tab.as_ref()
+        } else {
+            conversation_id.and_then(|thread_id| self.primary_tab_for_thread(thread_id))
+        }?;
+        let previous = tab.active_request_id.as_deref()?;
+        (previous != request_id && broker.snapshot(previous)["active"].as_bool() == Some(false))
+            .then(|| previous.to_owned())
+    }
+
+    fn primary_thread_for_request(&self, request_id: &str) -> Option<&str> {
+        self.primary_request_to_thread
+            .get(request_id)
+            .map(String::as_str)
+    }
+
+    fn require_fresh_response_view(&mut self, request_id: &str) {
+        let Some(tab_index) = self.tab_index_for_request(request_id) else {
+            return;
+        };
+        if let Some(state) = self.response_request_ids.remove(&tab_index)
+            && let Ok(mut current) = state.lock()
+        {
+            *current = None;
+        }
+    }
+
+    fn response_request_id_state(
+        &self,
+        tab_index: usize,
+    ) -> Option<Arc<Mutex<Option<String>>>> {
+        self.response_request_ids.get(&tab_index).cloned()
+    }
+
+    fn bind_response_request_id_state(
+        &mut self,
+        tab_index: usize,
+        request_id_state: Arc<Mutex<Option<String>>>,
+    ) {
+        if let Some(previous) = self.response_request_ids.insert(tab_index, request_id_state.clone())
+            && !Arc::ptr_eq(&previous, &request_id_state)
+            && let Ok(mut current) = previous.lock()
+        {
+            *current = None;
+        }
+    }
+
+    fn clear_response_request_id(
+        &self,
+        tab_index: usize,
+        request_id: &str,
+    ) {
+        if let Some(state) = self.response_request_id_state(tab_index)
+            && let Ok(mut state) = state.lock()
+            && state.as_deref() == Some(request_id)
+        {
+            *state = None;
+        }
+    }
+
+    fn reusable_primary_response_tab(&self) -> Option<usize> {
+        self.primary_response_tabs
+            .is_empty()
+            .then_some(self.reusable_primary_response_tab)
+            .flatten()
+            .filter(|index| !self.primary_by_thread.values().any(|tab| tab.tab_index == *index))
+    }
+
+    fn bind_primary_response_request(&mut self, request_id: &str, tab_index: usize) {
+        self.primary_response_tabs
+            .insert(request_id.to_owned(), tab_index);
+    }
+
+    fn bind_primary_thread_request(
+        &mut self,
+        thread_id: &str,
+        request_id: &str,
+        tab_index: usize,
+        conversation_epoch: Option<String>,
+    ) {
+        if self.reusable_primary_response_tab == Some(tab_index) {
+            self.reusable_primary_response_tab = None;
+        }
+        self.primary_response_tabs
+            .insert(request_id.to_owned(), tab_index);
+        self.primary_request_to_thread
+            .insert(request_id.to_owned(), thread_id.to_owned());
+        self.primary_by_thread.insert(
+            thread_id.to_owned(),
+            AgentBrowserTab {
+                tab_index,
+                name: "ChatGPT".to_owned(),
+                agent_path: None,
+                conversation_epoch,
+                active_request_id: Some(request_id.to_owned()),
+                close_when_idle: false,
+            },
+        );
+    }
+
+    fn is_setup_smoke_request(&self, request_id: &str) -> bool {
+        self.setup_smoke_tab
+            .as_ref()
+            .is_some_and(|tab| tab.active_request_id.as_deref() == Some(request_id))
+    }
+
+    fn bind_request(
+        &mut self,
+        identity: &AgentRequestIdentity,
+        request_id: &str,
+        tab_index: usize,
+    ) {
+        self.bind_request_with_epoch(identity, request_id, tab_index, None);
+    }
+
+    fn bind_request_with_epoch(
+        &mut self,
+        identity: &AgentRequestIdentity,
+        request_id: &str,
+        tab_index: usize,
+        conversation_epoch: Option<String>,
+    ) {
+        self.prune_pending_closes();
+        let pending_thread_close = self.pending_close.remove(&identity.thread_id).is_some();
+        let pending_path_close = identity
+            .agent_path
+            .as_deref()
+            .is_some_and(|path| self.pending_close_by_path.remove(path).is_some());
+        let close_when_idle = pending_thread_close || pending_path_close;
+        if let Some(previous_request) = self
+            .by_thread
+            .get(&identity.thread_id)
+            .and_then(|tab| tab.active_request_id.as_ref())
+        {
+            self.request_to_thread.remove(previous_request);
+        }
+        self.by_thread.insert(
+            identity.thread_id.clone(),
+            AgentBrowserTab {
+                tab_index,
+                name: identity.name.clone(),
+                agent_path: identity.agent_path.clone(),
+                conversation_epoch,
+                active_request_id: Some(request_id.to_owned()),
+                close_when_idle,
+            },
+        );
+        self.request_to_thread
+            .insert(request_id.to_owned(), identity.thread_id.clone());
+    }
+
+    fn bind_setup_smoke_request(&mut self, request_id: &str, tab_index: usize) {
+        self.setup_smoke_tab = Some(AgentBrowserTab {
+            tab_index,
+            name: "Setup · smoke test".to_owned(),
+            agent_path: None,
+            conversation_epoch: None,
+            active_request_id: Some(request_id.to_owned()),
+            close_when_idle: false,
+        });
+    }
+
+    fn release_request(&mut self, request_id: &str) -> Vec<usize> {
+        let mut tabs_to_close = Vec::new();
+        if let Some(index) = self.primary_response_tabs.remove(request_id) {
+            self.clear_response_request_id(index, request_id);
+            if let Some(thread_id) = self.primary_request_to_thread.remove(request_id) {
+                if let Some(tab) = self.primary_by_thread.get_mut(&thread_id)
+                    && tab.active_request_id.as_deref() == Some(request_id)
+                {
+                    tab.active_request_id = None;
+                } else if self
+                    .primary_by_thread
+                    .get(&thread_id)
+                    .is_some_and(|tab| tab.tab_index != index)
+                {
+                    // A newer response for this Codex thread may have moved to
+                    // a fresh Temporary Chat while this response was still
+                    // active. Retire the old view only after its own observer
+                    // releases it, leaving the newer tab untouched.
+                    tabs_to_close.push(index);
+                }
+                return tabs_to_close;
+            }
+            if self.reusable_primary_response_tab.is_none() {
+                self.reusable_primary_response_tab = Some(index);
+            } else if self.reusable_primary_response_tab != Some(index) {
+                tabs_to_close.push(index);
+            }
+            return tabs_to_close;
+        }
+        if let Some(thread_id) = self.request_to_thread.remove(request_id) {
+            let closed_tab = self.by_thread.get_mut(&thread_id).and_then(|tab| {
+                if tab.active_request_id.as_deref() != Some(request_id) {
+                    return None;
+                }
+                tab.active_request_id = None;
+                Some((tab.tab_index, tab.close_when_idle))
+            });
+            if let Some((tab_index, close_when_idle)) = closed_tab {
+                self.clear_response_request_id(tab_index, request_id);
+                if close_when_idle {
+                    tabs_to_close.push(tab_index);
+                }
+            }
+        }
+        let setup_tab_index = self.setup_smoke_tab.as_mut().and_then(|tab| {
+            if tab.active_request_id.as_deref() != Some(request_id) {
+                return None;
+            }
+            tab.active_request_id = None;
+            Some(tab.tab_index)
+        });
+        if let Some(tab_index) = setup_tab_index {
+            self.clear_response_request_id(tab_index, request_id);
+        }
+        tabs_to_close
+    }
+
+    fn request_close(&mut self, thread_id: &str, agent_path: Option<&str>) -> AgentTabCloseStatus {
+        self.request_close_internal(thread_id, agent_path, /*close_active_now*/ true)
+    }
+
+    fn request_close_internal(
+        &mut self,
+        thread_id: &str,
+        agent_path: Option<&str>,
+        close_active_now: bool,
+    ) -> AgentTabCloseStatus {
+        self.prune_pending_closes();
+        let matched_thread_id = self
+            .by_thread
+            .contains_key(thread_id)
+            .then_some(thread_id.to_owned())
+            .or_else(|| {
+                let agent_path = agent_path?;
+                self.by_thread
+                    .iter()
+                    .find(|(_, tab)| tab.agent_path.as_deref() == Some(agent_path))
+                    .map(|(thread_id, _)| thread_id.clone())
+            });
+        let Some(matched_thread_id) = matched_thread_id else {
+            self.pending_close
+                .insert(thread_id.to_owned(), Instant::now());
+            if let Some(agent_path) = agent_path.filter(|path| !path.trim().is_empty()) {
+                self.pending_close_by_path
+                    .insert(agent_path.to_owned(), Instant::now());
+            }
+            return AgentTabCloseStatus::Deferred;
+        };
+        let Some(tab) = self.by_thread.get_mut(&matched_thread_id) else {
+            return AgentTabCloseStatus::Deferred;
+        };
+        tab.close_when_idle = true;
+        if tab.active_request_id.is_some() && !close_active_now {
+            AgentTabCloseStatus::Deferred
+        } else {
+            // Explicit close-agent commands are issued only after the host reports
+            // a terminal agent status. A stale observer must not strand its tab.
+            AgentTabCloseStatus::Ready(tab.tab_index)
+        }
+    }
+
+    fn close_tab(&mut self, tab_index: usize) -> Vec<String> {
+        let removed_threads = self
+            .by_thread
+            .iter()
+            .filter(|(_, tab)| tab.tab_index == tab_index)
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect::<Vec<_>>();
+        let removed_primary_threads = self
+            .primary_by_thread
+            .iter()
+            .filter(|(_, tab)| tab.tab_index == tab_index)
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect::<Vec<_>>();
+        let canceled_requests = removed_threads
+            .iter()
+            .filter_map(|thread_id| {
+                self.by_thread
+                    .get(thread_id)
+                    .and_then(|tab| tab.active_request_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut canceled_requests = canceled_requests;
+        canceled_requests.extend(removed_primary_threads.iter().filter_map(|thread_id| {
+            self.primary_by_thread
+                .get(thread_id)
+                .and_then(|tab| tab.active_request_id.clone())
+        }));
+        for thread_id in &removed_threads {
+            if let Some(tab) = self.by_thread.remove(thread_id)
+                && let Some(agent_path) = tab.agent_path
+            {
+                self.pending_close_by_path.remove(&agent_path);
+            }
+            self.pending_close.remove(thread_id);
+        }
+        for thread_id in &removed_primary_threads {
+            if let Some(tab) = self.primary_by_thread.remove(thread_id)
+                && let Some(request_id) = tab.active_request_id
+            {
+                self.primary_request_to_thread.remove(&request_id);
+                self.primary_response_tabs.remove(&request_id);
+            }
+        }
+        canceled_requests.extend(
+            self.primary_response_tabs
+                .iter()
+                .filter(|(_, index)| **index == tab_index)
+                .map(|(request_id, _)| request_id.clone()),
+        );
+        self.primary_response_tabs
+            .retain(|_, index| *index != tab_index);
+        if self.reusable_primary_response_tab == Some(tab_index) {
+            self.reusable_primary_response_tab = None;
+        }
+        if let Some(state) = self.response_request_ids.remove(&tab_index)
+            && let Ok(mut current) = state.lock()
+        {
+            *current = None;
+        }
+        for index in self.primary_response_tabs.values_mut() {
+            if *index > tab_index {
+                *index -= 1;
+            }
+        }
+        if let Some(index) = self.reusable_primary_response_tab.as_mut()
+            && *index > tab_index
+        {
+            *index -= 1;
+        }
+        let request_id_states = std::mem::take(&mut self.response_request_ids);
+        self.response_request_ids = request_id_states
+            .into_iter()
+            .map(|(index, state)| (if index > tab_index { index - 1 } else { index }, state))
+            .collect();
+        if self
+            .setup_smoke_tab
+            .as_ref()
+            .is_some_and(|tab| tab.tab_index == tab_index)
+        {
+            if let Some(request_id) = self
+                .setup_smoke_tab
+                .as_ref()
+                .and_then(|tab| tab.active_request_id.clone())
+            {
+                canceled_requests.push(request_id);
+            }
+            self.setup_smoke_tab = None;
+        }
+        self.request_to_thread
+            .retain(|_, thread_id| self.by_thread.contains_key(thread_id));
+        self.primary_request_to_thread.retain(|_, thread_id| {
+            self.primary_by_thread.contains_key(thread_id)
+        });
+        for tab in self.primary_by_thread.values_mut() {
+            if tab.tab_index > tab_index {
+                tab.tab_index -= 1;
+            }
+        }
+        for tab in self.by_thread.values_mut() {
+            if tab.tab_index > tab_index {
+                tab.tab_index -= 1;
+            }
+        }
+        if let Some(tab) = self.setup_smoke_tab.as_mut()
+            && tab.tab_index > tab_index
+        {
+            tab.tab_index -= 1;
+        }
+        canceled_requests
+    }
+
+    #[cfg(test)]
+    fn label_at(&self, tab_index: usize) -> Option<&str> {
+        self.by_thread
+            .values()
+            .find(|tab| tab.tab_index == tab_index)
+            .map(|tab| tab.name.as_str())
+            .or_else(|| {
+                self.setup_smoke_tab
+                    .as_ref()
+                    .filter(|tab| tab.tab_index == tab_index)
+                    .map(|tab| tab.name.as_str())
+            })
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -509,6 +1531,11 @@ fn run_background() -> anyhow::Result<()> {
     let window = WindowBuilder::new()
         .with_title("Web2Codex")
         .with_inner_size(LogicalSize::new(1200.0, 800.0))
+        // `with_focused(false)` only clears the initial focus request. The
+        // background controller must also be non-focusable from creation so
+        // Windows never promotes it while the MCP tunnel starts.
+        .with_focusable(false)
+        .with_focused(false)
         .with_visible(false)
         .build(&event_loop)
         .context("failed to initialize the hidden Web2Codex window")?;
@@ -521,7 +1548,7 @@ fn run_background() -> anyhow::Result<()> {
     let state = BrowserState {
         address: listener.local_addr()?,
         token: Uuid::new_v4().to_string(),
-        bridge_protocol: BROWSER_BRIDGE_PROTOCOL,
+        bridge_protocol: 7,
     };
     write_state(&state_path, &state)?;
 
@@ -646,19 +1673,137 @@ fn run_event_loop(
     tray_icon: Option<TrayIcon>,
 ) -> ! {
     let window_id = window.id();
+    let chrome_proxy = event_loop.create_proxy();
+    let chrome = WebViewBuilder::new()
+        .with_html(include_str!("browser_chrome.html"))
+        .with_bounds(chrome_bounds(&window))
+        .with_ipc_handler(move |request| {
+            let _ = chrome_proxy.send_event(BrowserEvent::Chrome(request.body().to_owned()));
+        })
+        .build_as_child(&window)
+        .expect("failed to initialize browser toolbar");
     let mut web_context: Option<WebContext> = None;
     let mut webview: Option<WebView> = None;
+    let mut main_tab_label: Option<String> = None;
+    let mut extra_tabs: Vec<WebView> = Vec::new();
+    let mut extra_tab_labels: Vec<Option<String>> = Vec::new();
+    let mut active_tab: usize = 0;
     let mut browser_page: Option<BrowserPage> = None;
+    let mut clients = 0_usize;
+    // A launching terminal may disappear before it gets its first socket.
+    // Standalone "web start" waits for a user to attach or stop it.
+    let mut session_owned = env::args().any(|arg| arg == "--session-owned");
+    let mut idle_deadline = session_owned.then(|| Instant::now() + Duration::from_secs(10 * 60));
     // Turns share sign-in storage, never a composer or a capability token.
     let mut response_views: HashMap<String, WebView> = HashMap::new();
+    let mut agent_tabs = AgentTabRegistry::default();
     let mut pending_responses: HashMap<String, PendingResponsesRequest> = HashMap::new();
+    let mut background_focus_guard_requests = HashSet::new();
     let event_proxy = event_loop.create_proxy();
 
     event_loop.run(move |event, _, control_flow| {
-        let _tray_icon_must_live_for_the_event_loop = &tray_icon;
-        *control_flow = ControlFlow::Wait;
+        let now = Instant::now();
+        for (request_id, pending) in &mut pending_responses {
+            if pending.bridge_ready_deadline.is_some_and(|deadline| now >= deadline) {
+                pending.bridge_ready_deadline = None;
+                agent_tabs.require_fresh_response_view(request_id);
+                release_background_focus_guard(
+                    request_id,
+                    &window,
+                    &mut background_focus_guard_requests,
+                );
+                broker.complete(request_id, None, Err("ChatGPT response bridge did not acknowledge the request in time. The next turn will open a fresh Temporary Chat.".into()));
+            }
+        }
+        *control_flow = response_bridge_wakeup(idle_deadline, &pending_responses);
+        let mut stop_reply = None;
+
+        // The broker can finish or retire a turn before its queued UI release
+        // is processed. Reconcile that old binding before opening the next
+        // request for the same conversation, using the normal release path.
+        let request_to_release = match &event {
+            Event::UserEvent(BrowserEvent::ReleaseResponses(request_id)) => Some(request_id.clone()),
+            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, conversation_id, agent, setup_smoke_test, .. }) => {
+                if broker.snapshot(request_id)["active"].as_bool() != Some(true) {
+                    return;
+                }
+                agent_tabs.stale_response_request(
+                    request_id,
+                    conversation_id.as_deref(),
+                    agent.as_ref(),
+                    *setup_smoke_test,
+                    &broker,
+                )
+            }
+            _ => None,
+        };
+        if let Some(request_id) = request_to_release {
+            let _ = agent_tabs.request_close_for_request(&request_id);
+            if let Some(view) = response_view_for_request(
+                &request_id,
+                &response_views,
+                &agent_tabs,
+                &webview,
+                &extra_tabs,
+            ) {
+                let _ = view.evaluate_script(&response_signal_script(&request_id, "window.__web2codexCompleted=true;"));
+            }
+            // Without UI acknowledgement we cannot safely reuse the composer:
+            // an old generation or prompt dispatch may still be in flight.
+            if pending_responses.contains_key(&request_id) {
+                agent_tabs.require_fresh_response_view(&request_id);
+            }
+            release_background_focus_guard(
+                &request_id,
+                &window,
+                &mut background_focus_guard_requests,
+            );
+            response_views.remove(&request_id);
+            for index in agent_tabs.release_request(&request_id) {
+                let _ = close_browser_tab(
+                    index,
+                    &window,
+                    &mut background_focus_guard_requests,
+                    &mut webview,
+                    &mut main_tab_label,
+                    &mut browser_page,
+                    &mut extra_tabs,
+                    &mut extra_tab_labels,
+                    &mut active_tab,
+                    &mut agent_tabs,
+                    &broker,
+                    &mut pending_responses,
+                    &mut response_views,
+                    &chrome,
+                );
+            }
+            if let Some(pending) = pending_responses.remove(&request_id) {
+                let milliseconds = u64::try_from(pending.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let _ = record_local_usage(&usage_stats_path, &pending.model, pending.input_characters, None, milliseconds);
+            }
+            if response_views.is_empty() && webview.is_none() { web_context = None; }
+        }
         match event {
-            Event::UserEvent(BrowserEvent::Open(page, reply)) => {
+            Event::UserEvent(BrowserEvent::ClientConnected(reply)) => {
+                if reply.send(()).is_ok() {
+                    clients += 1;
+                    // Once Web2Codex attaches, the browser belongs to that app session.
+                    // Close it after the final lease ends, even if `web start` had
+                    // previously left the helper persistent in the background.
+                    session_owned = true;
+                    idle_deadline = None;
+                }
+            }
+            Event::UserEvent(BrowserEvent::ClientDisconnected) => {
+                clients = clients.saturating_sub(1);
+                idle_deadline = session_disconnect_deadline(Instant::now(), clients, session_owned);
+            }
+            Event::UserEvent(BrowserEvent::Open(page, reuse, reply)) => {
+                if webview.is_some() && (reuse || page == BrowserPage::TemporaryChat) {
+                    activate_browser_window(&window, BrowserActivationIntent::UserAction);
+                    let _ = reply.send(Ok(()));
+                    return;
+                }
                 if let Err(error) = prepare_profile_directory(&profile_dir) {
                     if let Some(reply) = reply {
                         let _ = reply.send(Err(error.to_string()));
@@ -674,8 +1819,11 @@ fn run_event_loop(
                     let _ = fs::remove_file(&account_capabilities_path);
                 }
                 webview = None;
+                for tab in &extra_tabs { let _ = tab.set_visible(false); }
+                active_tab = 0;
                 let context = web_context.get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
-                match build_webview(&window, context, page, event_proxy.clone(), None) {
+                main_tab_label = None;
+                match build_webview(&window, context, page, event_proxy.clone(), None, false, None) {
                     Ok(created) => { webview = Some(created); browser_page = Some(page); }
                     Err(error) => {
                         if let Some(reply) = reply {
@@ -686,9 +1834,281 @@ fn run_event_loop(
                         return;
                     }
                 }
-                window.set_visible(true);
-                window.set_focus();
-                if let Some(reply) = reply { let _ = reply.send(Ok(())); }
+                activate_browser_window(&window, BrowserActivationIntent::UserAction);
+                if clients == 0 && session_owned {
+                    idle_deadline = Some(Instant::now() + Duration::from_secs(10 * 60));
+                }
+                let _ = reply.send(Ok(()));
+            }
+            Event::UserEvent(BrowserEvent::NewTab(url)) => {
+                if extra_tabs.len() >= 31 || !url::Url::parse(&url).is_ok_and(|url| matches!(url.scheme(), "http" | "https")) { return; }
+                if webview.is_some() {
+                    if let Some(view) = active_browser_view(&webview, &extra_tabs, active_tab) { let _ = view.set_visible(false); }
+                    let context = web_context.get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
+                    let proxy = event_proxy.clone();
+                    match WebViewBuilder::new_with_web_context(context)
+                        .with_bounds(content_bounds(&window, false))
+                        .with_url(&url)
+                        .with_new_window_req_handler(move |url, _| { let _ = proxy.send_event(BrowserEvent::NewTab(url)); wry::NewWindowResponse::Deny })
+                        .build_as_child(&window) {
+                    Ok(view) => { extra_tabs.push(view); extra_tab_labels.push(None); active_tab = extra_tabs.len(); }
+                            Err(error) => { eprintln!("Could not open tab: {error}"); if let Some(view) = active_browser_view(&webview, &extra_tabs, active_tab) { let _ = view.set_visible(true); } }
+                        }
+                    sync_browser_chrome(
+                        &chrome,
+                        &webview,
+                        &extra_tabs,
+                        active_tab,
+                        main_tab_label.as_deref(),
+                        &extra_tab_labels,
+                    );
+                }
+            }
+            Event::UserEvent(BrowserEvent::BackgroundTab(url, reply)) => {
+                if extra_tabs.len() >= 31 { let _ = reply.send(Err("The browser has reached its 32 tab limit".to_owned())); return; }
+                let context = web_context.get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
+                let created = if webview.is_none() && url == CHATGPT_TEMPORARY_CHAT_URL {
+                    build_webview(
+                        &window,
+                        context,
+                        BrowserPage::TemporaryChat,
+                        event_proxy.clone(),
+                        None,
+                        false,
+                        None,
+                    )
+                } else {
+                    let proxy = event_proxy.clone();
+                    let view_id = Uuid::new_v4().to_string();
+                    let ipc_view_id = view_id.clone();
+                    let builder = WebViewBuilder::new_with_web_context(context).with_id(&view_id);
+                    let builder = if should_probe_chatgpt_url(&url) {
+                        let capability_proxy = event_proxy.clone();
+                        builder
+                            .with_initialization_script("window.__web2codexDeepProbe = true;")
+                            .with_initialization_script(ACCOUNT_CAPABILITY_PROBE_SCRIPT)
+                            .with_ipc_handler(move |request| {
+                                if request.uri().scheme_str() != Some("https")
+                                    || request.uri().host() != Some("chatgpt.com")
+                                    || request
+                                        .uri()
+                                        .port_u16()
+                                        .is_some_and(|port| port != 443)
+                                {
+                                    return;
+                                }
+                                let Ok(message) = serde_json::from_str::<serde_json::Value>(
+                                    request.body().as_str(),
+                                ) else {
+                                    return;
+                                };
+                                if message.get("type").and_then(serde_json::Value::as_str)
+                                    == Some("set-power-slider")
+                                {
+                                    if let (Some(index), Some(request_id)) = (message
+                                        .get("index")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .filter(|index| *index <= 2), message
+                                        .get("request_id")
+                                        .and_then(serde_json::Value::as_str)
+                                        .filter(|request_id| !request_id.is_empty() && request_id.len() <= 96)
+                                        .map(str::to_owned))
+                                    {
+                                        let _ = capability_proxy.send_event(
+                                            BrowserEvent::SetPowerSliderValue {
+                                                view_id: ipc_view_id.clone(),
+                                                request_id,
+                                                index: index as u8,
+                                                allow_focus: power_slider_focus_requested(&message),
+                                            },
+                                        );
+                                    }
+                                    return;
+                                }
+                                if message.get("type").and_then(serde_json::Value::as_str)
+                                    != Some("account-capabilities")
+                                {
+                                    return;
+                                }
+                                let Some(capabilities) =
+                                    account_capabilities_from_message(&message)
+                                else {
+                                    return;
+                                };
+                                let _ = capability_proxy.send_event(
+                                    BrowserEvent::AccountCapabilities(capabilities, true),
+                                );
+                            })
+                    } else {
+                        builder
+                    };
+                    builder
+                        .with_bounds(content_bounds(&window, false))
+                        .with_visible(webview.is_none())
+                        .with_url(&url)
+                        .with_new_window_req_handler(move |url, _| { let _ = proxy.send_event(BrowserEvent::NewTab(url)); wry::NewWindowResponse::Deny })
+                        .build_as_child(&window)
+                        .map_err(anyhow::Error::from)
+                };
+                match created {
+                    Ok(view) => {
+                        let index = if webview.is_none() { webview = Some(view); main_tab_label = None; browser_page = None; active_tab = 0; 0 } else { extra_tabs.push(view); extra_tab_labels.push(None); extra_tabs.len() };
+                        let _ = reply.send(Ok(index));
+                        sync_browser_chrome(
+                            &chrome,
+                            &webview,
+                            &extra_tabs,
+                            active_tab,
+                            main_tab_label.as_deref(),
+                            &extra_tab_labels,
+                        );
+                    }
+                    Err(error) => { let _ = reply.send(Err(error.to_string())); }
+                }
+            }
+            Event::UserEvent(BrowserEvent::ListTabs(reply)) => {
+                let mut tabs = Vec::new();
+                if let Some(view) = &webview { tabs.push(view.url().unwrap_or_default()); }
+                tabs.extend(extra_tabs.iter().map(|view| view.url().unwrap_or_default()));
+                let _ = reply.send(tabs);
+            }
+            Event::UserEvent(BrowserEvent::CloseAgentTab(thread_id, agent_path, reply)) => {
+                let result = match agent_tabs.request_close(&thread_id, agent_path.as_deref()) {
+                    AgentTabCloseStatus::Deferred => AgentTabCloseOutcome::Deferred,
+                    AgentTabCloseStatus::Ready(index) => {
+                        if close_browser_tab(
+                            index,
+                            &window,
+                            &mut background_focus_guard_requests,
+                            &mut webview,
+                            &mut main_tab_label,
+                            &mut browser_page,
+                            &mut extra_tabs,
+                            &mut extra_tab_labels,
+                            &mut active_tab,
+                            &mut agent_tabs,
+                            &broker,
+                            &mut pending_responses,
+                            &mut response_views,
+                            &chrome,
+                        ) {
+                            AgentTabCloseOutcome::Closed
+                        } else {
+                            AgentTabCloseOutcome::NotFound
+                        }
+                    }
+                };
+                if response_views.is_empty() && webview.is_none() {
+                    web_context = None;
+                }
+                let _ = reply.send(result);
+            }
+            Event::UserEvent(BrowserEvent::Chrome(message)) => {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message) {
+                    let action = value.get("action").and_then(serde_json::Value::as_str).unwrap_or("");
+                    let index = value.get("index").and_then(serde_json::Value::as_u64).and_then(|i| usize::try_from(i).ok());
+                    match action {
+                        "new" => { activate_browser_window(&window, BrowserActivationIntent::UserAction); let _ = event_proxy.send_event(BrowserEvent::NewTab(CHATGPT_TEMPORARY_CHAT_URL.to_owned())); }
+                        "select" if index.is_some_and(|i| i <= extra_tabs.len()) => {
+                            if let Some(view) = active_browser_view(&webview, &extra_tabs, active_tab) { let _ = view.set_visible(false); }
+                            active_tab = index.unwrap_or(0);
+                            if let Some(view) = active_browser_view(&webview, &extra_tabs, active_tab) { activate_browser_tab(&window, view, BrowserActivationIntent::UserAction); }
+                        }
+                        "close" if !extra_tabs.is_empty() && index.is_some_and(|i| i <= extra_tabs.len()) => {
+                            activate_browser_window(&window, BrowserActivationIntent::UserAction);
+                            let _ = close_browser_tab(
+                                index.unwrap_or(0),
+                                &window,
+                                &mut background_focus_guard_requests,
+                                &mut webview,
+                                &mut main_tab_label,
+                                &mut browser_page,
+                                &mut extra_tabs,
+                                &mut extra_tab_labels,
+                                &mut active_tab,
+                                &mut agent_tabs,
+                                &broker,
+                                &mut pending_responses,
+                                &mut response_views,
+                                &chrome,
+                            );
+                        }
+                        "navigate" => if let (Some(view), Some(input)) = (active_browser_view(&webview, &extra_tabs, active_tab), value.get("value").and_then(serde_json::Value::as_str)) {
+                            activate_browser_window(&window, BrowserActivationIntent::UserAction);
+                            if let Some(url) = browser_address(input) { let _ = view.load_url(&url); }
+                        },
+                        "back" => if let Some(view) = active_browser_view(&webview, &extra_tabs, active_tab) { activate_browser_window(&window, BrowserActivationIntent::UserAction); let _ = view.go_back(); },
+                        "forward" => if let Some(view) = active_browser_view(&webview, &extra_tabs, active_tab) { activate_browser_window(&window, BrowserActivationIntent::UserAction); let _ = view.go_forward(); },
+                        "reload" => if let Some(view) = active_browser_view(&webview, &extra_tabs, active_tab) { activate_browser_window(&window, BrowserActivationIntent::UserAction); let _ = view.evaluate_script("location.reload()"); },
+                        _ => {}
+                    }
+                    sync_browser_chrome(
+                        &chrome,
+                        &webview,
+                        &extra_tabs,
+                        active_tab,
+                        main_tab_label.as_deref(),
+                        &extra_tab_labels,
+                    );
+                }
+            }
+            Event::UserEvent(BrowserEvent::SetPowerSliderValue { view_id, request_id, index, allow_focus }) => {
+                #[cfg(target_os = "windows")]
+                {
+                    use wry::WebViewExtWindows;
+                    let Some(view) = browser_view_by_id(&webview, &extra_tabs, &response_views, &view_id) else { return; };
+                    if !view.url().is_ok_and(|url| should_probe_chatgpt_url(&url)) { return; }
+                    let active_id = active_browser_view(&webview, &extra_tabs, active_tab).map(WebView::id);
+                    let hwnd = view.hwnd().0 as usize;
+                    let allow_focus = native_power_slider_focus_allowed(allow_focus, active_id, &view_id, power_slider_window_is_foreground(hwnd));
+                    let proxy = event_proxy.clone();
+                    let worker_view_id = view_id.clone();
+                    let worker_request_id = request_id.clone();
+                    if let Err(error) = thread::Builder::new()
+                        .name("chatgpt-power-slider".to_string())
+                        .spawn(move || {
+                            let result = set_accessible_power_slider(hwnd, index, allow_focus)
+                                .map_err(|error| format!("{error:#}"));
+                            if let Err(error) = &result {
+                                eprintln!("could not set ChatGPT power slider: {error:#}");
+                            }
+                            let _ = proxy.send_event(BrowserEvent::PowerSliderValueResult {
+                                view_id: worker_view_id,
+                                request_id: worker_request_id,
+                                result,
+                            });
+                        })
+                    {
+                        let _ = event_proxy.send_event(BrowserEvent::PowerSliderValueResult {
+                            view_id,
+                            request_id,
+                            result: Err(format!("could not start native power slider worker: {error}")),
+                        });
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = event_proxy.send_event(BrowserEvent::PowerSliderValueResult {
+                        view_id,
+                        request_id,
+                        result: Err("native ChatGPT power slider input is only available on Windows".into()),
+                    });
+                }
+            }
+            Event::UserEvent(BrowserEvent::PowerSliderValueResult { view_id, request_id, result }) => {
+                let response = match result {
+                    Ok(()) => serde_json::json!({ "ok": true }),
+                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                };
+                let request_id = serde_json::to_string(&request_id).unwrap_or_else(|_| "\"\"".into());
+                let script = format!(
+                    "window.__web2codexPowerSliderResults ||= Object.create(null); window.__web2codexPowerSliderResults[{request_id}] = {response};"
+                );
+                if let Some(view) = browser_view_by_id(&webview, &extra_tabs, &response_views, &view_id)
+                    && view.url().is_ok_and(|url| should_probe_chatgpt_url(&url))
+                {
+                    let _ = view.evaluate_script(&script);
+                }
             }
             Event::UserEvent(BrowserEvent::ContinueLogin(tier)) => {
                 if browser_page != Some(BrowserPage::AccountChooser) { return; }
@@ -706,91 +2126,1065 @@ fn run_event_loop(
                 browser_page = Some(BrowserPage::SignIn);
             }
             Event::UserEvent(BrowserEvent::AccountCapabilities(capabilities, partial)) => {
+                let has_models = !capabilities.picker_options.is_empty();
                 if let Err(error) = store_account_capabilities(&account_capabilities_path, capabilities, partial) {
                     eprintln!("failed to save ChatGPT account capabilities: {error:#}");
                 }
+                if !partial && has_models {
+                    let retry_ids = pending_responses
+                        .iter_mut()
+                        .filter_map(|(request_id, pending)| {
+                            if pending.awaiting_auth && pending.payload.is_some() {
+                                pending.awaiting_auth = false;
+                                pending.dispatch_started = false;
+                                pending.bridge_ready_deadline = Some(Instant::now() + RESPONSE_BRIDGE_READY_TIMEOUT);
+                                Some(request_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    for request_id in &retry_ids {
+                        let context = web_context
+                            .get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
+                        let agent_identity = agent_tabs
+                            .thread_for_request(request_id)
+                            .and_then(|thread_id| {
+                                agent_tabs.tab_for_thread(thread_id).map(|tab| {
+                                    AgentRequestIdentity {
+                                        thread_id: thread_id.to_owned(),
+                                        name: tab.name.clone(),
+                                        agent_path: tab.agent_path.clone(),
+                                    }
+                                })
+                            });
+                        let primary_thread_id = agent_tabs
+                            .primary_thread_for_request(request_id)
+                            .map(str::to_owned);
+                        let primary_epoch = primary_thread_id
+                            .as_deref()
+                            .and_then(|thread_id| agent_tabs.primary_tab_for_thread(thread_id))
+                            .and_then(|tab| tab.conversation_epoch.clone());
+                        let setup_smoke_test = agent_tabs.is_setup_smoke_request(request_id);
+                        // Login recovery gets a fresh Temporary Chat. Reconstruct the
+                        // canonical context instead of resuming a possibly stale page.
+                        agent_tabs.require_fresh_response_view(request_id);
+                        let result = if let Some(agent_identity) = agent_identity {
+                            response_views.remove(request_id);
+                            open_agent_response_tab(
+                                &agent_identity,
+                                request_id,
+                                primary_epoch.clone().or_else(|| {
+                                    agent_tabs
+                                        .tab_for_thread(&agent_identity.thread_id)
+                                        .and_then(|tab| tab.conversation_epoch.clone())
+                                }),
+                                &window,
+                                context,
+                                event_proxy.clone(),
+                                &mut webview,
+                                &mut main_tab_label,
+                                &mut browser_page,
+                                &mut extra_tabs,
+                                &mut extra_tab_labels,
+                                &mut active_tab,
+                                &mut agent_tabs,
+                                &chrome,
+                            )
+                        } else if setup_smoke_test {
+                            response_views.remove(request_id);
+                            open_setup_smoke_response_tab(
+                                request_id,
+                                &window,
+                                context,
+                                event_proxy.clone(),
+                                &mut webview,
+                                &mut main_tab_label,
+                                &mut browser_page,
+                                &mut extra_tabs,
+                                &mut extra_tab_labels,
+                                &mut active_tab,
+                                &mut agent_tabs,
+                                &chrome,
+                            )
+                        } else {
+                            open_primary_response_tab(
+                                request_id,
+                                primary_thread_id.as_deref(),
+                                primary_epoch,
+                                &window,
+                                context,
+                                event_proxy.clone(),
+                                &mut webview,
+                                &mut main_tab_label,
+                                &mut browser_page,
+                                &mut extra_tabs,
+                                &mut extra_tab_labels,
+                                &mut active_tab,
+                                &mut agent_tabs,
+                                &chrome,
+                            )
+                        };
+                        if let Err(error) = result {
+                            release_background_focus_guard(
+                                request_id,
+                                &window,
+                                &mut background_focus_guard_requests,
+                            );
+                            broker.complete(request_id, None, Err(error.to_string()));
+                            pending_responses.remove(request_id);
+                        }
+                    }
+                    // Authentication recovery is background work. Keep the
+                    // current window visibility and foreground unchanged so
+                    // retrying an agent request cannot interrupt another app.
+                }
             }
-            Event::UserEvent(BrowserEvent::ResponsesBridgeReady(request_id)) => {
-                if let (Some(view), Some(pending)) = (response_views.get(&request_id), pending_responses.get(&request_id)) {
-                    let payload = serde_json::json!({"request_id": request_id, "model": pending.model, "reasoning_effort": pending.reasoning_effort, "prompt": pending.prompt, "attachments": pending.attachments});
-                    if let Err(error) = view.evaluate_script(&format!("window.__web2codexSend({payload});")) {
+            Event::UserEvent(BrowserEvent::ResponsesBridgeReady {
+                request_id,
+                conversation_has_history,
+            }) => {
+                if let (Some(view), Some(pending)) = (
+                    response_view_for_request(
+                        &request_id,
+                        &response_views,
+                        &agent_tabs,
+                        &webview,
+                        &extra_tabs,
+                    ),
+                    pending_responses.get_mut(&request_id),
+                ) {
+                    if pending.awaiting_auth || (!pending.dispatch_started && pending.bridge_ready_deadline.is_none()) {
+                        return;
+                    }
+                    pending.bridge_ready_deadline = None;
+                    let use_resume_payload =
+                        conversation_has_history && pending.resume_payload.is_some();
+                    let payload = if use_resume_payload {
+                        pending.resume_payload.as_ref().or(pending.payload.as_ref())
+                    } else {
+                        pending.payload.as_ref()
+                    }
+                    .cloned()
+                    .filter(|_| !pending.dispatch_started);
+                    let Some(payload) = payload else {
+                        agent_tabs.require_fresh_response_view(&request_id);
+                        release_background_focus_guard(
+                            &request_id,
+                            &window,
+                            &mut background_focus_guard_requests,
+                        );
+                        broker.complete(&request_id, None, Err("The Temporary Chat reloaded after dispatch. Check the previous turn before sending another request.".into()));
+                        return;
+                    };
+                    if use_resume_payload {
+                        pending.input_characters = pending
+                            .resume_input_characters
+                            .unwrap_or(pending.input_characters);
+                    }
+                    pending.dispatch_started = true;
+                    if let Err(error) = view.evaluate_script(&response_signal_script(&request_id, &format!("if (location.origin === 'https://chatgpt.com' && location.pathname === '/' && new URL(location.href).searchParams.get('temporary-chat') === 'true') window.__web2codexSend({payload});"))) {
+                        agent_tabs.require_fresh_response_view(&request_id);
+                        release_background_focus_guard(
+                            &request_id,
+                            &window,
+                            &mut background_focus_guard_requests,
+                        );
                         broker.complete(&request_id, None, Err(format!("Could not send prompt to ChatGPT Web: {error}")));
                     }
                 }
             }
-            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, model, reasoning_effort, prompt, attachments }) => {
+            Event::UserEvent(BrowserEvent::ResponsesBridgeUnavailable {
+                request_id,
+                binding,
+                document_reloaded,
+                error,
+            }) => {
+                let current_binding = agent_tabs.tab_index_for_request(&request_id)
+                    .and_then(|index| agent_tabs.response_request_id_state(index));
+                if current_binding.as_ref().is_some_and(|current| Arc::ptr_eq(current, &binding))
+                    && let Some(pending) = pending_responses.get_mut(&request_id)
+                    && !pending.awaiting_auth
+                    && (document_reloaded || !pending.dispatch_started)
+                {
+                    pending.bridge_ready_deadline = None;
+                    agent_tabs.require_fresh_response_view(&request_id);
+                    release_background_focus_guard(
+                        &request_id,
+                        &window,
+                        &mut background_focus_guard_requests,
+                    );
+                    broker.complete(&request_id, None, Err(error));
+                }
+            }
+            Event::UserEvent(BrowserEvent::ResponsesPromptSubmitted(request_id)) => {
+                if let Some(pending) = pending_responses.get_mut(&request_id) {
+                    pending.payload = None;
+                    pending.resume_payload = None;
+                    pending.awaiting_auth = false;
+                }
+            }
+            Event::UserEvent(BrowserEvent::ResponsesAuthRequired(request_id)) => {
+                let can_resume = pending_responses
+                    .get_mut(&request_id)
+                    .is_some_and(|pending| {
+                        if pending.payload.is_some() {
+                            pending.awaiting_auth = true;
+                            pending.dispatch_started = false;
+                            pending.bridge_ready_deadline = None;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                response_views.remove(&request_id);
+                if !can_resume {
+                    broker.complete(
+                        &request_id,
+                        None,
+                        Err("ChatGPT sign-in expired after the prompt was sent. The turn stopped to avoid sending it twice; sign in, check the previous turn, then retry if it did not complete.".into()),
+                    );
+                    release_background_focus_guard(
+                        &request_id,
+                        &window,
+                        &mut background_focus_guard_requests,
+                    );
+                }
+                let page = if selected_account_tier_path.is_file() {
+                    BrowserPage::SignIn
+                } else {
+                    BrowserPage::AccountChooser
+                };
+                if browser_page != Some(page) || webview.is_none() {
+                    if let Err(error) = prepare_profile_directory(&profile_dir) {
+                        eprintln!("could not prepare ChatGPT sign-in recovery: {error:#}");
+                        release_background_focus_guard(
+                            &request_id,
+                            &window,
+                            &mut background_focus_guard_requests,
+                        );
+                        return;
+                    }
+                    if page == BrowserPage::AccountChooser {
+                        let _ = fs::remove_file(&account_capabilities_path);
+                    }
+                    webview = None;
+                    main_tab_label = None;
+                    let context = web_context
+                        .get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
+                    match build_webview(&window, context, page, event_proxy.clone(), None, false, None) {
+                        Ok(created) => {
+                            webview = Some(created);
+                            browser_page = Some(page);
+                        }
+                        Err(error) => {
+                            eprintln!("could not open ChatGPT sign-in recovery: {error:#}");
+                            release_background_focus_guard(
+                                &request_id,
+                                &window,
+                                &mut background_focus_guard_requests,
+                            );
+                            return;
+                        }
+                    }
+                }
+                activate_browser_window(&window, BrowserActivationIntent::BackgroundWork);
+            }
+            Event::UserEvent(BrowserEvent::ResponsesRequest { request_id, conversation_id, conversation_epoch, agent, setup_smoke_test, model, reasoning_effort, connector_required, mcp_required, mcp_action_required, tool_work_expected, prompt, stages, resume_prompt, attachments, resume_attachments }) => {
                 if let Err(error) = prepare_profile_directory(&profile_dir) {
                     broker.complete(&request_id, None, Err(error.to_string())); return;
                 }
-                let context = web_context.get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
-                match build_webview(&window, context, BrowserPage::TemporaryChat, event_proxy.clone(), Some(request_id.clone())) {
-                    Ok(view) => { response_views.insert(request_id.clone(), view); }
-                    Err(error) => { broker.complete(&request_id, None, Err(error.to_string())); return; }
+                if !setup_smoke_test {
+                    if should_apply_background_focus_guard(browser_window_is_foreground(&window)) {
+                        if let Err(error) = set_window_no_activate(&window, true) {
+                            broker.complete(
+                                &request_id,
+                                None,
+                                Err(format!("Could not protect foreground focus while sending a background request: {error:#}")),
+                            );
+                            return;
+                        }
+                    }
+                    background_focus_guard_requests.insert(request_id.clone());
                 }
-                pending_responses.insert(request_id, PendingResponsesRequest { model, reasoning_effort, prompt, attachments, started_at: std::time::Instant::now() });
+                let context = web_context.get_or_insert_with(|| WebContext::new(Some(profile_dir.clone())));
+                let persistent_thread = !setup_smoke_test && (agent.is_some() || conversation_id.is_some());
+                if let Some(agent) = agent {
+                    if let Err(error) = open_agent_response_tab(
+                        &agent,
+                        &request_id,
+                        conversation_epoch.clone(),
+                        &window,
+                        context,
+                        event_proxy.clone(),
+                        &mut webview,
+                        &mut main_tab_label,
+                        &mut browser_page,
+                        &mut extra_tabs,
+                        &mut extra_tab_labels,
+                        &mut active_tab,
+                        &mut agent_tabs,
+                        &chrome,
+                    ) {
+                        release_background_focus_guard(
+                            &request_id,
+                            &window,
+                            &mut background_focus_guard_requests,
+                        );
+                        broker.complete(&request_id, None, Err(error.to_string()));
+                        return;
+                    }
+                } else if setup_smoke_test {
+                    if let Err(error) = open_setup_smoke_response_tab(
+                        &request_id,
+                        &window,
+                        context,
+                        event_proxy.clone(),
+                        &mut webview,
+                        &mut main_tab_label,
+                        &mut browser_page,
+                        &mut extra_tabs,
+                        &mut extra_tab_labels,
+                        &mut active_tab,
+                        &mut agent_tabs,
+                        &chrome,
+                    ) {
+                        release_background_focus_guard(
+                            &request_id,
+                            &window,
+                            &mut background_focus_guard_requests,
+                        );
+                        broker.complete(&request_id, None, Err(error.to_string()));
+                        return;
+                    }
+                } else {
+                    if let Err(error) = open_primary_response_tab(
+                        &request_id,
+                        conversation_id.as_deref(),
+                        conversation_epoch.clone(),
+                        &window,
+                        context,
+                        event_proxy.clone(),
+                        &mut webview,
+                        &mut main_tab_label,
+                        &mut browser_page,
+                        &mut extra_tabs,
+                        &mut extra_tab_labels,
+                        &mut active_tab,
+                        &mut agent_tabs,
+                        &chrome,
+                    ) {
+                        release_background_focus_guard(
+                            &request_id,
+                            &window,
+                            &mut background_focus_guard_requests,
+                        );
+                        broker.complete(&request_id, None, Err(error.to_string()));
+                        return;
+                    }
+                }
+                let compaction = !stages.is_empty();
+                let stage_characters = stages
+                    .iter()
+                    .filter_map(|stage| stage["prompt"].as_str())
+                    .map(|stage| stage.chars().count())
+                    .sum::<usize>();
+                let input_characters = prompt.chars().count() + stage_characters;
+                let resume_input_characters = (!resume_prompt.is_empty()).then(|| {
+                    resume_prompt.chars().count() + stage_characters
+                });
+                let payload = serde_json::json!({"request_id":request_id,"model":model,"reasoning_effort":reasoning_effort,"connector_required":connector_required,"mcp_required":mcp_required,"mcp_action_required":mcp_action_required,"tool_work_expected":tool_work_expected,"prompt":prompt,"stages":stages.clone(),"attachments":attachments});
+                let resume_payload = persistent_thread
+                    .then_some(())
+                    .filter(|_| !resume_prompt.is_empty())
+                    .map(|_| serde_json::json!({"request_id":request_id,"model":model,"reasoning_effort":reasoning_effort,"connector_required":connector_required,"mcp_required":mcp_required,"mcp_action_required":mcp_action_required,"tool_work_expected":tool_work_expected,"prompt":resume_prompt,"stages":stages,"attachments":resume_attachments}));
+                pending_responses.insert(
+                    request_id,
+                    PendingResponsesRequest {
+                        model,
+                        input_characters,
+                        resume_input_characters,
+                        compaction,
+                        payload: Some(payload),
+                        resume_payload,
+                        dispatch_started: false,
+                        awaiting_auth: false,
+                        bridge_ready_deadline: Some(
+                            Instant::now() + RESPONSE_BRIDGE_READY_TIMEOUT,
+                        ),
+                        started_at: std::time::Instant::now(),
+                    },
+                );
             }
             Event::UserEvent(BrowserEvent::ResponsesToolState(request_id)) => {
                 let state = broker.snapshot(&request_id);
                 if state.get("active").and_then(serde_json::Value::as_bool) == Some(false) {
-                    response_views.remove(&request_id);
+                    if let Some(view) = response_view_for_request(
+                        &request_id,
+                        &response_views,
+                        &agent_tabs,
+                        &webview,
+                        &extra_tabs,
+                    ) {
+                        let _ = view.evaluate_script(&response_signal_script(&request_id, "window.__web2codexCompleted=true;"));
+                    }
+                    release_background_focus_guard(
+                        &request_id,
+                        &window,
+                        &mut background_focus_guard_requests,
+                    );
+                    if agent_tabs.tab_index_for_request(&request_id).is_none() {
+                        response_views.remove(&request_id);
+                    }
                     if let Some(pending) = pending_responses.remove(&request_id) {
+                        agent_tabs.require_fresh_response_view(&request_id);
                         let milliseconds = u64::try_from(pending.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        let _ = record_local_usage(&usage_stats_path, &pending.model, pending.prompt.chars().count(), None, milliseconds);
+                        let _ = record_local_usage(&usage_stats_path, &pending.model, pending.input_characters, None, milliseconds);
                     }
                     if response_views.is_empty() && webview.is_none() { web_context = None; }
                     return;
                 }
-                if let Some(view) = response_views.get(&request_id) {
-                    let _ = view.evaluate_script(&format!("window.__web2codexToolState={state};"));
+                    if let Some(view) = response_view_for_request(
+                        &request_id,
+                        &response_views,
+                        &agent_tabs,
+                        &webview,
+                        &extra_tabs,
+                    ) {
+                    let _ = view.evaluate_script(&response_signal_script(&request_id, &format!("window.__web2codexToolState={state};")));
                 }
             }
             Event::UserEvent(BrowserEvent::ResponsesText { request_id, delta }) => {
                 let _ = broker.append_text(&request_id, delta);
             }
+            Event::UserEvent(BrowserEvent::ResponsesReasoningHeading {
+                request_id,
+                heading,
+            }) => {
+                let _ = broker.append_reasoning_heading(&request_id, heading);
+            }
             Event::UserEvent(BrowserEvent::ResponsesResult { request_id, revision, result }) => {
                 let output_characters = result.as_ref().ok().map(|text| text.chars().count());
                 if broker.complete(&request_id, revision, result) {
-                    if let Some(view) = response_views.get(&request_id) { let _ = view.evaluate_script("window.__web2codexCompleted=true;"); }
+                    // Agent text has already been handed to Codex through the response stream.
+                    // Close the auxiliary browser tab once its HTTP observer releases it.
+                    let _ = agent_tabs.request_close_for_request(&request_id);
+                    release_background_focus_guard(
+                        &request_id,
+                        &window,
+                        &mut background_focus_guard_requests,
+                    );
+                    if let Some(view) = response_view_for_request(
+                        &request_id,
+                        &response_views,
+                        &agent_tabs,
+                        &webview,
+                        &extra_tabs,
+                    ) {
+                        let _ = view.evaluate_script(&response_signal_script(&request_id, "window.__web2codexCompleted=true;"));
+                    }
                     if let Some(pending) = pending_responses.remove(&request_id) {
+                        if pending.compaction {
+                            // The staged source context was only needed to make this summary.
+                            // Start the next Codex window in a clean Temporary Chat.
+                            agent_tabs.require_fresh_response_view(&request_id);
+                        }
                         let milliseconds = u64::try_from(pending.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        if let Err(error) = record_local_usage(&usage_stats_path, &pending.model, pending.prompt.chars().count(), output_characters, milliseconds) {
+                        if let Err(error) = record_local_usage(&usage_stats_path, &pending.model, pending.input_characters, output_characters, milliseconds) {
                             eprintln!("failed to record local Web2Codex usage: {error:#}");
                         }
                     }
                 }
             }
-            Event::UserEvent(BrowserEvent::ReleaseResponses(request_id)) => {
-                response_views.remove(&request_id);
-                if let Some(pending) = pending_responses.remove(&request_id) {
-                    let milliseconds = u64::try_from(pending.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    let _ = record_local_usage(&usage_stats_path, &pending.model, pending.prompt.chars().count(), None, milliseconds);
+            Event::UserEvent(BrowserEvent::ReleaseResponses(_)) => {}
+            Event::UserEvent(BrowserEvent::CancelResponses(request_id)) => {
+                if let Some(view) = response_view_for_request(
+                    &request_id,
+                    &response_views,
+                    &agent_tabs,
+                    &webview,
+                    &extra_tabs,
+                ) {
+                    let request_id = serde_json::to_string(&request_id).unwrap_or_else(|_| "null".to_owned());
+                    let _ = view.evaluate_script(&format!("window.__web2codexCancel?.({request_id});"));
                 }
-                if response_views.is_empty() && webview.is_none() { web_context = None; }
             }
             Event::UserEvent(BrowserEvent::Hide) => {
                 window.set_visible(false);
-                webview = None;
-                browser_page = None;
-                if response_views.is_empty() { web_context = None; }
             }
             Event::UserEvent(BrowserEvent::Stop(reply)) => {
-                window.set_visible(false);
-                broker.stop("ChatGPT WebView stopped before the response completed");
-                response_views.clear();
-                pending_responses.clear();
-                remove_runtime_files(&state_path, &lock_file);
-                if let Some(reply) = reply { let _ = reply.send(()); }
-                *control_flow = ControlFlow::Exit;
+                stop_reply = Some(reply);
             }
             Event::WindowEvent { window_id: event_window_id, event: WindowEvent::CloseRequested, .. } if event_window_id == window_id => {
                 window.set_visible(false);
-                webview = None;
-                browser_page = None;
-                if response_views.is_empty() { web_context = None; }
+            }
+            Event::WindowEvent { window_id: event_window_id, event: WindowEvent::Focused(false), .. } if event_window_id == window_id && !background_focus_guard_requests.is_empty() => {
+                if let Err(error) = set_window_no_activate(&window, true) {
+                    eprintln!("Could not prevent a background response from reclaiming focus: {error:#}");
+                }
+            }
+            Event::WindowEvent { window_id: event_window_id, event: WindowEvent::Focused(true), .. } if event_window_id == window_id && !background_focus_guard_requests.is_empty() => {
+                if let Err(error) = set_window_no_activate(&window, false) {
+                    eprintln!("Could not restore browser interaction after user activation: {error:#}");
+                }
+            }
+            Event::WindowEvent { window_id: event_window_id, event: WindowEvent::Resized(_), .. } if event_window_id == window_id => {
+                let _ = chrome.set_bounds(chrome_bounds(&window));
+                if let Some(view) = &webview { let _ = view.set_bounds(content_bounds(&window, false)); }
+                for view in &extra_tabs { let _ = view.set_bounds(content_bounds(&window, false)); }
+                for view in response_views.values() { let _ = view.set_bounds(content_bounds(&window, true)); }
             }
             _ => {}
         }
+        if stop_reply.is_some() || idle_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            window.set_visible(false);
+            broker.stop("ChatGPT WebView stopped before the response completed");
+            response_views.clear();
+            pending_responses.clear();
+            remove_runtime_files(&state_path, &lock_file);
+            // Acknowledge the stop before exiting the process and terminating
+            // the detached HTTP request threads.
+            if let Some(mut stream) = stop_reply {
+                let _ = write_response(&mut stream, "204 No Content", "");
+            }
+            idle_deadline = None;
+            *control_flow = ControlFlow::Exit;
+        } else {
+            *control_flow = response_bridge_wakeup(idle_deadline, &pending_responses);
+        }
     })
+}
+
+fn chrome_bounds(window: &Window) -> Rect {
+    let size = window.inner_size();
+    let height = (82.0 * window.scale_factor()).round() as u32;
+    Rect {
+        position: PhysicalPosition::new(0, 0).into(),
+        size: PhysicalSize::new(size.width, height.min(size.height)).into(),
+    }
+}
+
+fn content_bounds(window: &Window, background: bool) -> Rect {
+    let size = window.inner_size();
+    let top = ((82.0 * window.scale_factor()).round() as u32).min(size.height);
+    Rect {
+        position: PhysicalPosition::new(if background { -32000 } else { 0 }, top as i32).into(),
+        size: PhysicalSize::new(size.width.max(1), size.height.saturating_sub(top).max(1)).into(),
+    }
+}
+
+fn active_browser_view<'a>(
+    main: &'a Option<WebView>,
+    extras: &'a [WebView],
+    active: usize,
+) -> Option<&'a WebView> {
+    if active == 0 {
+        main.as_ref()
+    } else {
+        extras.get(active - 1)
+    }
+}
+
+fn browser_view_by_id<'a>(
+    main: &'a Option<WebView>,
+    extras: &'a [WebView],
+    responses: &'a HashMap<String, WebView>,
+    view_id: &str,
+) -> Option<&'a WebView> {
+    main.iter()
+        .chain(extras.iter())
+        .chain(responses.values())
+        .find(|view| view.id() == view_id)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn native_power_slider_focus_allowed(
+    requested: bool,
+    active_view_id: Option<&str>,
+    source_view_id: &str,
+    visible_foreground: bool,
+) -> bool {
+    requested && visible_foreground && active_view_id == Some(source_view_id)
+}
+
+fn power_slider_focus_requested(message: &serde_json::Value) -> bool {
+    // Older clients omitted the field. An explicit or malformed opt-out
+    // must never grant focus permission.
+    message.get("allow_focus").is_none_or(|value| value.as_bool() == Some(true))
+}
+
+fn browser_address(input: &str) -> Option<String> {
+    let input = input.trim();
+    if input.is_empty() || input.len() > 8192 {
+        return None;
+    }
+    let candidate = if input.contains("://") {
+        input.to_owned()
+    } else if !input.contains(char::is_whitespace)
+        && (input.contains('.') || input.starts_with("localhost"))
+    {
+        format!("https://{input}")
+    } else {
+        let mut url = url::Url::parse("https://www.google.com/search").ok()?;
+        url.query_pairs_mut().append_pair("q", input);
+        return Some(url.into());
+    };
+    let url = url::Url::parse(&candidate).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| url.to_string())
+}
+
+fn should_probe_chatgpt_url(input: &str) -> bool {
+    url::Url::parse(input)
+        .is_ok_and(|url| url.origin().ascii_serialization() == "https://chatgpt.com")
+}
+
+fn sync_browser_chrome(
+    chrome: &WebView,
+    main: &Option<WebView>,
+    extras: &[WebView],
+    active: usize,
+    main_label: Option<&str>,
+    extra_labels: &[Option<String>],
+) {
+    let mut tabs = Vec::new();
+    if let Some(view) = main {
+        tabs.push(view.url().unwrap_or_default());
+    }
+    tabs.extend(extras.iter().map(|view| view.url().unwrap_or_default()));
+    let current = tabs.get(active).cloned().unwrap_or_default();
+    let titles: Vec<String> = tabs
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let custom = if index == 0 {
+                main_label
+            } else {
+                extra_labels.get(index - 1).and_then(Option::as_deref)
+            };
+            custom.map(str::to_owned).unwrap_or_else(|| {
+                url::Url::parse(item)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_owned))
+                    .unwrap_or_else(|| "Новая вкладка".to_owned())
+            })
+        })
+        .collect();
+    let state = serde_json::json!({"tabs":titles,"active":active,"url":current});
+    let _ = chrome.evaluate_script(&format!("window.setBrowserState?.({state})"));
+}
+
+fn close_browser_tab(
+    index: usize,
+    window: &Window,
+    background_focus_guard_requests: &mut HashSet<String>,
+    webview: &mut Option<WebView>,
+    main_tab_label: &mut Option<String>,
+    browser_page: &mut Option<BrowserPage>,
+    extra_tabs: &mut Vec<WebView>,
+    extra_tab_labels: &mut Vec<Option<String>>,
+    active_tab: &mut usize,
+    agent_tabs: &mut AgentTabRegistry,
+    broker: &TurnBroker,
+    pending_responses: &mut HashMap<String, PendingResponsesRequest>,
+    response_views: &mut HashMap<String, WebView>,
+    chrome: &WebView,
+) -> bool {
+    if index > extra_tabs.len() {
+        return false;
+    }
+
+    let previous_active = *active_tab;
+    for request_id in agent_tabs.close_tab(index) {
+        release_background_focus_guard(&request_id, window, background_focus_guard_requests);
+        broker.complete(
+            &request_id,
+            None,
+            Err(
+                "The agent's Web2Codex browser tab was closed before its response completed"
+                    .to_owned(),
+            ),
+        );
+        pending_responses.remove(&request_id);
+        response_views.remove(&request_id);
+    }
+    if index == 0 {
+        if extra_tabs.is_empty() {
+            *webview = None;
+            *main_tab_label = None;
+        } else {
+            *webview = Some(extra_tabs.remove(0));
+            *main_tab_label = extra_tab_labels.remove(0);
+        }
+        *browser_page = None;
+    } else {
+        extra_tabs.remove(index - 1);
+        extra_tab_labels.remove(index - 1);
+    }
+
+    *active_tab = active_tab_after_close(previous_active, index);
+    for tab in extra_tabs.iter() {
+        let _ = tab.set_visible(false);
+    }
+    if let Some(view) = active_browser_view(webview, extra_tabs, *active_tab) {
+        let _ = view.set_visible(true);
+    }
+    sync_browser_chrome(
+        chrome,
+        webview,
+        extra_tabs,
+        *active_tab,
+        main_tab_label.as_deref(),
+        extra_tab_labels,
+    );
+    true
+}
+
+fn active_tab_after_close(active: usize, closed: usize) -> usize {
+    if active == closed {
+        0
+    } else if active > closed {
+        active - 1
+    } else {
+        active
+    }
+}
+
+fn response_view_for_request<'a>(
+    request_id: &str,
+    response_views: &'a HashMap<String, WebView>,
+    agent_tabs: &AgentTabRegistry,
+    main: &'a Option<WebView>,
+    extras: &'a [WebView],
+) -> Option<&'a WebView> {
+    if let Some(view) = response_views.get(request_id) {
+        return Some(view);
+    }
+    let index = agent_tabs.tab_index_for_request(request_id)?;
+    if index == 0 {
+        main.as_ref()
+    } else {
+        extras.get(index - 1)
+    }
+}
+
+fn open_agent_response_tab(
+    identity: &AgentRequestIdentity,
+    request_id: &str,
+    conversation_epoch: Option<String>,
+    window: &Window,
+    context: &mut WebContext,
+    event_proxy: EventLoopProxy<BrowserEvent>,
+    main: &mut Option<WebView>,
+    main_label: &mut Option<String>,
+    browser_page: &mut Option<BrowserPage>,
+    extras: &mut Vec<WebView>,
+    extra_labels: &mut Vec<Option<String>>,
+    active_tab: &mut usize,
+    agent_tabs: &mut AgentTabRegistry,
+    chrome: &WebView,
+) -> anyhow::Result<()> {
+    let previous = agent_tabs.tab_for_thread(&identity.thread_id).cloned();
+    if previous
+        .as_ref()
+        .and_then(|tab| tab.active_request_id.as_deref())
+        .is_some_and(|active_request| active_request != request_id)
+    {
+        anyhow::bail!("this subagent already has an active browser response");
+    }
+    let existing_index = previous.as_ref().map(|tab| tab.tab_index);
+    let reuse_existing = previous.as_ref().is_some_and(|tab| {
+        tab.conversation_epoch == conversation_epoch
+            && agent_tabs.response_request_id_state(tab.tab_index).is_some()
+    });
+    let request_id_state = if reuse_existing {
+        let state = agent_tabs
+            .response_request_id_state(existing_index.expect("reused agent tab has an index"))
+            .expect("reused agent tab has a response binding");
+        if let Ok(mut current) = state.lock() {
+            *current = Some(request_id.to_owned());
+        }
+        state
+    } else {
+        Arc::new(Mutex::new(Some(request_id.to_owned())))
+    };
+    let (index, _) = open_visible_response_tab(
+        &format!("Agent · {}", identity.name),
+        request_id,
+        existing_index,
+        request_id_state.clone(),
+        reuse_existing,
+        window,
+        context,
+        event_proxy,
+        main,
+        main_label,
+        browser_page,
+        extras,
+        extra_labels,
+        active_tab,
+        chrome,
+        BrowserActivationIntent::BackgroundWork,
+    )?;
+    agent_tabs.bind_response_request_id_state(index, request_id_state);
+    agent_tabs.bind_request_with_epoch(identity, request_id, index, conversation_epoch);
+    Ok(())
+}
+
+fn open_primary_response_tab(
+    request_id: &str,
+    conversation_id: Option<&str>,
+    conversation_epoch: Option<String>,
+    window: &Window,
+    context: &mut WebContext,
+    event_proxy: EventLoopProxy<BrowserEvent>,
+    main: &mut Option<WebView>,
+    main_label: &mut Option<String>,
+    browser_page: &mut Option<BrowserPage>,
+    extras: &mut Vec<WebView>,
+    extra_labels: &mut Vec<Option<String>>,
+    active_tab: &mut usize,
+    response_tabs: &mut AgentTabRegistry,
+    chrome: &WebView,
+) -> anyhow::Result<()> {
+    let previous = conversation_id
+        .and_then(|thread_id| response_tabs.primary_tab_for_thread(thread_id).cloned());
+    let previous_response_still_active = previous
+        .as_ref()
+        .and_then(|tab| tab.active_request_id.as_deref())
+        .is_some_and(|active_request| active_request != request_id);
+    // An earlier ChatGPT response can still be completing a tool round when
+    // Codex issues its next request for the same thread. Keep that response
+    // isolated in its own view and continue in a fresh Temporary Chat with
+    // the full Codex context supplied by this request.
+    let existing_index = if previous_response_still_active {
+        None
+    } else {
+        previous
+            .as_ref()
+            .map(|tab| tab.tab_index)
+            .or_else(|| response_tabs.reusable_primary_response_tab())
+    };
+    let reuse_existing = !previous_response_still_active && previous.as_ref().is_some_and(|tab| {
+        tab.conversation_epoch == conversation_epoch
+            && response_tabs.response_request_id_state(tab.tab_index).is_some()
+    });
+    let request_id_state = if reuse_existing {
+        let state = response_tabs
+            .response_request_id_state(existing_index.expect("reused chat tab has an index"))
+            .expect("reused chat tab has a response binding");
+        if let Ok(mut current) = state.lock() {
+            *current = Some(request_id.to_owned());
+        }
+        state
+    } else {
+        Arc::new(Mutex::new(Some(request_id.to_owned())))
+    };
+    let (index, _) = open_visible_response_tab(
+        "ChatGPT",
+        request_id,
+        existing_index,
+        request_id_state.clone(),
+        reuse_existing,
+        window,
+        context,
+        event_proxy,
+        main,
+        main_label,
+        browser_page,
+        extras,
+        extra_labels,
+        active_tab,
+        chrome,
+        BrowserActivationIntent::BackgroundTabSelection,
+    )?;
+    response_tabs.bind_response_request_id_state(index, request_id_state);
+    if let Some(thread_id) = conversation_id {
+        response_tabs.bind_primary_thread_request(
+            thread_id,
+            request_id,
+            index,
+            conversation_epoch,
+        );
+    } else {
+        response_tabs.bind_primary_response_request(request_id, index);
+    }
+    Ok(())
+}
+
+fn open_setup_smoke_response_tab(
+    request_id: &str,
+    window: &Window,
+    context: &mut WebContext,
+    event_proxy: EventLoopProxy<BrowserEvent>,
+    main: &mut Option<WebView>,
+    main_label: &mut Option<String>,
+    browser_page: &mut Option<BrowserPage>,
+    extras: &mut Vec<WebView>,
+    extra_labels: &mut Vec<Option<String>>,
+    active_tab: &mut usize,
+    response_tabs: &mut AgentTabRegistry,
+    chrome: &WebView,
+) -> anyhow::Result<()> {
+    if response_tabs
+        .setup_smoke_tab
+        .as_ref()
+        .and_then(|tab| tab.active_request_id.as_deref())
+        .is_some_and(|active_request| active_request != request_id)
+    {
+        anyhow::bail!("the setup smoke test already has an active browser response");
+    }
+
+    let request_id_state = Arc::new(Mutex::new(Some(request_id.to_owned())));
+    let (index, _) = open_visible_response_tab(
+        "Setup · smoke test",
+        request_id,
+        response_tabs.setup_smoke_tab_index(),
+        request_id_state.clone(),
+        false,
+        window,
+        context,
+        event_proxy,
+        main,
+        main_label,
+        browser_page,
+        extras,
+        extra_labels,
+        active_tab,
+        chrome,
+        BrowserActivationIntent::UserAction,
+    )?;
+    response_tabs.bind_response_request_id_state(index, request_id_state);
+    response_tabs.bind_setup_smoke_request(request_id, index);
+    Ok(())
+}
+
+fn open_visible_response_tab(
+    label: &str,
+    request_id: &str,
+    existing_index: Option<usize>,
+    request_id_state: Arc<Mutex<Option<String>>>,
+    reuse_existing: bool,
+    window: &Window,
+    context: &mut WebContext,
+    event_proxy: EventLoopProxy<BrowserEvent>,
+    main: &mut Option<WebView>,
+    main_label: &mut Option<String>,
+    browser_page: &mut Option<BrowserPage>,
+    extras: &mut Vec<WebView>,
+    extra_labels: &mut Vec<Option<String>>,
+    active_tab: &mut usize,
+    chrome: &WebView,
+    activation_intent: BrowserActivationIntent,
+) -> anyhow::Result<(usize, bool)> {
+    let existing_index = existing_index.filter(|index| {
+        if *index == 0 {
+            main.is_some()
+        } else {
+            extras.get(index - 1).is_some()
+        }
+    });
+    if existing_index.is_none() && extras.len() >= 31 {
+        anyhow::bail!("the browser has reached its 32 tab limit");
+    }
+    let index = existing_index.unwrap_or(extras.len() + 1);
+    let starts_in_viewport = response_tab_starts_in_viewport(activation_intent, *active_tab, index);
+
+    if reuse_existing {
+        if let Some(view) = active_browser_view(main, extras, index) {
+            let bind_script = response_bind_script(request_id);
+            if view.evaluate_script(&bind_script).is_ok() {
+                if index == 0 {
+                    *main_label = Some(label.to_owned());
+                    *browser_page = Some(BrowserPage::TemporaryChat);
+                } else if let Some(slot) = extra_labels.get_mut(index - 1) {
+                    *slot = Some(label.to_owned());
+                }
+                if starts_in_viewport {
+                    if *active_tab != index {
+                        if let Some(previous) = active_browser_view(main, extras, *active_tab) {
+                            let _ = previous.set_visible(false);
+                        }
+                        *active_tab = index;
+                    }
+                    if let Some(active) = active_browser_view(main, extras, *active_tab) {
+                        activate_browser_tab(window, active, activation_intent);
+                    }
+                } else if let Some(background) = active_browser_view(main, extras, index) {
+                    let _ = background.set_visible(false);
+                }
+                sync_browser_chrome(
+                    chrome,
+                    main,
+                    extras,
+                    *active_tab,
+                    main_label.as_deref(),
+                    extra_labels,
+                );
+                return Ok((index, true));
+            }
+        }
+    }
+
+    if main.is_none() {
+        let view = build_webview(
+            window,
+            context,
+            BrowserPage::TemporaryChat,
+            event_proxy.clone(),
+            None,
+            false,
+            None,
+        )?;
+        main.replace(view);
+        *main_label = None;
+        *browser_page = Some(BrowserPage::TemporaryChat);
+    }
+
+    let view = build_webview(
+        window,
+        context,
+        BrowserPage::TemporaryChat,
+        event_proxy,
+        Some(request_id.to_owned()),
+        starts_in_viewport,
+        Some(request_id_state),
+    )?;
+    if let Some(existing_index) = existing_index {
+        if existing_index == 0 {
+            *main = Some(view);
+            *main_label = Some(label.to_owned());
+            *browser_page = Some(BrowserPage::TemporaryChat);
+        } else {
+            let slot = existing_index - 1;
+            extras[slot] = view;
+            extra_labels[slot] = Some(label.to_owned());
+        }
+    } else {
+        extras.push(view);
+        extra_labels.push(Some(label.to_owned()));
+    }
+    if starts_in_viewport {
+        if *active_tab != index {
+            if let Some(previous) = active_browser_view(main, extras, *active_tab) {
+                let _ = previous.set_visible(false);
+            }
+            *active_tab = index;
+        }
+        if let Some(active) = active_browser_view(main, extras, *active_tab) {
+            activate_browser_tab(window, active, activation_intent);
+        }
+    } else if let Some(background) = active_browser_view(main, extras, index) {
+        let _ = background.set_visible(false);
+    }
+    sync_browser_chrome(
+        chrome,
+        main,
+        extras,
+        *active_tab,
+        main_label.as_deref(),
+        extra_labels,
+    );
+    Ok((index, false))
 }
 
 fn build_webview(
@@ -799,19 +3193,41 @@ fn build_webview(
     page: BrowserPage,
     event_proxy: EventLoopProxy<BrowserEvent>,
     response_id: Option<String>,
+    response_visible_tab: bool,
+    response_request_id: Option<Arc<Mutex<Option<String>>>>,
 ) -> anyhow::Result<WebView> {
-    let builder = WebViewBuilder::new_with_web_context(context);
+    let response_request_id = response_request_id.or_else(|| {
+        response_id
+            .as_ref()
+            .map(|request_id| Arc::new(Mutex::new(Some(request_id.clone()))))
+    });
+    let view_id = Uuid::new_v4().to_string();
+    let ipc_view_id = view_id.clone();
+    let builder = WebViewBuilder::new_with_web_context(context).with_id(&view_id);
     let builder = if response_id.is_some() {
         builder.with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
     } else {
-        builder
+        let proxy = event_proxy.clone();
+        builder.with_new_window_req_handler(move |url, _| {
+            let _ = proxy.send_event(BrowserEvent::NewTab(url));
+            wry::NewWindowResponse::Deny
+        })
     };
     #[cfg(target_os = "macos")]
     let builder = builder.with_data_store_identifier(PROFILE_DATA_STORE_ID);
 
-    let ipc_response_id = response_id.clone();
+    let ipc_response_id = response_request_id.clone();
+    let navigation_request = response_request_id.clone();
+    let navigation_proxy = event_proxy.clone();
     let builder = builder
-        .with_visible(response_id.is_none())
+        // Keep the WebView controller rendering even while its parent window is
+        // hidden. A hidden controller can report zero-sized DOM elements and
+        // prevents the model picker from being discovered in background turns.
+        .with_visible(true)
+        .with_bounds(content_bounds(
+            window,
+            response_id.is_some() && !response_visible_tab,
+        ))
         .with_initialization_script(if response_id.is_none() {
             "window.__web2codexDeepProbe = true;"
         } else {
@@ -819,29 +3235,35 @@ fn build_webview(
         })
         .with_initialization_script(ACCOUNT_CAPABILITY_PROBE_SCRIPT)
         .with_navigation_handler(move |target| {
-            if page != BrowserPage::TemporaryChat {
-                return true;
+            if let Some(request_binding) = &navigation_request {
+                let request_id = request_binding
+                    .lock()
+                    .ok()
+                    .and_then(|request_id| request_id.clone());
+                let temporary = url::Url::parse(&target).is_ok_and(|url| {
+                    url.origin().ascii_serialization() == "https://chatgpt.com"
+                        && url.path() == "/"
+                        && url.query_pairs().find(|(key, _)| key == "temporary-chat")
+                            .is_some_and(|(_, value)| value == "true")
+                });
+                if !temporary {
+                    if let Some(request_id) = request_id {
+                        if is_chatgpt_auth_url(&target) {
+                            let _ = navigation_proxy.send_event(
+                                BrowserEvent::ResponsesAuthRequired(request_id),
+                            );
+                        } else {
+                            let _ = navigation_proxy.send_event(BrowserEvent::ResponsesResult {
+                                request_id,
+                                revision: None,
+                                result: Err("ChatGPT tried to leave Temporary Chat. Use /web login in the terminal if your session has expired.".into()),
+                            });
+                        }
+                    }
+                }
+                return temporary;
             }
-            let Ok(target) = url::Url::parse(&target) else {
-                return false;
-            };
-            if target.host_str() == Some("chatgpt.com") {
-                return target.scheme() == "https"
-                    && target.port_or_known_default() == Some(443)
-                    && target.path() == "/";
-            }
-            if target.host_str() == Some("chat.openai.com") {
-                // The legacy hostname is accepted only at its root so the
-                // initialization script can immediately canonicalize it.
-                return target.scheme() == "https"
-                    && target.port_or_known_default() == Some(443)
-                    && target.path() == "/";
-            }
-            target.scheme() == "https"
-                || (target.scheme() == "http"
-                    && target.host_str().is_some_and(|host| {
-                        host == "localhost" || host == "127.0.0.1" || host == "[::1]"
-                    }))
+            true
         })
         .with_ipc_handler(move |request| {
             let body = request.body().as_str();
@@ -851,19 +3273,72 @@ fn build_webview(
                 "pro" => Some(AccountTierChoice::Pro),
                 _ => None,
             };
-            if let Some(tier) = tier {
+            if let Some(tier) = tier.filter(|_| page == BrowserPage::AccountChooser) {
                 let _ = event_proxy.send_event(BrowserEvent::ContinueLogin(tier));
                 return;
             }
             let Ok(message) = serde_json::from_str::<serde_json::Value>(body) else {
                 return;
             };
+            if request.uri().scheme_str() != Some("https")
+                || request.uri().host() != Some("chatgpt.com")
+                || request.uri().port_u16().is_some_and(|port| port != 443)
+            {
+                return;
+            }
+            if message.get("type").and_then(serde_json::Value::as_str)
+                == Some("set-power-slider")
+            {
+                if let (Some(index), Some(request_id)) = (message
+                    .get("index")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|index| *index <= 2), message
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|request_id| !request_id.is_empty() && request_id.len() <= 96)
+                    .map(str::to_owned))
+                {
+                    let _ = event_proxy.send_event(BrowserEvent::SetPowerSliderValue {
+                        view_id: ipc_view_id.clone(),
+                        request_id,
+                        index: index as u8,
+                        allow_focus: power_slider_focus_requested(&message),
+                    });
+                }
+                return;
+            }
             match message.get("type").and_then(serde_json::Value::as_str) {
+                Some("responses-document-started") | Some("responses-bind-rejected") => {
+                    let Some(binding) = ipc_response_id.as_ref() else { return; };
+                    let Some(request_id) = binding.lock().ok().and_then(|state| state.clone()) else { return; };
+                    let reported_id = message.get("request_id").and_then(serde_json::Value::as_str);
+                    let document_reloaded = message.get("type").and_then(serde_json::Value::as_str) == Some("responses-document-started");
+                    let error = if document_reloaded && reported_id.is_some_and(|id| id != request_id) {
+                        "The retained Temporary Chat reloaded during a request. Check the previous turn before retrying; the next turn will open a fresh Temporary Chat."
+                    } else if !document_reloaded && reported_id == Some(request_id.as_str()) {
+                        "ChatGPT response bridge rejected the retained-page binding. The next turn will open a fresh Temporary Chat."
+                    } else {
+                        return;
+                    };
+                    let _ = event_proxy.send_event(BrowserEvent::ResponsesBridgeUnavailable {
+                        request_id,
+                        binding: binding.clone(),
+                        document_reloaded,
+                        error: error.to_owned(),
+                    });
+                    return;
+                }
                 Some("responses-bridge-ready")
+                | Some("responses-prompt-submitted")
+                | Some("responses-auth-required")
                 | Some("responses-tool-state")
                 | Some("responses-text")
+                | Some("responses-reasoning-heading")
                 | Some("responses-result") => {
-                    let Some(request_id) = ipc_response_id.as_ref() else {
+                    let Some(request_id) = ipc_response_id
+                        .as_ref()
+                        .and_then(|state| state.lock().ok().and_then(|state| state.clone()))
+                    else {
                         return;
                     };
                     if message
@@ -875,8 +3350,23 @@ fn build_webview(
                     }
                     match message.get("type").and_then(serde_json::Value::as_str) {
                         Some("responses-bridge-ready") => {
-                            let _ = event_proxy
-                                .send_event(BrowserEvent::ResponsesBridgeReady(request_id.clone()));
+                            let _ = event_proxy.send_event(BrowserEvent::ResponsesBridgeReady {
+                                request_id: request_id.clone(),
+                                conversation_has_history: message
+                                    .get("conversation_has_history")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false),
+                            });
+                        }
+                        Some("responses-prompt-submitted") => {
+                            let _ = event_proxy.send_event(
+                                BrowserEvent::ResponsesPromptSubmitted(request_id.clone()),
+                            );
+                        }
+                        Some("responses-auth-required") => {
+                            let _ = event_proxy.send_event(BrowserEvent::ResponsesAuthRequired(
+                                request_id.clone(),
+                            ));
                         }
                         Some("responses-tool-state") => {
                             let _ = event_proxy
@@ -892,6 +3382,20 @@ fn build_webview(
                                     request_id: request_id.clone(),
                                     delta: text.to_owned(),
                                 });
+                            }
+                        }
+                        Some("responses-reasoning-heading") => {
+                            if let Some(heading) = message
+                                .get("heading")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|heading| heading.len() <= 1024)
+                            {
+                                let _ = event_proxy.send_event(
+                                    BrowserEvent::ResponsesReasoningHeading {
+                                        request_id: request_id.clone(),
+                                        heading: heading.to_owned(),
+                                    },
+                                );
                             }
                         }
                         _ => {
@@ -927,7 +3431,7 @@ fn build_webview(
             if message
                 .get("probe_version")
                 .and_then(serde_json::Value::as_u64)
-                != Some(4)
+                != Some(5)
             {
                 return;
             }
@@ -981,7 +3485,7 @@ fn build_webview(
                 .collect();
             let _ = event_proxy.send_event(BrowserEvent::AccountCapabilities(
                 AccountCapabilities {
-                    probe_version: 4,
+                    probe_version: 5,
                     picker_options,
                     reasoning_by_model,
                     detected_at_unix_seconds,
@@ -990,14 +3494,24 @@ fn build_webview(
             ));
         });
 
-    let builder = if page == BrowserPage::TemporaryChat {
-        builder
-            .with_initialization_script(TEMPORARY_CHAT_ENFORCEMENT_SCRIPT)
-            .with_initialization_script(&format!(
-                "window.__web2codexRequestId={};",
-                serde_json::json!(response_id)
-            ))
-            .with_initialization_script(RESPONSES_BRIDGE_SCRIPT)
+    let builder = if page == BrowserPage::TemporaryChat && response_id.is_some() {
+        let builder = builder.with_initialization_script(TEMPORARY_CHAT_ENFORCEMENT_SCRIPT);
+        if let Some(request_id) = response_id {
+            let connector_name = data_directory()
+                .ok()
+                .and_then(|path| fs::read_to_string(path.join("connector-name.txt")).ok())
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "Web2Codex".to_owned());
+            builder
+                .with_initialization_script(&format!(
+                    "if (window === window.top && location.origin === 'https://chatgpt.com') {{ window.__web2codexRequestId={}; window.__web2codexConnectorName={}; window.ipc.postMessage(JSON.stringify({{type:'responses-document-started', request_id:window.__web2codexRequestId}})); }}",
+                    serde_json::json!(request_id), serde_json::json!(connector_name)
+                ))
+                .with_initialization_script(RESPONSES_BRIDGE_SCRIPT)
+        } else {
+            builder
+        }
     } else {
         builder
     };
@@ -1008,30 +3522,35 @@ fn build_webview(
         BrowserPage::AccountChooser => builder.with_html(ACCOUNT_CHOOSER_HTML),
     };
 
-    #[cfg(target_os = "linux")]
-    {
-        use wry::WebViewBuilderExtUnix;
-        let container = window
-            .default_vbox()
-            .context("Tao did not provide a default GTK container for WebKitGTK")?;
-        builder
-            .build_gtk(container)
-            .context(WEBVIEW_CREATION_CONTEXT)
+    builder
+        .build_as_child(window)
+        .context(WEBVIEW_CREATION_CONTEXT)
+}
+
+fn is_chatgpt_auth_url(target: &str) -> bool {
+    let Ok(url) = url::Url::parse(target) else {
+        return false;
+    };
+    if url.scheme() != "https" || url.port_or_known_default() != Some(443) {
+        return false;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        builder.build(window).context(WEBVIEW_CREATION_CONTEXT)
+    let path = url.path().to_ascii_lowercase();
+    match url.host_str() {
+        Some("auth.openai.com" | "auth0.openai.com" | "login.openai.com") => true,
+        Some("chatgpt.com" | "chat.openai.com") => {
+            path.starts_with("/auth/")
+                || matches!(
+                    path.as_str(),
+                    "/login" | "/log-in" | "/signin" | "/sign-in" | "/create-account"
+                )
+        }
+        Some("openai.com") => path.starts_with("/auth/") || path == "/log-in",
+        _ => false,
     }
 }
 
 fn store_account_tier(path: &Path, tier: AccountTierChoice) -> anyhow::Result<()> {
-    fs::write(path, serde_json::to_vec(&tier)?).with_context(|| {
-        format!(
-            "failed to save the selected ChatGPT account type at {}",
-            path.display()
-        )
-    })?;
-    restrict_file_permissions(path)
+    write_private_json(path, &tier)
 }
 
 fn store_account_capabilities(
@@ -1043,23 +3562,20 @@ fn store_account_capabilities(
         && let Ok(contents) = fs::read(path)
         && let Ok(previous) = serde_json::from_slice::<AccountCapabilities>(&contents)
         && previous.probe_version == capabilities.probe_version
-        && previous.picker_options == capabilities.picker_options
     {
+        if capabilities.picker_options.is_empty() {
+            capabilities.picker_options = previous.picker_options.clone();
+        }
         for (model, levels) in previous.reasoning_by_model {
-            capabilities
-                .reasoning_by_model
-                .entry(model)
-                .or_insert(levels);
+            if capabilities.picker_options.contains(&model) {
+                capabilities
+                    .reasoning_by_model
+                    .entry(model)
+                    .or_insert(levels);
+            }
         }
     }
-    let contents = serde_json::to_vec(&capabilities)?;
-    fs::write(path, contents).with_context(|| {
-        format!(
-            "failed to save ChatGPT account capabilities at {}",
-            path.display()
-        )
-    })?;
-    restrict_file_permissions(path)
+    write_private_json(path, &capabilities)
 }
 
 fn prepare_profile_directory(profile_dir: &Path) -> anyhow::Result<()> {
@@ -1130,10 +3646,36 @@ fn acquire_lock(lock_path: &Path, state_path: &Path) -> anyhow::Result<PathBuf> 
 }
 
 fn write_state(state_path: &Path, state: &BrowserState) -> anyhow::Result<()> {
-    let serialized = serde_json::to_vec(state)?;
-    fs::write(state_path, serialized)
-        .with_context(|| format!("failed to write browser state at {}", state_path.display()))?;
-    restrict_file_permissions(state_path)
+    write_private_json(state_path, state)
+}
+
+/// Publish a complete snapshot so concurrent CLI readers never observe a
+/// truncated catalog or half-written bearer credential.
+fn write_private_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    let parent = path
+        .parent()
+        .context("browser snapshot has no parent directory")?;
+    let temporary = parent.join(format!(".web2codex-{}.tmp", Uuid::new_v4().simple()));
+    let result = (|| -> anyhow::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.with_context(|| format!("failed to publish browser state at {}", path.display()))
 }
 
 fn serve_control_requests(
@@ -1177,7 +3719,7 @@ fn handle_control_request(
     let request = match parse_http_request(&mut stream) {
         Ok(request) => request,
         Err(error) => {
-            let status = if error.to_string().contains("exceeds 8 MiB") {
+            let status = if error.to_string().contains("request body exceeds") {
                 "413 Payload Too Large"
             } else {
                 "400 Bad Request"
@@ -1217,18 +3759,181 @@ fn handle_control_request(
             let catalog = model_catalog_from_picker_snapshot(account_capabilities_path);
             let _ = write_json_response(&mut stream, "200 OK", &catalog);
         }
+        ("GET", "/browser/tabs") => {
+            let (reply, received) = mpsc::sync_channel(1);
+            if event_proxy
+                .send_event(BrowserEvent::ListTabs(reply))
+                .is_err()
+            {
+                let _ = write_response(&mut stream, "503 Service Unavailable", "browser stopped");
+                return;
+            }
+            match received.recv_timeout(Duration::from_secs(5)) {
+                Ok(tabs) => {
+                    let _ = write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        &serde_json::json!({"tabs":tabs}),
+                    );
+                }
+                Err(_) => {
+                    let _ = write_response(&mut stream, "504 Gateway Timeout", "browser timed out");
+                }
+            }
+        }
+        ("POST", "/browser/tabs") => {
+            let body = serde_json::from_slice::<serde_json::Value>(&request.body).ok();
+            if body
+                .as_ref()
+                .and_then(|value| value.get("action"))
+                .and_then(serde_json::Value::as_str)
+                == Some("close-agent")
+            {
+                let thread_id = body
+                    .as_ref()
+                    .and_then(|value| value.get("thread_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|thread_id| !thread_id.trim().is_empty() && thread_id.len() <= 256);
+                let Some(thread_id) = thread_id else {
+                    let _ = write_json_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        &json_error(
+                            "invalid_request_error",
+                            "invalid_agent_thread_id",
+                            "A non-empty agent thread ID is required",
+                        ),
+                    );
+                    return;
+                };
+                let agent_path = body
+                    .as_ref()
+                    .and_then(|value| value.get("agent_path"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty() && path.len() <= 256)
+                    .map(str::to_owned);
+                let (reply, received) = mpsc::sync_channel(1);
+                if event_proxy
+                    .send_event(BrowserEvent::CloseAgentTab(
+                        thread_id.to_owned(),
+                        agent_path,
+                        reply,
+                    ))
+                    .is_err()
+                {
+                    let _ =
+                        write_response(&mut stream, "503 Service Unavailable", "browser stopped");
+                    return;
+                }
+                match received.recv_timeout(Duration::from_secs(5)) {
+                    Ok(AgentTabCloseOutcome::Closed) => {
+                        let _ = write_response(&mut stream, "204 No Content", "");
+                    }
+                    Ok(AgentTabCloseOutcome::Deferred) => {
+                        let _ = write_response(
+                            &mut stream,
+                            "202 Accepted",
+                            "close deferred until the agent request finishes",
+                        );
+                    }
+                    Ok(AgentTabCloseOutcome::NotFound) => {
+                        let _ =
+                            write_response(&mut stream, "404 Not Found", "agent tab was not found");
+                    }
+                    Err(_) => {
+                        let _ =
+                            write_response(&mut stream, "504 Gateway Timeout", "browser timed out");
+                    }
+                }
+                return;
+            }
+            let url = body.and_then(|value| {
+                value
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(browser_address)
+            });
+            let Some(url) = url else {
+                let _ = write_json_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    &json_error(
+                        "invalid_request_error",
+                        "invalid_url",
+                        "A valid HTTP or HTTPS URL is required",
+                    ),
+                );
+                return;
+            };
+            let (reply, received) = mpsc::sync_channel(1);
+            if event_proxy
+                .send_event(BrowserEvent::BackgroundTab(url, reply))
+                .is_err()
+            {
+                let _ = write_response(&mut stream, "503 Service Unavailable", "browser stopped");
+                return;
+            }
+            match received.recv_timeout(Duration::from_secs(15)) {
+                Ok(Ok(index)) => {
+                    let _ = write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        &serde_json::json!({"index":index}),
+                    );
+                }
+                Ok(Err(error)) => {
+                    let _ = write_json_response(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        &json_error("server_error", "tab_creation_failed", &error),
+                    );
+                }
+                Err(_) => {
+                    let _ = write_response(&mut stream, "504 Gateway Timeout", "browser timed out");
+                }
+            }
+        }
         ("POST", "/status") => {
             let _ = write_response(&mut stream, "204 No Content", "");
         }
-        ("POST", "/open") | ("POST", "/login") => {
+        ("POST", "/lease") => {
+            // EOF also covers a crashed process or a closed terminal window.
+            let (ack, accepted) = mpsc::sync_channel(0);
+            if event_proxy
+                .send_event(BrowserEvent::ClientConnected(ack))
+                .is_err()
+                || accepted.recv_timeout(Duration::from_secs(5)).is_err()
+            {
+                let _ = write_response(&mut stream, "503 Service Unavailable", "browser stopped");
+                return;
+            }
+            if stream.set_read_timeout(None).is_ok()
+                && stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: web2codex-lease\r\n\r\n").is_ok()
+            {
+                let mut byte = [0_u8; 1];
+                loop {
+                    match stream.read(&mut byte) {
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        _ => break,
+                    }
+                }
+            }
+            let _ = event_proxy.send_event(BrowserEvent::ClientDisconnected);
+        }
+        ("POST", "/open" | "/login" | "/session/open" | "/session/login") => {
             let (reply, result) = mpsc::sync_channel(1);
-            let page = if request.path == "/login" {
+            let page = if request.path.ends_with("/login") {
                 BrowserPage::AccountChooser
             } else {
                 BrowserPage::TemporaryChat
             };
             if event_proxy
-                .send_event(BrowserEvent::Open(page, Some(reply)))
+                .send_event(BrowserEvent::Open(
+                    page,
+                    request.path.starts_with("/session/"),
+                    reply,
+                ))
                 .is_err()
             {
                 let _ = write_response(&mut stream, "503 Service Unavailable", "browser stopped");
@@ -1255,21 +3960,17 @@ fn handle_control_request(
             let _ = write_response(&mut stream, status, "");
         }
         ("POST", "/stop") => {
-            let (reply, stopped) = mpsc::sync_channel(1);
-            if event_proxy
-                .send_event(BrowserEvent::Stop(Some(reply)))
-                .is_err()
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            if let Err(error) = event_proxy.send_event(BrowserEvent::Stop(stream))
+                && let BrowserEvent::Stop(mut stream) = error.0
             {
                 let _ = write_response(&mut stream, "503 Service Unavailable", "browser stopped");
-                return;
             }
-            let _ = stopped.recv_timeout(Duration::from_secs(2));
-            let _ = write_response(&mut stream, "204 No Content", "");
         }
         ("POST", "/v1/responses") => {
             responses_http::handle(&mut stream, &request, event_proxy, &broker);
         }
-        ("POST", "/bridge/tools") | ("POST", "/bridge/invoke") => {
+        ("POST", "/bridge/tools" | "/bridge/invoke" | "/bridge/tool-result") => {
             responses_http::handle_connector(&mut stream, &request, &broker);
         }
         _ => {
@@ -1288,8 +3989,12 @@ fn client_connection_closed(stream: &TcpStream) -> bool {
     }
     let mut probe = [0_u8; 1];
     let closed = match stream.peek(&mut probe) {
-        Ok(0) => true,
-        Err(error) if error.kind() != std::io::ErrorKind::WouldBlock => true,
+        // EOF only means the peer stopped sending. It may still be reading
+        // the HTTP response; a closed receive side is detected by writes.
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ),
         _ => false,
     };
     let _ = stream.set_nonblocking(false);
@@ -1298,17 +4003,34 @@ fn client_connection_closed(stream: &TcpStream) -> bool {
 
 struct TextOnlyResponsesRequest {
     model: String,
+    conversation_id: Option<String>,
+    conversation_epoch: Option<String>,
+    agent: Option<AgentRequestIdentity>,
+    setup_smoke_test: bool,
+    compaction_stages: Vec<CompactionStage>,
     reasoning_effort: Option<String>,
     tool_choice: ToolChoice,
     prompt: String,
+    resume_prompt: String,
     attachments: Vec<MediaAttachment>,
+    resume_attachments: Vec<MediaAttachment>,
     stream: bool,
     tools: Vec<CallableTool>,
+    connector_required: bool,
+    mcp_required: bool,
+    mcp_action_required: bool,
+    tool_work_expected: bool,
+    tool_choice: HarnessToolChoice,
     outputs: Vec<(String, serde_json::Value)>,
     expects_continuation: bool,
 }
 
-type RequestParseError = (&'static str, &'static str, &'static str);
+struct CompactionStage {
+    prompt: String,
+    acknowledgement: String,
+}
+
+type RequestParseError = (&'static str, &'static str, String);
 
 fn supported_attachment_extension(kind: &str, mime: &str) -> Option<&'static str> {
     match (kind, mime) {
@@ -1345,7 +4067,7 @@ fn append_data_url_attachment(
             "audio",
         ),
     };
-    let unsupported = |message| (status, code, message);
+    let unsupported = |message: &str| (status, code, message.to_string());
     let data_url = data_url.ok_or(unsupported(match kind {
         "image" => "images must contain an inline data URL",
         _ => "audio must contain an inline data URL",
@@ -1361,21 +4083,125 @@ fn append_data_url_attachment(
         "image" => "use an inline PNG, JPEG, WebP, or GIF image",
         _ => "use an inline WAV, MP3, M4A, AAC, OGG, WebM, or FLAC audio file",
     }))?;
-    if data.is_empty() || attachments.len() >= 8 {
+    if data.is_empty() {
         return Err(unsupported(
-            "provide up to eight non-empty media attachments",
+            "media attachments must contain non-empty base64 data",
         ));
     }
-    let name = format!("web2codex-{label}-{}.{}", attachments.len() + 1, extension);
+    let name = if let Some(existing) = attachments.iter().find(|file| file.data_url == data_url) {
+        existing.name.clone()
+    } else {
+        if attachments.len() >= 8 {
+            return Err(unsupported(
+                "provide up to eight distinct media attachments",
+            ));
+        }
+        let name = format!("web2codex-{label}-{}.{}", attachments.len() + 1, extension);
+        attachments.push(MediaAttachment {
+            name: name.clone(),
+            mime: mime.to_string(),
+            data_url: data_url.to_string(),
+        });
+        name
+    };
     if !text.is_empty() {
         text.push('\n');
     }
     text.push_str(&format!("[Attached {label}: {name}]"));
-    attachments.push(MediaAttachment {
-        name,
-        mime: mime.to_string(),
-        data_url: data_url.to_string(),
-    });
+    Ok(())
+}
+
+fn valid_mime_type(mime: &str) -> bool {
+    let Some((type_, subtype)) = mime.split_once('/') else {
+        return false;
+    };
+    !type_.is_empty()
+        && !subtype.is_empty()
+        && !subtype.contains('/')
+        && [type_, subtype].iter().all(|part| {
+            part.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'!' | b'#'..=b'$' | b'&'..=b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
+            })
+        })
+}
+
+fn safe_attachment_filename(filename: &str, fallback_index: usize) -> String {
+    let basename = filename.rsplit(['/', '\\']).next().unwrap_or_default();
+    let sanitized = basename
+        .chars()
+        .filter(|character| {
+            character.is_alphanumeric() || matches!(character, ' ' | '.' | '-' | '_')
+        })
+        .take(120)
+        .collect::<String>();
+    let sanitized = sanitized.trim().trim_matches('.');
+    if sanitized.is_empty() {
+        format!("web2codex-file-{fallback_index}.bin")
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn append_data_url_file(
+    data_url: Option<&str>,
+    filename: Option<&str>,
+    attachments: &mut Vec<MediaAttachment>,
+    text: &mut String,
+) -> Result<(), RequestParseError> {
+    let unsupported = |message: &str| {
+        (
+            "422 Unprocessable Content",
+            "input_file_unsupported",
+            message.to_string(),
+        )
+    };
+    let data_url = data_url.ok_or(unsupported(
+        "file attachments must contain an inline data URL in a Temporary Chat",
+    ))?;
+    let (header, data) = data_url
+        .split_once(',')
+        .ok_or(unsupported("file attachments must use a base64 data URL"))?;
+    let header = header
+        .strip_prefix("data:")
+        .filter(|header| header.ends_with(";base64"))
+        .ok_or(unsupported("file attachments must use a base64 data URL"))?;
+    let mime = header
+        .strip_suffix(";base64")
+        .and_then(|header| header.split(';').next())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !valid_mime_type(&mime) {
+        return Err(unsupported(
+            "file attachments must include a valid MIME type",
+        ));
+    }
+    if data.is_empty() {
+        return Err(unsupported(
+            "file attachments must contain non-empty base64 data",
+        ));
+    }
+
+    let existing = attachments.iter().find(|file| file.data_url == data_url);
+    let name = if let Some(existing) = existing {
+        existing.name.clone()
+    } else {
+        if attachments.len() >= 8 {
+            return Err(unsupported("provide up to eight distinct attachments"));
+        }
+        let name = safe_attachment_filename(filename.unwrap_or_default(), attachments.len() + 1);
+        attachments.push(MediaAttachment {
+            name: name.clone(),
+            mime,
+            data_url: data_url.to_string(),
+        });
+        name
+    };
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(&format!("[Attached file: {name}]"));
     Ok(())
 }
 
@@ -1385,18 +4211,29 @@ fn attach_tool_media(
     data: &str,
     attachments: &mut Vec<MediaAttachment>,
 ) -> Option<String> {
-    let extension = supported_attachment_extension(kind, mime)?;
-    if data.is_empty() || attachments.len() >= 8 {
+    supported_attachment_extension(kind, mime)?;
+    if data.is_empty() {
         return None;
     }
-    let label = if kind == "image" { "image" } else { "audio" };
-    let name = format!("web2codex-{label}-{}.{}", attachments.len() + 1, extension);
-    attachments.push(MediaAttachment {
-        name: name.clone(),
-        mime: mime.to_string(),
-        data_url: format!("data:{mime};base64,{data}"),
-    });
-    Some(format!("[Attached {label}: {name}]"))
+    let data_url = format!("data:{mime};base64,{data}");
+    let mut marker = String::new();
+    append_data_url_attachment(Some(&data_url), kind, attachments, &mut marker).ok()?;
+    Some(marker)
+}
+
+fn attach_tool_file(
+    mime: &str,
+    data: &str,
+    filename: &str,
+    attachments: &mut Vec<MediaAttachment>,
+) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+    let data_url = format!("data:{mime};base64,{data}");
+    let mut marker = String::new();
+    append_data_url_file(Some(&data_url), Some(filename), attachments, &mut marker).ok()?;
+    Some(marker)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1490,6 +4327,126 @@ struct CallableTool {
     declaration: serde_json::Value,
 }
 
+enum HarnessToolChoice {
+    Auto,
+    None,
+    Required,
+    Named {
+        kind: CallableToolKind,
+        namespace: String,
+        name: String,
+    },
+}
+
+impl HarnessToolChoice {
+    fn requires_tool_work(&self) -> bool {
+        matches!(self, Self::Required | Self::Named { .. })
+    }
+
+    fn select(
+        value: Option<&serde_json::Value>,
+        tools: &mut Vec<CallableTool>,
+    ) -> Result<Self, RequestParseError> {
+        let invalid = |message: &str| {
+            (
+                "422 Unprocessable Content",
+                "tool_choice_unsupported",
+                message.to_string(),
+            )
+        };
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(Self::Auto);
+        };
+        match value.as_str() {
+            Some("auto") => return Ok(Self::Auto),
+            Some("none") => {
+                tools.clear();
+                return Ok(Self::None);
+            }
+            Some("required") if tools.is_empty() => {
+                return Err(invalid(
+                    "required tool choice needs a callable harness tool",
+                ));
+            }
+            Some("required") => return Ok(Self::Required),
+            _ => {}
+        }
+
+        let kind = match value["type"].as_str() {
+            Some("function") => CallableToolKind::Function,
+            Some("custom") => CallableToolKind::Custom,
+            _ => {
+                return Err(invalid(
+                    "expected auto, none, required, or a named function/custom tool",
+                ));
+            }
+        };
+        let name = value["name"]
+            .as_str()
+            .ok_or(invalid("named tool choice requires a name"))?;
+        let namespace = value
+            .get("namespace")
+            .map(|namespace| {
+                namespace
+                    .as_str()
+                    .ok_or(invalid("tool choice namespace must be a string"))
+            })
+            .transpose()?;
+        tools.retain(|tool| {
+            tool.kind == kind
+                && tool.name == name
+                && namespace.is_none_or(|namespace| namespace == tool.namespace.as_str())
+        });
+        let [selected] = tools.as_slice() else {
+            return Err(invalid(
+                "named tool choice must match exactly one declared tool",
+            ));
+        };
+        Ok(Self::Named {
+            kind,
+            namespace: selected.namespace.clone(),
+            name: selected.name.clone(),
+        })
+    }
+
+    fn instructions(&self) -> &'static str {
+        match self {
+            Self::Auto => "Use the selected Web2Codex connector when tools are needed.",
+            Self::None => "Answer directly without calling tools.",
+            Self::Required | Self::Named { .. } => {
+                "Use the selected Web2Codex connector to discover and invoke an available harness tool before completing this request."
+            }
+        }
+    }
+
+    // A parallel call queued by the previous response may predate this response's
+    // filtered registry. Recheck it before handing it to the native executor.
+    fn check_output(&self, item: &serde_json::Value, end_turn: bool) -> Result<(), &'static str> {
+        match self {
+            Self::None if !end_turn => Err("This response disabled native tool calls"),
+            Self::Required | Self::Named { .. } if end_turn => {
+                Err("ChatGPT completed the response without making the required native tool call")
+            }
+            Self::Named {
+                kind,
+                namespace,
+                name,
+            } if item["namespace"].as_str() != Some(namespace.as_str())
+                || item["name"].as_str() != Some(name.as_str())
+                || item["type"].as_str()
+                    != Some(match kind {
+                        CallableToolKind::Function => "function_call",
+                        CallableToolKind::Custom => "custom_tool_call",
+                        CallableToolKind::ToolSearch => "tool_search_call",
+                    }) =>
+            {
+                Err("The pending call does not match this response's selected tool")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 enum BridgeCompletion {
     Message(String),
     FunctionCall {
@@ -1513,7 +4470,8 @@ fn collect_callable_tool(
     namespace: &str,
     spec: &serde_json::Value,
 ) -> Result<(), RequestParseError> {
-    let unsupported = |code, message| ("422 Unprocessable Content", code, message);
+    let unsupported =
+        |code, message: &str| ("422 Unprocessable Content", code, message.to_string());
     let name = spec
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -1592,7 +4550,8 @@ fn collect_callable_tool(
 fn parse_callable_tools(
     value: Option<&serde_json::Value>,
 ) -> Result<Vec<CallableTool>, RequestParseError> {
-    let unsupported = |code, message| ("422 Unprocessable Content", code, message);
+    let unsupported =
+        |code, message: &str| ("422 Unprocessable Content", code, message.to_string());
     let Some(value) = value.filter(|value| !value.is_null()) else {
         return Ok(Vec::new());
     };
@@ -1618,7 +4577,7 @@ fn parse_callable_tools(
         return Err((
             "413 Payload Too Large",
             "tool_schemas_too_large",
-            "tool declarations exceed the WebView bridge size limit",
+            "tool declarations exceed the WebView bridge size limit".to_string(),
         ));
     }
 
@@ -1727,7 +4686,8 @@ fn extend_callable_tools_from_input(
             return Err((
                 "422 Unprocessable Content",
                 "too_many_tools",
-                "the request contains more callable tools than this bridge can safely accept",
+                "the request contains more callable tools than this bridge can safely accept"
+                    .to_string(),
             ));
         }
     }
@@ -1739,14 +4699,14 @@ fn extend_callable_tools_from_input(
         (
             "422 Unprocessable Content",
             "tool_schema_unsupported",
-            "callable tool schemas could not be serialized",
+            "callable tool schemas could not be serialized".to_string(),
         )
     })?;
     if serialized.len() > MAX_TOOL_SCHEMAS_BYTES {
         return Err((
             "413 Payload Too Large",
             "tool_schemas_too_large",
-            "callable tool declarations exceed the WebView bridge size limit",
+            "callable tool declarations exceed the WebView bridge size limit".to_string(),
         ));
     }
     Ok(())
@@ -1755,8 +4715,10 @@ fn extend_callable_tools_from_input(
 fn input_content_to_text(
     content: &serde_json::Value,
     attachments: &mut Vec<MediaAttachment>,
+    required_media: bool,
 ) -> Result<String, RequestParseError> {
-    let unsupported = |code, message| ("422 Unprocessable Content", code, message);
+    let unsupported =
+        |code, message: &str| ("422 Unprocessable Content", code, message.to_string());
     match content {
         serde_json::Value::String(text) => Ok(text.clone()),
         serde_json::Value::Array(parts) => {
@@ -1780,38 +4742,86 @@ fn input_content_to_text(
                         }
                         text.push_str(part_text);
                     }
-                    "input_image" => {
-                        if part.get("file_id").is_some() {
-                            return Err(unsupported(
-                                "input_image_file_id_unavailable",
-                                "this file_id has no local attachment bytes available to Web2Codex; resend the image through the Web2Codex upload path",
+                    "input_image" | "input_audio" => {
+                        let (key, media) = if kind == "input_image" {
+                            ("image_url", "image")
+                        } else {
+                            ("audio_url", "audio")
+                        };
+                        let reference = part.get(key).and_then(serde_json::Value::as_str);
+                        let attachment_result = match reference {
+                            Some(data_url) if data_url.starts_with("data:") => {
+                                append_data_url_attachment(
+                                    Some(data_url),
+                                    media,
+                                    attachments,
+                                    &mut text,
+                                )
+                            }
+                            Some(_) => Err(unsupported(
+                                if media == "image" {
+                                    "input_image_unsupported"
+                                } else {
+                                    "input_audio_unsupported"
+                                },
+                                if media == "image" {
+                                    "remote image URLs cannot be fetched by this local bridge; attach a local image or provide an inline data URL"
+                                } else {
+                                    "remote audio URLs cannot be fetched by this local bridge; attach a local audio file or provide an inline data URL"
+                                },
+                            )),
+                            None if part
+                                .get("file_id")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some() =>
+                            {
+                                Err(unsupported(
+                                    if media == "image" {
+                                        "input_image_unsupported"
+                                    } else {
+                                        "input_audio_unsupported"
+                                    },
+                                    if media == "image" {
+                                        "image file_id references cannot be resolved in a Temporary Chat; resend the image as an inline attachment or local file"
+                                    } else {
+                                        "audio file_id references cannot be resolved in a Temporary Chat; resend the audio as an inline attachment or local file"
+                                    },
+                                ))
+                            }
+                            None => append_data_url_attachment(None, media, attachments, &mut text),
+                        };
+                        if let Err(error) = attachment_result {
+                            if required_media {
+                                return Err(error);
+                            }
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            let reason = if part
+                                .get("file_id")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some()
+                            {
+                                "file reference cannot be resolved"
+                            } else {
+                                "attachment is unavailable"
+                            };
+                            text.push_str(&format!(
+                                "[Earlier {media} is unavailable in this Temporary Chat: {reason}]"
                             ));
                         }
-                        append_data_url_attachment(
-                            part.get("image_url").and_then(serde_json::Value::as_str),
-                            "image",
-                            attachments,
-                            &mut text,
-                        )?;
                     }
-                    "input_audio" => {
-                        if part.get("file_id").is_some() {
-                            return Err(unsupported(
-                                "input_audio_file_id_unavailable",
-                                "this file_id has no local attachment bytes available to Web2Codex; resend the audio through the Web2Codex upload path",
-                            ));
-                        }
-                        append_data_url_attachment(
-                            part.get("audio_url").and_then(serde_json::Value::as_str),
-                            "audio",
-                            attachments,
-                            &mut text,
-                        )?;
-                    }
+                    // This opaque payload is local history metadata, not readable prompt text.
+                    "encrypted_content" => {}
                     _ => {
                         return Err(unsupported(
                             "input_format_unsupported",
-                            "the conversation contains an unsupported content part",
+                            &format!(
+                                "the conversation contains an unsupported content part type '{}'",
+                                part.get("type")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("<missing>")
+                            ),
                         ));
                     }
                 }
@@ -1842,15 +4852,15 @@ fn tool_output_to_context(
     };
 
     if let Some(content) = content {
-        for part in content {
+        for (index, part) in content.iter().enumerate() {
             match part.get("type").and_then(serde_json::Value::as_str) {
                 Some("input_text" | "output_text" | "text") => {
-                    if let Some(text) = part
-                        .get("text")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|text| *text != FAILED_MARKER)
-                    {
-                        preserved.push(text.to_string());
+                    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                        if index == 0 && part["type"] == "input_text" && text == FAILED_MARKER {
+                            preserved.push("The previous tool returned an error.".to_string());
+                        } else {
+                            preserved.push(text.to_string());
+                        }
                     }
                 }
                 Some("input_image") if include_media => {
@@ -1861,7 +4871,11 @@ fn tool_output_to_context(
                         attach_tool_media("image", mime, data, attachments)
                     });
                     preserved.push(attachment.unwrap_or_else(|| {
-                        "[An earlier tool returned an image that could not be attached to this chat]".to_string()
+                        if part.get("file_id").and_then(serde_json::Value::as_str).is_some() {
+                            "[An earlier tool returned an image file reference that cannot be resolved in this Temporary Chat]".to_string()
+                        } else {
+                            "[An earlier tool returned an image that could not be attached to this chat]".to_string()
+                        }
                     }));
                 }
                 Some("image") if include_media => {
@@ -1886,7 +4900,11 @@ fn tool_output_to_context(
                         attach_tool_media("audio", mime, data, attachments)
                     });
                     preserved.push(attachment.unwrap_or_else(|| {
-                        "[An earlier tool returned audio that could not be attached to this chat]".to_string()
+                        if part.get("file_id").and_then(serde_json::Value::as_str).is_some() {
+                            "[An earlier tool returned an audio file reference that cannot be resolved in this Temporary Chat]".to_string()
+                        } else {
+                            "[An earlier tool returned audio that could not be attached to this chat]".to_string()
+                        }
                     }));
                 }
                 Some("audio") if include_media => {
@@ -1903,8 +4921,60 @@ fn tool_output_to_context(
                     }));
                 }
                 Some("input_audio" | "audio") => {}
-                Some(_) => preserved.push(part.to_string()),
-                None => preserved.push(part.to_string()),
+                Some("input_file") if include_media => {
+                    let file_url = part.get("file_url").and_then(serde_json::Value::as_str);
+                    let filename = part
+                        .get("filename")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let mut marker = String::new();
+                    let attached =
+                        append_data_url_file(file_url, Some(filename), attachments, &mut marker)
+                            .is_ok();
+                    preserved.push(if attached {
+                        marker
+                    } else {
+                        format!(
+                            "[An earlier tool returned a file ({}) that could not be attached to this Temporary Chat]",
+                            safe_attachment_filename(filename, attachments.len() + 1)
+                        )
+                    });
+                }
+                Some("input_file") => {}
+                Some("resource" | "resource_link") => {
+                    let resource = part.get("resource").unwrap_or(part);
+                    let uri = resource["uri"].as_str().unwrap_or_default();
+                    // A data URI already contains the blob. Keep only its metadata here.
+                    let uri = if uri.starts_with("data:") {
+                        "(inline resource)"
+                    } else {
+                        uri
+                    };
+                    let label = resource["name"].as_str().unwrap_or("MCP resource");
+                    preserved.push(format!("{label}: {uri}"));
+                    for field in ["description", "text"] {
+                        if let Some(text) = resource[field].as_str() {
+                            preserved.push(text.to_owned());
+                        }
+                    }
+                    if let Some(blob) = resource["blob"].as_str() {
+                        let mime = resource["mimeType"]
+                            .as_str()
+                            .unwrap_or("application/octet-stream");
+                        let attachment = if include_media {
+                            let filename = resource["name"].as_str().unwrap_or(label);
+                            attach_tool_file(mime, blob, filename, attachments)
+                        } else {
+                            None
+                        };
+                        preserved.push(
+                            attachment.unwrap_or_else(|| format!("[Binary resource: {mime}]")),
+                        );
+                    }
+                }
+                Some("encrypted_content") => {}
+                Some(kind) => preserved.push(format!("[Unsupported tool result block: {kind}]")),
+                None => {}
             }
         }
     }
@@ -1913,17 +4983,15 @@ fn tool_output_to_context(
         if object.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
             preserved.insert(0, "The previous MCP tool returned an error.".to_string());
         }
-        if let Some(structured) = object.get("structuredContent")
-            && !structured.is_null()
-        {
-            preserved.push(structured.to_string());
-        }
+        // Structured MCP data has already been delivered through the connector.
+        // Do not serialize it into a later ChatGPT prompt as JSON.
     }
-    if preserved.is_empty() {
+    if preserved.is_empty() && content.is_none() {
         match output {
             serde_json::Value::String(text) => text.clone(),
-            serde_json::Value::Null => String::new(),
-            _ => output.to_string(),
+            serde_json::Value::Null | serde_json::Value::Object(_) => String::new(),
+            serde_json::Value::Bool(_) | serde_json::Value::Number(_) => output.to_string(),
+            serde_json::Value::Array(_) => String::new(),
         }
     } else {
         preserved.join("\n")
@@ -1934,7 +5002,16 @@ fn responses_input_to_prompt(
     input: &serde_json::Value,
     attachments: &mut Vec<MediaAttachment>,
 ) -> Result<String, RequestParseError> {
-    let unsupported = |code, message| ("422 Unprocessable Content", code, message);
+    responses_input_to_prompt_with_policy(input, attachments, false)
+}
+
+fn responses_input_to_prompt_with_policy(
+    input: &serde_json::Value,
+    attachments: &mut Vec<MediaAttachment>,
+    compaction: bool,
+) -> Result<String, RequestParseError> {
+    let unsupported =
+        |code, message: &str| ("422 Unprocessable Content", code, message.to_string());
     if let Some(text) = input.as_str() {
         return Ok(text.to_string());
     }
@@ -1946,6 +5023,7 @@ fn responses_input_to_prompt(
     };
 
     let mut sections = Vec::new();
+    let mut seen_instruction_text = HashSet::new();
     // A fresh Temporary Chat needs earlier tool images as well as their text.
     // In a tool continuation the active ChatGPT response already has them.
     let new_user_turn = items
@@ -1961,7 +5039,12 @@ fn responses_input_to_prompt(
             item.get("type").and_then(serde_json::Value::as_str) == Some("message")
                 && item.get("role").and_then(serde_json::Value::as_str) == Some("user")
         });
-    for item in items {
+    // Attach the current request first. Older images must not exhaust the
+    // composer's upload slots before the user's latest photo can be attached.
+    let latest_input = items.iter().rposition(|item| {
+        item["type"] == "agent_message" || (item["type"] == "message" && item["role"] == "user")
+    });
+    for (index, item) in items.iter().enumerate().rev() {
         let Some(kind) = item.get("type").and_then(serde_json::Value::as_str) else {
             return Err(unsupported(
                 "input_format_unsupported",
@@ -1974,6 +5057,9 @@ fn responses_input_to_prompt(
                     .get("role")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
+                if compaction && matches!(role, "system" | "developer") {
+                    continue;
+                }
                 let heading = match role {
                     "system" => "System instructions",
                     "developer" => "Developer instructions",
@@ -1991,7 +5077,18 @@ fn responses_input_to_prompt(
                     "input_format_unsupported",
                     "conversation message is missing content",
                 ))?;
-                let text = input_content_to_text(content, attachments)?;
+                let text =
+                    input_content_to_text(content, attachments, Some(index) == latest_input)?;
+                let text = if matches!(role, "system" | "developer") {
+                    compact_default_base_instructions(&text)
+                } else {
+                    &text
+                };
+                if matches!(role, "system" | "developer")
+                    && !seen_instruction_text.insert(text.trim().to_owned())
+                {
+                    continue;
+                }
                 if !text.trim().is_empty() {
                     sections.push(format!("{heading}:\n{text}"));
                 }
@@ -2004,12 +5101,13 @@ fn responses_input_to_prompt(
                 let Some(content) = item.get("content") else {
                     continue;
                 };
-                let text = input_content_to_text(content, attachments)?;
+                let text =
+                    input_content_to_text(content, attachments, Some(index) == latest_input)?;
                 if !text.trim().is_empty() {
                     sections.push(format!("Agent ({author}):\n{text}"));
                 }
             }
-            "function_call_output" | "custom_tool_call_output" => {
+            "function_call_output" | "custom_tool_call_output" | "mcp_tool_call_output" => {
                 // Each user turn opens a new Temporary Chat. Preserve textual
                 // results from earlier tool rounds so the next turn retains
                 // the work already done; schemas still travel only via MCP.
@@ -2020,8 +5118,28 @@ fn responses_input_to_prompt(
                     }
                 }
             }
-            "function_call" | "custom_tool_call" | "local_shell_call" | "web_search_call"
-            | "mcp_call" => {}
+            "function_call" | "custom_tool_call" | "mcp_call" => {
+                let name = item["name"].as_str().unwrap_or("tool");
+                let namespace = item["namespace"].as_str().unwrap_or("");
+                let wire_name = if namespace.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{namespace}.{name}")
+                };
+                // The native call already ran through MCP. Never copy its JSON
+                // arguments (or freeform tool input) into the next chat prompt.
+                sections.push(format!(
+                    "Earlier tool call ({wire_name}) was executed through MCP."
+                ));
+            }
+            "local_shell_call" => {
+                if item.get("action").is_some() {
+                    // Shell actions can be structured objects; retain only the
+                    // fact that the action ran, not a JSON serialization of it.
+                    sections.push("An earlier local shell action was executed.".to_string());
+                }
+            }
+            "web_search_call" => {}
             kind if kind.ends_with("_output") && kind != "tool_search_output" => {}
             // These entries carry hidden control data or tool declarations rather than
             // conversation text. The visible ChatGPT UI manages its own MCP tools.
@@ -2043,28 +5161,137 @@ fn responses_input_to_prompt(
             }
         }
     }
+    sections.reverse();
     Ok(sections.join("\n\n"))
 }
 
-fn extract_tool_outputs(input: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
-    input
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| {
-            if !matches!(
-                item.get("type").and_then(serde_json::Value::as_str),
-                Some("function_call_output" | "custom_tool_call_output" | "tool_search_output")
-            ) {
-                return None;
+fn compact_default_base_instructions(instructions: &str) -> &str {
+    if instructions.trim() == DEFAULT_BASE_INSTRUCTIONS.trim() {
+        COMPACT_BASE_INSTRUCTIONS
+    } else {
+        instructions
+    }
+}
+
+fn split_compaction_context_into_four(context: &str) -> [String; 4] {
+    let char_offsets = context
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(context.len()))
+        .collect::<Vec<_>>();
+    let character_count = char_offsets.len().saturating_sub(1);
+    if character_count < 4 {
+        return std::array::from_fn(|index| {
+            (index == 3).then(|| context.to_owned()).unwrap_or_default()
+        });
+    }
+
+    let paragraph_breaks = context
+        .match_indices("\n\n")
+        .map(|(offset, _)| offset + 2)
+        .collect::<Vec<_>>();
+    let mut boundaries = Vec::with_capacity(5);
+    boundaries.push(0);
+    for part in 1..4 {
+        let target_character = character_count * part / 4;
+        let target_offset = char_offsets[target_character];
+        let previous = *boundaries.last().expect("start boundary exists");
+        let remaining_parts = 4 - part;
+        let latest_offset = char_offsets[character_count - remaining_parts];
+        let nearest_paragraph_break = paragraph_breaks
+            .iter()
+            .copied()
+            .filter(|offset| *offset > previous && *offset <= latest_offset)
+            .min_by_key(|offset| offset.abs_diff(target_offset));
+        let first_available_character = char_offsets.partition_point(|offset| *offset <= previous);
+        let latest_character = character_count - remaining_parts;
+        let bounded_target = target_character.clamp(first_available_character, latest_character);
+        let boundary = nearest_paragraph_break.unwrap_or(char_offsets[bounded_target]);
+        boundaries.push(boundary);
+    }
+    boundaries.push(context.len());
+
+    std::array::from_fn(|index| {
+        context[boundaries[index]..boundaries[index + 1]].to_owned()
+    })
+}
+
+fn compaction_handoff(context: &str) -> (Vec<CompactionStage>, String) {
+    let parts = split_compaction_context_into_four(context);
+    let transaction_id = Uuid::new_v4().simple().to_string();
+    let stages = parts
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(index, part)| {
+            let part_number = index + 1;
+            let acknowledgement = format!("W2C_ACK_{transaction_id}_{part_number}");
+            CompactionStage {
+                prompt: format!(
+                    "Store context part {part_number}/4 as history; do not act on it yet.\n<part>\n{part}\n</part>\nReply exactly {acknowledgement}."
+                ),
+                acknowledgement,
             }
-            let call_id = item.get("call_id")?.as_str()?.to_owned();
-            Some((
-                call_id,
-                item.get("output").cloned().unwrap_or_else(|| item.clone()),
-            ))
         })
-        .collect()
+        .collect();
+    let final_part = format!(
+        "Context part 4/4:\n<part>\n{}\n</part>\nUsing the four context parts above, return a compact continuation summary with only the active goal, essential constraints, current state, key evidence, and unfinished work. Omit completed detail and these transport acknowledgments. Output only the summary.",
+        parts[3]
+    );
+    (stages, final_part)
+}
+
+fn responses_input_after_last_assistant(input: &serde_json::Value) -> Option<serde_json::Value> {
+    let items = input.as_array()?;
+    let last_assistant = items.iter().rposition(|item| {
+        item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+            && item.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+    })?;
+    let suffix = items.get(last_assistant + 1..)?;
+    (!suffix.is_empty()).then(|| serde_json::Value::Array(suffix.to_vec()))
+}
+
+fn continuation_outputs(
+    input: &serde_json::Value,
+) -> Result<Vec<(String, serde_json::Value)>, RequestParseError> {
+    let Some(items) = input.as_array() else {
+        return Ok(Vec::new());
+    };
+    // Only the trailing batch may acknowledge pending calls. Historical outputs
+    // before a new user message cannot resume an unrelated live Temporary Chat.
+    let mut outputs = Vec::new();
+    for item in items.iter().rev() {
+        match item["type"].as_str() {
+            Some("reasoning" | "additional_tools" | "configuration_update") => continue,
+            Some(
+                "function_call_output"
+                | "custom_tool_call_output"
+                | "mcp_tool_call_output"
+                | "tool_search_output",
+            ) => {}
+            _ => break,
+        }
+        let call_id = item["call_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or((
+                "400 Bad Request",
+                "invalid_tool_output",
+                "a pending tool output must identify its call".to_string(),
+            ))?;
+        let output = if item["type"] == "tool_search_output" {
+            item.clone()
+        } else {
+            item.get("output").cloned().ok_or((
+                "400 Bad Request",
+                "invalid_tool_output",
+                "a pending tool result must contain output".to_string(),
+            ))?
+        };
+        outputs.push((call_id.to_owned(), output));
+    }
+    outputs.reverse();
+    Ok(outputs)
 }
 
 fn parse_text_only_responses_request(
@@ -2074,15 +5301,28 @@ fn parse_text_only_responses_request(
         (
             "400 Bad Request",
             "invalid_json",
-            "request body must be valid JSON",
+            "request body must be valid JSON".to_string(),
         )
     })?;
     let object = request.as_object().ok_or((
         "400 Bad Request",
         "invalid_request",
-        "request body must be a JSON object",
+        "request body must be a JSON object".to_string(),
     ))?;
-    let unsupported = |code, message| ("422 Unprocessable Content", code, message);
+    let agent = parse_agent_request_identity(object.get("client_metadata"));
+    let conversation_id = parse_conversation_thread_id(object.get("client_metadata"));
+    let setup_smoke_test = is_setup_smoke_test_metadata(object.get("client_metadata"));
+    let client_metadata = object.get("client_metadata");
+    let is_compaction = client_metadata
+        .and_then(|metadata| metadata.get("x-codex-turn-metadata"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.len() <= MAX_TOOL_SCHEMAS_BYTES)
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .and_then(|metadata| metadata.get("request_kind").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .as_deref()
+        == Some("compaction");
+    let unsupported =
+        |code, message: &str| ("422 Unprocessable Content", code, message.to_string());
     let model = object
         .get("model")
         .and_then(serde_json::Value::as_str)
@@ -2090,7 +5330,7 @@ fn parse_text_only_responses_request(
         .ok_or((
             "400 Bad Request",
             "invalid_model",
-            "request must include a model identifier",
+            "request must include a model identifier".to_string(),
         ))?
         .to_string();
     let stream = object
@@ -2099,7 +5339,7 @@ fn parse_text_only_responses_request(
             value.as_bool().ok_or((
                 "400 Bad Request",
                 "invalid_stream_option",
-                "stream must be a boolean",
+                "stream must be a boolean".to_string(),
             ))
         })
         .transpose()?
@@ -2122,9 +5362,19 @@ fn parse_text_only_responses_request(
         "input_format_unsupported",
         "request is missing input",
     ))?;
+    // A compaction handoff must start in a clean Temporary Chat so its four
+    // messages do not inherit the already-large chat history being compacted.
+    let conversation_epoch = if is_compaction {
+        Some(format!("compaction:{}", Uuid::new_v4().simple()))
+    } else {
+        parse_conversation_epoch(input)
+    };
     let mut tools = parse_callable_tools(object.get("tools"))?;
     extend_callable_tools_from_input(&mut tools, input)?;
-    let tool_choice = parse_tool_choice(object.get("tool_choice"), &tools)?;
+    if is_compaction {
+        tools.clear();
+    }
+    let mut tool_choice = HarnessToolChoice::select(object.get("tool_choice"), &mut tools)?;
     if let Some(text) = object.get("text")
         && text.get("format").is_some_and(|format| {
             format
@@ -2140,56 +5390,463 @@ fn parse_text_only_responses_request(
     }
 
     let mut attachments = Vec::new();
-    let mut prompt = responses_input_to_prompt(input, &mut attachments)?;
-    if let Some(instructions) = object
-        .get("instructions")
-        .and_then(serde_json::Value::as_str)
-        .filter(|instructions| !instructions.trim().is_empty())
+    let outputs = continuation_outputs(input)?;
+    let expects_continuation = !outputs.is_empty();
+    let mcp_required = !is_compaction
+        && !expects_continuation
+        && (user_request_requires_mcp(input) || agent.is_some());
+    let mcp_action_required =
+        mcp_required && (agent.is_some() || user_request_requires_mcp_action(input));
+    if mcp_action_required
+        && !tools.is_empty()
+        && matches!(&tool_choice, HarnessToolChoice::Auto)
     {
+        tool_choice = HarnessToolChoice::Required;
+    }
+    let mut prompt = if expects_continuation {
+        String::new()
+    } else {
+        responses_input_to_prompt_with_policy(input, &mut attachments, is_compaction)?
+    };
+    let mut resume_attachments = Vec::new();
+    let mut resume_prompt = if expects_continuation || is_compaction {
+        String::new()
+    } else if let Some(suffix) = responses_input_after_last_assistant(input) {
+        responses_input_to_prompt_with_policy(&suffix, &mut resume_attachments, false)?
+    } else {
+        resume_attachments = attachments.clone();
+        prompt.clone()
+    };
+    let mut developer_instructions = if is_compaction {
+        None
+    } else {
+        object
+            .get("instructions")
+            .and_then(serde_json::Value::as_str)
+            .filter(|instructions| !instructions.trim().is_empty())
+            .map(|instructions| compact_default_base_instructions(instructions).to_owned())
+            .filter(|instructions| !prompt.contains(instructions.trim()))
+    };
+    if !expects_continuation && !is_compaction {
+        prompt = format!(
+            "{prompt}\n\n{TUI_TEXT_RENDERING_INSTRUCTIONS}\n{MCP_CHAT_OUTPUT_INSTRUCTIONS}"
+        );
+    }
+
+    if mcp_required {
+        let mcp_policy = if mcp_action_required {
+            if agent.is_some() {
+                MCP_AGENT_TASK_INSTRUCTIONS.to_owned()
+            } else {
+                format!("{MCP_TOOL_ROUTING_INSTRUCTIONS} {TOOL_COMPLETION_INSTRUCTIONS}")
+            }
+        } else {
+            MCP_TOOL_ROUTING_INSTRUCTIONS.to_owned()
+        };
+        developer_instructions = Some(match developer_instructions {
+            Some(instructions) => format!("{mcp_policy}\n\n{instructions}"),
+            None => mcp_policy,
+        });
+    }
+
+    if !expects_continuation && let Some(instructions) = developer_instructions {
         prompt = format!("Developer instructions:\n{instructions}\n\n{prompt}");
     }
-    let outputs = extract_tool_outputs(input);
     if prompt.trim().is_empty() && outputs.is_empty() {
         return Err((
             "400 Bad Request",
             "empty_input",
-            "input must contain non-empty text",
+            "input must contain non-empty text".to_string(),
         ));
     }
-    if prompt.len() > MAX_PROMPT_TEXT_BYTES {
+    let (compaction_stages, prompt) = if is_compaction && !prompt.trim().is_empty() {
+        let (stages, final_part) = compaction_handoff(&prompt);
+        resume_prompt.clear();
+        (stages, final_part)
+    } else {
+        (Vec::new(), prompt)
+    };
+    if prompt.len() > MAX_PROMPT_TEXT_BYTES
+        || compaction_stages
+            .iter()
+            .any(|stage| stage.prompt.len() > MAX_PROMPT_TEXT_BYTES)
+    {
         return Err((
-            "413 Payload Too Large",
-            "input_too_large",
-            "the conversation exceeds the WebView bridge limit",
+            "400 Bad Request",
+            "context_length_exceeded",
+            "a conversation or compaction part exceeds the WebView bridge limit".to_string(),
         ));
     }
+    let connector_required = !is_compaction && (!tools.is_empty() || mcp_required);
+    let tool_work_expected = !is_compaction
+        && (mcp_required
+            || agent.is_some()
+            || tool_choice.requires_tool_work()
+            || (!tools.is_empty() && user_request_may_require_tools(input)));
     Ok(TextOnlyResponsesRequest {
         model,
+        conversation_id,
+        conversation_epoch,
+        agent,
+        setup_smoke_test,
+        compaction_stages,
         reasoning_effort,
         tool_choice,
         prompt,
+        resume_prompt,
         attachments,
+        resume_attachments,
         stream,
         tools,
+        connector_required,
+        mcp_required,
+        mcp_action_required,
+        tool_work_expected,
+        tool_choice,
         outputs,
-        expects_continuation: input
-            .as_array()
-            .and_then(|items| {
-                items.iter().rev().find(|item| {
-                    !matches!(
-                        item.get("type").and_then(serde_json::Value::as_str),
-                        Some("reasoning" | "additional_tools" | "configuration_update")
-                    )
-                })
+        expects_continuation,
+    })
+}
+
+fn parse_conversation_epoch(input: &serde_json::Value) -> Option<String> {
+    let items = input.as_array()?;
+    let (index, checkpoint) = items.iter().enumerate().rev().find(|(_, item)| {
+        matches!(
+            item.get("type").and_then(serde_json::Value::as_str),
+            Some("compaction" | "compaction_summary" | "context_compaction")
+        )
+    })?;
+    let checkpoint_id = checkpoint
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or("checkpoint");
+    Some(format!("{index}:{checkpoint_id}"))
+}
+
+fn user_request_requires_mcp(input: &serde_json::Value) -> bool {
+    let text = if let Some(text) = input.as_str() {
+        text.to_owned()
+    } else {
+        let Some(message) = input.as_array().and_then(|items| {
+            items.iter().rev().find(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                    && item.get("role").and_then(serde_json::Value::as_str) == Some("user")
             })
-            .and_then(|item| item.get("type"))
+        }) else {
+            return false;
+        };
+        let mut text = String::new();
+        collect_user_text(message.get("content"), &mut text);
+        text
+    };
+
+    let text = text.to_lowercase();
+    if !text.contains("mcp") && !text.contains("connector") {
+        return false;
+    }
+    if [
+        "don't use mcp",
+        "do not use mcp",
+        "не используй mcp",
+        "без mcp",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+    {
+        return false;
+    }
+    [
+        "only",
+        "strictly",
+        "through",
+        "via",
+        "using",
+        "use ",
+        "call ",
+        "invoke",
+        "read ",
+        "write ",
+        "create ",
+        "run ",
+        "execute",
+        "только",
+        "строго",
+        "через",
+        "используй",
+        "используя",
+        "вызови",
+        "прочитай",
+        "прочти",
+        "создай",
+        "запусти",
+        "выполни",
+        "проверь",
+        "тестируй",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn user_request_may_require_tools(input: &serde_json::Value) -> bool {
+    let text = if let Some(text) = input.as_str() {
+        text.to_owned()
+    } else {
+        let Some(message) = input.as_array().and_then(|items| {
+            items.iter().rev().find(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                    && item.get("role").and_then(serde_json::Value::as_str) == Some("user")
+            })
+        }) else {
+            return false;
+        };
+        let mut text = String::new();
+        collect_user_text(message.get("content"), &mut text);
+        text
+    };
+    let text = text.to_lowercase();
+    [
+        "agent",
+        "subagent",
+        "sub-agent",
+        "parallel",
+        "file",
+        "folder",
+        "directory",
+        "repository",
+        "workspace",
+        "run ",
+        "execute",
+        "command",
+        "test",
+        "build",
+        "compile",
+        "create",
+        "make ",
+        "implement",
+        "fix ",
+        "edit ",
+        "change ",
+        "update ",
+        "delete",
+        "remove",
+        "rename",
+        "move ",
+        "copy ",
+        "inspect",
+        "read ",
+        "write ",
+        "search ",
+        "verify ",
+        "создай",
+        "сделай",
+        "субагент",
+        "суб-агент",
+        "агент",
+        "параллел",
+        "файл",
+        "папк",
+        "репозитор",
+        "проект",
+        "код",
+        "запусти",
+        "выполни",
+        "команд",
+        "тест",
+        "собери",
+        "сборк",
+        "реализуй",
+        "исправ",
+        "измени",
+        "обнови",
+        "посмотри",
+        "разберись",
+        "прочитай",
+        "прочти",
+        "напиши",
+        "проверь",
+        "найди",
+        "открой",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn user_request_requires_mcp_action(input: &serde_json::Value) -> bool {
+    let text = if let Some(text) = input.as_str() {
+        text.to_owned()
+    } else {
+        let Some(message) = input.as_array().and_then(|items| {
+            items.iter().rev().find(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                    && item.get("role").and_then(serde_json::Value::as_str) == Some("user")
+            })
+        }) else {
+            return false;
+        };
+        let mut text = String::new();
+        collect_user_text(message.get("content"), &mut text);
+        text
+    };
+    let text = text.to_lowercase();
+    [
+        "spawn_agent",
+        "subagent",
+        "sub-agent",
+        "parallel",
+        "read ",
+        "write ",
+        "create ",
+        "run ",
+        "execute",
+        "invoke",
+        "call ",
+        "создай",
+        "субагент",
+        "суб-агент",
+        "параллел",
+        "прочитай",
+        "прочти",
+        "запиши",
+        "создать",
+        "запусти",
+        "выполни",
+        "вызови",
+        "проведи live-тест",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn collect_user_text(value: Option<&serde_json::Value>, output: &mut String) {
+    match value {
+        Some(serde_json::Value::String(text)) => {
+            output.push_str(text);
+            output.push('\n');
+        }
+        Some(serde_json::Value::Array(items)) => {
+            for item in items {
+                collect_user_text(Some(item), output);
+            }
+        }
+        Some(serde_json::Value::Object(object)) => {
+            if let Some(text) = object.get("text").and_then(serde_json::Value::as_str) {
+                output.push_str(text);
+                output.push('\n');
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_setup_smoke_test_metadata(client_metadata: Option<&serde_json::Value>) -> bool {
+    let Some(metadata) = client_metadata.and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    if metadata
+        .get(SETUP_SMOKE_TEST_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        == Some("true")
+    {
+        return true;
+    }
+    let Some(turn_metadata) = metadata
+        .get("x-codex-turn-metadata")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.len() <= 8192)
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+    else {
+        return false;
+    };
+    turn_metadata
+        .get("extra")
+        .and_then(|extra| extra.get(SETUP_SMOKE_TEST_METADATA_KEY))
+        .and_then(serde_json::Value::as_str)
+        == Some("true")
+}
+
+fn parse_conversation_thread_id(client_metadata: Option<&serde_json::Value>) -> Option<String> {
+    let metadata = client_metadata?.as_object()?;
+    let turn_metadata = metadata
+        .get("x-codex-turn-metadata")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.len() <= 8192)
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+    metadata
+        .get("thread_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            turn_metadata
+                .as_ref()
+                .and_then(|value| value.get("thread_id"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|thread_id| !thread_id.is_empty() && thread_id.len() <= 128)
+        .map(str::to_owned)
+}
+
+fn parse_agent_request_identity(
+    client_metadata: Option<&serde_json::Value>,
+) -> Option<AgentRequestIdentity> {
+    let metadata = client_metadata?.as_object()?;
+    let turn_metadata = metadata
+        .get("x-codex-turn-metadata")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+    let is_thread_spawn = metadata
+        .get("x-openai-subagent")
+        .and_then(serde_json::Value::as_str)
+        == Some(COLLAB_SPAWN_SUBAGENT)
+        || turn_metadata
+            .as_ref()
+            .and_then(|value| value.get("subagent_kind"))
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|kind| {
-                matches!(
-                    kind,
-                    "function_call_output" | "custom_tool_call_output" | "tool_search_output"
-                )
-            }),
+            == Some("thread_spawn")
+        || (metadata
+            .get("x-codex-parent-thread-id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|parent| !parent.trim().is_empty())
+            && turn_metadata
+                .as_ref()
+                .and_then(|value| value.get("agent_name"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| path.trim().starts_with('/')));
+    if !is_thread_spawn {
+        return None;
+    }
+    let thread_id = parse_conversation_thread_id(client_metadata)?;
+    let agent_path = turn_metadata
+        .as_ref()
+        .and_then(|value| value.get("agent_name"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            metadata
+                .get("agent_name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|path| path.trim().starts_with('/'))
+        })
+        .map(str::trim)
+        .filter(|path| !path.is_empty() && path.len() <= 256)
+        .map(str::to_owned);
+    let name = metadata
+        .get("agent_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| name.chars().take(48).collect::<String>())
+        .or_else(|| {
+            agent_path.as_deref().and_then(|path| {
+                path.rsplit('/')
+                    .find(|segment| !segment.is_empty())
+                    .map(|name| name.chars().take(48).collect::<String>())
+            })
+        })
+        .unwrap_or_else(|| "Subagent".to_owned());
+    Some(AgentRequestIdentity {
+        thread_id,
+        name,
+        agent_path,
     })
 }
 
@@ -2261,7 +5918,8 @@ fn parse_http_request(stream: &mut TcpStream) -> anyhow::Result<ParsedHttpReques
     let body_length = content_length.unwrap_or(0);
     anyhow::ensure!(
         body_length <= MAX_REQUEST_BODY_BYTES,
-        "request body exceeds 8 MiB"
+        "request body exceeds {} bytes",
+        MAX_REQUEST_BODY_BYTES
     );
     let mut body = vec![0; body_length];
     reader.read_exact(&mut body)?;
@@ -2434,13 +6092,19 @@ fn write_sse_event(stream: &mut TcpStream, event: &serde_json::Value) -> std::io
     stream.flush()
 }
 
-fn write_sse_error(stream: &mut TcpStream, code: &str, message: &str) -> std::io::Result<()> {
+fn write_sse_error(
+    stream: &mut TcpStream,
+    response_id: &str,
+    code: &str,
+    message: &str,
+) -> std::io::Result<()> {
     let event = serde_json::json!({
-        "type": "error",
-        "error": {
-            "type": "server_error",
-            "code": code,
-            "message": message
+        "type": "response.failed",
+        "response": {
+            "id": response_id,
+            "object": "response",
+            "status": "failed",
+            "error": { "code": code, "message": message }
         }
     });
     write_sse_event(stream, &event)
@@ -2449,6 +6113,10 @@ fn write_sse_error(stream: &mut TcpStream, code: &str, message: &str) -> std::io
 fn send_control(state_path: &Path, path: &str) -> anyhow::Result<()> {
     let contents = fs::read_to_string(state_path)?;
     let state: BrowserState = serde_json::from_str(&contents)?;
+    anyhow::ensure!(
+        state.address.ip().is_loopback() && !state.token.is_empty(),
+        "invalid local Web2Codex browser state"
+    );
     let mut stream = TcpStream::connect_timeout(&state.address, Duration::from_millis(400))?;
     stream.set_read_timeout(Some(Duration::from_secs(16)))?;
     write!(

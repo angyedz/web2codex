@@ -45,6 +45,15 @@ fn current_package_full_name() -> Result<Option<String>> {
     process_package_name(unsafe { GetCurrentProcess() })
 }
 
+/// Whether the current process has an OS-assigned package identity.
+///
+/// This ignores `CODEX_WINDOWS_REGISTERED_CORE`: a parent process can set that
+/// request flag even when a standalone child has no package identity.
+#[doc(hidden)]
+pub fn process_has_package_identity() -> Result<bool> {
+    Ok(current_package_full_name()?.is_some())
+}
+
 fn process_package_name(process: HANDLE) -> Result<Option<String>> {
     query_package_name(
         |length, buffer| unsafe { GetPackageFullName(process, length, buffer) },

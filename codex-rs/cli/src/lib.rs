@@ -13,6 +13,38 @@ pub use debug_sandbox::run_command_under_landlock;
 pub use debug_sandbox::run_command_under_seatbelt;
 pub use debug_sandbox::run_command_under_windows_sandbox;
 
+/// Whether an inherited registered-Core request is invalid for this process.
+#[doc(hidden)]
+pub fn should_clear_registered_core_flag(
+    value: Option<&std::ffi::OsStr>,
+    has_package_identity: bool,
+) -> bool {
+    value == Some(std::ffi::OsStr::new("1")) && !has_package_identity
+}
+
+#[cfg(test)]
+mod registered_core_environment_tests {
+    use super::should_clear_registered_core_flag;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn clears_inherited_flag_only_without_package_identity() {
+        assert!(should_clear_registered_core_flag(
+            Some(OsStr::new("1")),
+            false
+        ));
+        assert!(!should_clear_registered_core_flag(
+            Some(OsStr::new("1")),
+            true
+        ));
+        assert!(!should_clear_registered_core_flag(
+            Some(OsStr::new("0")),
+            false
+        ));
+        assert!(!should_clear_registered_core_flag(None, false));
+    }
+}
+
 #[derive(Debug, Default, Args)]
 pub struct SandboxStateArgs {
     /// Opaque JSON value from `codex/sandbox-state` to apply directly.
@@ -52,7 +84,7 @@ pub struct SeatbeltCommand {
     )]
     pub permissions_profile: Option<String>,
 
-    /// Layer $CODEX_HOME/<name>.config.toml on top of the base user config.
+    /// Layer a profile from the Web2Codex home (`WEB2CODEX_HOME`; legacy `CODEX_HOME`) on top of the base user config.
     #[arg(long = "profile", short = 'p')]
     pub config_profile: Option<ProfileV2Name>,
 
@@ -108,7 +140,7 @@ pub struct LandlockCommand {
     )]
     pub permissions_profile: Option<String>,
 
-    /// Layer $CODEX_HOME/<name>.config.toml on top of the base user config.
+    /// Layer a profile from the Web2Codex home (`WEB2CODEX_HOME`; legacy `CODEX_HOME`) on top of the base user config.
     #[arg(long = "profile", short = 'p')]
     pub config_profile: Option<ProfileV2Name>,
 
@@ -151,7 +183,7 @@ pub struct WindowsCommand {
     )]
     pub permissions_profile: Option<String>,
 
-    /// Layer $CODEX_HOME/<name>.config.toml on top of the base user config.
+    /// Layer a profile from the Web2Codex home (`WEB2CODEX_HOME`; legacy `CODEX_HOME`) on top of the base user config.
     #[arg(long = "profile", short = 'p')]
     pub config_profile: Option<ProfileV2Name>,
 

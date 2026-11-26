@@ -112,6 +112,7 @@ tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 unicode-segmentation = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 which = { workspace = true }
 zip = { workspace = true }
 

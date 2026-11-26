@@ -30,7 +30,7 @@ Settings:
       - function/wait_threads
 -- request 1 (request) --
 00:message/developer:
-    You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open...I. You are expected to be precise, safe, and helpful. [hash=5125daec1ed78d99]
+    You are a coding agent running in the Web2Codex CLI, a terminal-based coding assistant. Web2Codex CLI is an open...I. You are expected to be precise, safe, and helpful. [hash=5125daec1ed78d99]
 
     Your capabilities:
 

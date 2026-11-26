@@ -1459,6 +1459,90 @@ async fn usage_command_with_invalid_view_reports_usage() {
     assert_eq!(recall_latest_after_clearing(&mut chat), "/usage monthly");
 }
 
+fn configure_effort_slash_test_model(chat: &mut ChatWidget) {
+    set_chatgpt_auth(chat);
+    let model = chat.current_model().to_string();
+    let mut preset = get_available_model(chat, &model);
+    preset.supported_reasoning_efforts = vec![
+        ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::Low,
+            description: "instant".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::Medium,
+            description: "balanced".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::High,
+            description: "thorough".to_string(),
+        },
+    ];
+    Arc::make_mut(&mut chat.model_catalog).models = vec![preset];
+}
+
+#[tokio::test]
+async fn bare_effort_slash_command_opens_native_effort_picker() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
+    configure_effort_slash_test_model(&mut chat);
+
+    submit_composer_text(&mut chat, "/effort");
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(
+        popup.contains("Choose Effort"),
+        "expected effort picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("Instant"),
+        "expected Instant option:\n{popup}"
+    );
+    assert!(popup.contains("Medium"), "expected Medium option:\n{popup}");
+    assert!(popup.contains("High"), "expected High option:\n{popup}");
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
+async fn effort_slash_command_accepts_instant_alias_and_applies_low_effort() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
+    configure_effort_slash_test_model(&mut chat);
+    let model = chat.current_model().to_string();
+
+    submit_composer_text(&mut chat, "/effort instant");
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AppEvent::ApplyModelSelection {
+                model: selected_model,
+                effort: Some(ReasoningEffortConfig::Low),
+            } if selected_model == &model
+        )),
+        "expected /effort instant to apply low reasoning to {model}; events: {events:?}"
+    );
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
+async fn effort_slash_command_rejects_unknown_argument_with_usage() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
+    configure_effort_slash_test_model(&mut chat);
+
+    submit_composer_text(&mut chat, "/effort turbo");
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .iter()
+        .map(|cell| lines_to_single_string(cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Usage: /effort [instant|medium|high|xhigh|max]"),
+        "expected effort usage message, got: {rendered:?}"
+    );
+    assert_no_submit_op(&mut op_rx);
+}
+
 #[tokio::test]
 async fn unrecognized_slash_command_is_not_added_to_local_recall() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;

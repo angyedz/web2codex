@@ -658,6 +658,7 @@ fn output_images(output: &FunctionCallOutputPayload) -> impl Iterator<Item = &Im
             FunctionCallOutputContentItem::InputImage { image, .. } => Some(image),
             FunctionCallOutputContentItem::InputText { .. }
             | FunctionCallOutputContentItem::InputAudio { .. }
+            | FunctionCallOutputContentItem::InputFile { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
         })
 }

@@ -86,7 +86,7 @@ async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Resul
             &target,
             action,
             Err(color_eyre::eyre::eyre!(
-                "session {thread_id} is archived. Run `codex unarchive {thread_id}`"
+                "session {thread_id} is archived. Run `web2codex unarchive {thread_id}`"
             )),
             async || panic!("foreign targets must not ask to unarchive"),
         )

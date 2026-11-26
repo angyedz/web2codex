@@ -192,6 +192,271 @@ fn mcp_preview_shares_one_limit_across_blocks_and_preserves_transcript() {
 }
 
 #[test]
+fn compact_standard_mcp_preview_hides_structured_payloads() {
+    let mut cell = new_active_mcp_tool_call(
+        "call-structured-preview".into(),
+        McpInvocation {
+            server: "cosmic_birch".into(),
+            tool: "read_file".into(),
+            arguments: Some(json!({"path": "ARGUMENT_SECRET"})),
+        },
+        /*animations_enabled*/ false,
+    );
+    cell.complete(
+        Duration::ZERO,
+        Ok(result(vec![
+            json!({"type": "text", "text": "File read complete"}),
+            json!({"type": "text", "text": "{\"private_value\":\"JSON_BODY_SECRET\"}"}),
+            json!({"type": "text", "text": "true"}),
+            json!({"type": "future_block", "text": "UNKNOWN_BLOCK_SECRET"}),
+        ])),
+    );
+
+    let compact = visible_lines(cell.compact_hyperlink_lines(/*width*/ 100))
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(compact.contains("File read complete"));
+    for secret in [
+        "ARGUMENT_SECRET",
+        "JSON_BODY_SECRET",
+        "true",
+        "UNKNOWN_BLOCK_SECRET",
+    ] {
+        assert!(
+            !compact.contains(secret),
+            "compact activity leaked {secret}: {compact}"
+        );
+    }
+
+    let scrollback = cell
+        .display_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(scrollback.contains("File read complete"));
+    for secret in [
+        "ARGUMENT_SECRET",
+        "JSON_BODY_SECRET",
+        "true",
+        "UNKNOWN_BLOCK_SECRET",
+    ] {
+        assert!(
+            !scrollback.contains(secret),
+            "default scrollback leaked {secret}: {scrollback}"
+        );
+    }
+
+    let expanded = cell
+        .transcript_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for detail in [
+        "ARGUMENT_SECRET",
+        "JSON_BODY_SECRET",
+        "true",
+        "UNKNOWN_BLOCK_SECRET",
+    ] {
+        assert!(
+            expanded.contains(detail),
+            "expanded transcript lost {detail}: {expanded}"
+        );
+    }
+}
+
+#[test]
+fn compact_mcp_preview_detects_large_json_values_without_parsing_them() {
+    let large_json_string = format!("\"{}\"", "sensitive".repeat(2_000));
+    let large_json_array = format!("[{}0]", "0,".repeat(8_000));
+
+    assert!(result::is_json_value("true"));
+    assert!(result::is_json_value(&large_json_string));
+    assert!(result::is_json_value(&large_json_array));
+    assert!(!result::is_json_value("A readable MCP status message"));
+}
+
+#[test]
+fn compact_mcp_preview_hides_structured_errors_but_keeps_them_expanded() {
+    let mut cell = new_active_mcp_tool_call(
+        "call-structured-error".into(),
+        McpInvocation {
+            server: "cosmic_birch".into(),
+            tool: "read_file".into(),
+            arguments: Some(json!({"path": "ERROR_ARGUMENT_SECRET"})),
+        },
+        /*animations_enabled*/ false,
+    );
+    cell.complete(
+        Duration::ZERO,
+        Err(r#"{"error":"MCP_ERROR_SECRET"}"#.to_owned()),
+    );
+
+    let compact = visible_lines(cell.compact_hyperlink_lines(/*width*/ 100))
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!compact.contains("MCP_ERROR_SECRET"));
+    assert!(!compact.contains("ERROR_ARGUMENT_SECRET"));
+
+    let scrollback = cell
+        .display_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!scrollback.contains("MCP_ERROR_SECRET"));
+    assert!(!scrollback.contains("ERROR_ARGUMENT_SECRET"));
+
+    let expanded = cell
+        .transcript_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded.contains("MCP_ERROR_SECRET"));
+    assert!(expanded.contains("ERROR_ARGUMENT_SECRET"));
+}
+
+#[test]
+fn code_mode_previews_preserve_json_stdout_and_hide_structured_fallbacks() {
+    for server in ["node_repl", "cua_repl"] {
+        let mut cell = new_active_mcp_tool_call(
+            "code-mode-structured-result".into(),
+            McpInvocation {
+                server: server.into(),
+                tool: "js".into(),
+                arguments: Some(json!({"title": "Run browser query"})),
+            },
+            /*animations_enabled*/ false,
+        );
+        cell.complete(
+            Duration::ZERO,
+            Ok(result(vec![
+                json!({
+                    "type": "text",
+                    "text": "Script completed\nOutput:\n{\"status\":\"ready\"}"
+                }),
+                json!({
+                    "type": "future_block",
+                    "text": "USEFUL_TOP_LEVEL_TEXT",
+                    "value": "NOT_FOR_DEFAULT_DISPLAY"
+                }),
+                json!({"type": "future_block", "value": "STRUCTURED_PAYLOAD_SECRET"}),
+            ])),
+        );
+
+        let compact = visible_lines(cell.compact_hyperlink_lines(/*width*/ 120))
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let scrollback = cell
+            .display_lines(/*width*/ 120)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let transcript = cell
+            .transcript_lines(/*width*/ 200)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for output in [&compact, &scrollback] {
+            assert!(output.contains("status"), "lost JSON stdout: {output}");
+            assert!(output.contains("ready"), "lost JSON stdout: {output}");
+            assert!(
+                output.contains("USEFUL_TOP_LEVEL_TEXT"),
+                "lost top-level code-mode text: {output}"
+            );
+            assert!(
+                !output.contains("STRUCTURED_PAYLOAD_SECRET"),
+                "default code-mode preview leaked a structured fallback: {output}"
+            );
+            assert!(
+                !output.contains("NOT_FOR_DEFAULT_DISPLAY"),
+                "default code-mode preview leaked structured fallback data: {output}"
+            );
+        }
+        assert!(transcript.contains("STRUCTURED_PAYLOAD_SECRET"));
+        assert!(transcript.contains("USEFUL_TOP_LEVEL_TEXT"));
+    }
+}
+
+#[test]
+fn code_mode_previews_hide_json_transport_errors_but_keep_readable_errors() {
+    for server in ["node_repl", "cua_repl"] {
+        let mut structured_error = new_active_mcp_tool_call(
+            "code-mode-structured-error".into(),
+            McpInvocation {
+                server: server.into(),
+                tool: "js".into(),
+                arguments: None,
+            },
+            /*animations_enabled*/ false,
+        );
+        structured_error.complete(
+            Duration::ZERO,
+            Err(r#"{"error":"CODE_MODE_ERROR_SECRET"}"#.to_owned()),
+        );
+
+        let compact = visible_lines(structured_error.compact_hyperlink_lines(/*width*/ 100))
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let scrollback = structured_error
+            .display_lines(/*width*/ 100)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let transcript = structured_error
+            .transcript_lines(/*width*/ 120)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!compact.contains("CODE_MODE_ERROR_SECRET"));
+        assert!(!scrollback.contains("CODE_MODE_ERROR_SECRET"));
+        assert!(transcript.contains("CODE_MODE_ERROR_SECRET"));
+
+        let mut readable_error = new_active_mcp_tool_call(
+            "code-mode-readable-error".into(),
+            McpInvocation {
+                server: server.into(),
+                tool: "js".into(),
+                arguments: None,
+            },
+            /*animations_enabled*/ false,
+        );
+        readable_error.complete(
+            Duration::ZERO,
+            Err("Script error:\npermission denied".to_owned()),
+        );
+        let compact = visible_lines(readable_error.compact_hyperlink_lines(/*width*/ 100))
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let scrollback = readable_error
+            .display_lines(/*width*/ 100)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(compact.contains("permission denied"));
+        assert!(scrollback.contains("permission denied"));
+    }
+}
+
+#[test]
 fn code_mode_output_shares_a_row_budget_across_blocks() {
     let mut cell = new_active_mcp_tool_call(
         "browser-call".to_string(),

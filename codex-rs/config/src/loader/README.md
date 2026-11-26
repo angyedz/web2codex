@@ -32,7 +32,7 @@ Precedence is **top overrides bottom**:
 5. `User` profile config, when present
 6. `User` config (`config.toml`)
 7. `EnterpriseManaged` cloud-managed config bundle layers
-8. `System` config (`/etc/codex/config.toml` or the Windows system config path)
+8. `System` config (`/etc/codex/config.toml` or `%ProgramData%\OpenAI\Codex\config.toml` in Codex; Web2Codex-specific system paths when `WEB2CODEX_HOME` is set)
 
 `ConfigLayerStack` stores layers in the opposite order internally: lowest
 precedence first, highest precedence last, so later layers override earlier
@@ -42,6 +42,10 @@ inserted according to their translated `ConfigLayerSource` precedence.
 Project-root discovery and project trust use the applicable non-project layers,
 including legacy managed-file and MDM config at their normal precedence. The
 managed layers remain above project and session layers in the final stack.
+
+The standalone Web2Codex runtime sets `WEB2CODEX_HOME` and reads system config,
+managed requirements, and forced preferences from Web2Codex-specific locations.
+It does not import Codex machine settings or `.codex/config.toml`.
 Executor-local reads use their own system, base-user, and legacy managed sources;
 they do not include cloud config, selected profiles, or session flags.
 

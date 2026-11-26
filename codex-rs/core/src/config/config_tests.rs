@@ -127,6 +127,23 @@ use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
 
+#[test]
+fn web2codex_provider_gets_extended_stream_timeout_without_overriding_explicit_values() {
+    let mut web2codex = built_in_model_providers(None)["openai"].clone();
+    web2codex.stream_idle_timeout_ms = None;
+    apply_web2codex_stream_idle_timeout("web2codex", &mut web2codex);
+    assert_eq!(web2codex.stream_idle_timeout_ms, Some(WEBCODEX_STREAM_IDLE_TIMEOUT_MS));
+
+    web2codex.stream_idle_timeout_ms = Some(240_000);
+    apply_web2codex_stream_idle_timeout("web2codex", &mut web2codex);
+    assert_eq!(web2codex.stream_idle_timeout_ms, Some(240_000));
+
+    let mut other = built_in_model_providers(None)["openai"].clone();
+    other.stream_idle_timeout_ms = None;
+    apply_web2codex_stream_idle_timeout("openai", &mut other);
+    assert_eq!(other.stream_idle_timeout_ms, None);
+}
+
 fn stdio_mcp(command: &str) -> McpServerConfig {
     stdio_mcp_with_args(command, &[])
 }
@@ -4460,7 +4477,7 @@ async fn permissions_profiles_allow_unknown_special_paths() -> std::io::Result<(
     );
     assert!(
         config.startup_warnings.iter().any(|warning| warning.contains(
-            "Configured filesystem path `:future_special_path` is not recognized by this version of Codex and will be ignored."
+            "Configured filesystem path `:future_special_path` is not recognized by this version of Web2Codex and will be ignored."
         )),
         "{:?}",
         config.startup_warnings
@@ -4501,7 +4518,7 @@ async fn permissions_profiles_allow_unknown_special_paths_with_nested_entries()
     );
     assert!(
         config.startup_warnings.iter().any(|warning| warning.contains(
-            "Configured filesystem path `:future_special_path` with nested entry `docs` is not recognized by this version of Codex and will be ignored."
+            "Configured filesystem path `:future_special_path` with nested entry `docs` is not recognized by this version of Web2Codex and will be ignored."
         )),
         "{:?}",
         config.startup_warnings
@@ -4532,7 +4549,7 @@ async fn permissions_profiles_allow_missing_filesystem_with_warning() -> std::io
     );
     assert!(
         config.startup_warnings.iter().any(|warning| warning.contains(
-            "Permissions profile `dev` does not define any recognized filesystem entries for this version of Codex."
+            "Permissions profile `dev` does not define any recognized filesystem entries for this version of Web2Codex."
         )),
         "{:?}",
         config.startup_warnings
@@ -4560,7 +4577,7 @@ async fn permissions_profiles_allow_empty_filesystem_with_warning() -> std::io::
     );
     assert!(
         config.startup_warnings.iter().any(|warning| warning.contains(
-            "Permissions profile `dev` does not define any recognized filesystem entries for this version of Codex."
+            "Permissions profile `dev` does not define any recognized filesystem entries for this version of Web2Codex."
         )),
         "{:?}",
         config.startup_warnings
@@ -11891,7 +11908,7 @@ sandbox_mode = "danger-full-access"
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(
         err.to_string(),
-        "`approval_policy = \"never\"` cannot be used because requirements do not allow `sandbox_mode = \"danger-full-access\"`; Codex would fall back to read-only permissions with approvals disabled. Choose an `approval_policy` based on what you need, such as `on-request`, or choose an allowed sandbox mode."
+        "`approval_policy = \"never\"` cannot be used because requirements do not allow `sandbox_mode = \"danger-full-access\"`; Web2Codex would fall back to read-only permissions with approvals disabled. Choose an `approval_policy` based on what you need, such as `on-request`, or choose an allowed sandbox mode."
     );
     Ok(())
 }
@@ -11925,7 +11942,7 @@ default_permissions = "dev"
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(
         err.to_string(),
-        "`approval_policy = \"never\"` cannot be used because requirements do not allow `sandbox_mode = \"danger-full-access\"`; Codex would fall back to read-only permissions with approvals disabled. Choose an `approval_policy` based on what you need, such as `on-request`, or choose an allowed sandbox mode."
+        "`approval_policy = \"never\"` cannot be used because requirements do not allow `sandbox_mode = \"danger-full-access\"`; Web2Codex would fall back to read-only permissions with approvals disabled. Choose an `approval_policy` based on what you need, such as `on-request`, or choose an allowed sandbox mode."
     );
     Ok(())
 }
@@ -12838,7 +12855,7 @@ enabled = true
             config.agent_max_threads,
             config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
-        (None, Some(3))
+        (None, Some(5))
     );
 
     Ok(())
@@ -13121,6 +13138,24 @@ max_concurrent_threads_per_session = 7
             config.effective_agent_max_threads(MultiAgentVersion::V2),
         ),
         (8, Some(7))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_agent_v2_defaults_to_five_subagents() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert_eq!(config.multi_agent_v2.max_concurrent_threads_per_session, 6);
+    assert_eq!(
+        config.effective_agent_max_threads(MultiAgentVersion::V2),
+        Some(5)
     );
 
     Ok(())

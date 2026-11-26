@@ -83,6 +83,38 @@ fn reservation_drop_releases_slot() {
 }
 
 #[test]
+fn concurrent_spawn_reservations_never_exceed_the_shared_limit() {
+    const MAX_AGENTS: usize = 5;
+    const SPAWN_ATTEMPTS: usize = 10;
+
+    let registry = Arc::new(AgentRegistry::default());
+    let start = Arc::new(std::sync::Barrier::new(SPAWN_ATTEMPTS));
+    let hold_reservations = Arc::new(std::sync::Barrier::new(SPAWN_ATTEMPTS));
+    let attempts = (0..SPAWN_ATTEMPTS)
+        .map(|_| {
+            let registry = Arc::clone(&registry);
+            let start = Arc::clone(&start);
+            let hold_reservations = Arc::clone(&hold_reservations);
+            std::thread::spawn(move || {
+                start.wait();
+                let reservation = registry.reserve_spawn_slot(Some(MAX_AGENTS)).ok();
+                let accepted = reservation.is_some();
+                hold_reservations.wait();
+                drop(reservation);
+                accepted
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let accepted = attempts
+        .into_iter()
+        .map(|attempt| attempt.join().expect("spawn attempt should finish"))
+        .filter(|accepted| *accepted)
+        .count();
+    assert_eq!(accepted, MAX_AGENTS);
+}
+
+#[test]
 fn commit_holds_slot_until_release() {
     let registry = Arc::new(AgentRegistry::default());
     let reservation = registry.reserve_spawn_slot(Some(1)).expect("reserve slot");

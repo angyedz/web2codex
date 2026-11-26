@@ -37,6 +37,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         ToolName::plain("spawn_agent")
     }
 
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         create_spawn_agent_tool_v2(self.options.clone(), self.description_override.as_deref())
     }
@@ -266,5 +270,15 @@ impl ToolOutput for SpawnAgentResult {
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
         tool_output_code_mode_result(self, "spawn_agent")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_agent_supports_parallel_tool_calls() {
+        assert!(Handler::default().supports_parallel_tool_calls());
     }
 }

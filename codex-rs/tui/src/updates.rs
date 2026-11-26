@@ -18,12 +18,12 @@ use codex_http_client::RouteAwareClientPool;
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::version::CODEX_CLI_VERSION;
+use crate::version::runtime_version;
 
 pub(crate) use crate::updates_cache::dismiss_version;
 
 pub fn get_upgrade_version(config: &Config) -> Option<String> {
-    if !config.check_for_update_on_startup || is_source_build_version(CODEX_CLI_VERSION) {
+    if !config.check_for_update_on_startup || is_source_build_version(runtime_version()) {
         return None;
     }
 
@@ -47,7 +47,7 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
     }
 
     info.and_then(|info| {
-        if is_newer(&info.latest_version, CODEX_CLI_VERSION).unwrap_or(false) {
+        if is_newer(&info.latest_version, runtime_version()).unwrap_or(false) {
             Some(info.latest_version)
         } else {
             None
@@ -102,7 +102,7 @@ async fn fetch_latest_github_release_version(
         .get(&latest_release_url)
         .header(
             http::header::USER_AGENT,
-            concat!("web2codex/", env!("CARGO_PKG_VERSION")),
+            format!("web2codex/{}", runtime_version()),
         )
         .send()
         .await?
@@ -115,7 +115,7 @@ async fn fetch_latest_github_release_version(
 /// Returns the latest version to show in a popup, if it should be shown.
 /// This respects the user's dismissal choice for the current latest version.
 pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
-    if !config.check_for_update_on_startup || is_source_build_version(CODEX_CLI_VERSION) {
+    if !config.check_for_update_on_startup || is_source_build_version(runtime_version()) {
         return None;
     }
 

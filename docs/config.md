@@ -1,10 +1,10 @@
 # Configuration
 
-For basic configuration instructions, see [this documentation](https://developers.openai.com/codex/config-basic).
+For basic Web2Codex configuration instructions, see the upstream [OpenAI Codex basic configuration reference](https://developers.openai.com/codex/config-basic).
 
-For advanced configuration instructions, see [this documentation](https://developers.openai.com/codex/config-advanced).
+For advanced Web2Codex configuration instructions, see the upstream [OpenAI Codex advanced configuration reference](https://developers.openai.com/codex/config-advanced).
 
-For a full configuration reference, see [this documentation](https://developers.openai.com/codex/config-reference).
+For a full Web2Codex configuration reference, see the upstream [OpenAI Codex configuration reference](https://developers.openai.com/codex/config-reference).
 
 ## Lifecycle hooks
 

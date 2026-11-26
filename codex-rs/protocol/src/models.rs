@@ -1927,7 +1927,7 @@ fn local_media_error_placeholder(
     let media_name = media_kind.name();
     let path = path.display();
     ContentItem::InputText {
-        text: format!("Codex could not read the local {media_name} at `{path}`: {error}"),
+        text: format!("Web2Codex could not read the local {media_name} at `{path}`: {error}"),
     }
 }
 
@@ -2052,7 +2052,7 @@ fn invalid_image_error_placeholder(
 fn unsupported_image_error_placeholder(path: &std::path::Path, mime: &str) -> ContentItem {
     ContentItem::InputText {
         text: format!(
-            "Codex cannot attach image at `{}`: unsupported image `{}`.",
+            "Web2Codex cannot attach image at `{}`: unsupported image `{}`.",
             path.display(),
             mime
         ),
@@ -2109,7 +2109,7 @@ pub enum LocalImagePreparation {
 fn unsupported_audio_error_placeholder(path: &std::path::Path) -> ContentItem {
     ContentItem::InputText {
         text: format!(
-            "Codex cannot attach audio at `{}`: unsupported audio format; use wav, mp3, m4a, webm, or ogg.",
+            "Web2Codex cannot attach audio at `{}`: unsupported audio format; use wav, mp3, m4a, webm, or ogg.",
             path.display()
         ),
     }
@@ -2413,6 +2413,11 @@ pub enum FunctionCallOutputContentItem {
         #[serde(flatten)]
         audio: AudioReference,
     },
+    // Do not rename, these are serialized and used directly in the responses API.
+    InputFile {
+        file_url: String,
+        filename: String,
+    },
     EncryptedContent {
         encrypted_content: String,
     },
@@ -2446,7 +2451,7 @@ impl From<ContentItem> for FunctionCallOutputContentItem {
 ///
 /// This conversion is intentionally lossy:
 /// - only `input_text` items are included
-/// - image and audio items are ignored
+/// - image, audio, and file items are ignored
 ///
 /// We use this helper where callers still need a string representation (for
 /// example telemetry previews or legacy string-only output paths) while keeping
@@ -2464,6 +2469,7 @@ pub fn function_call_output_content_items_to_text(
             FunctionCallOutputContentItem::InputText { .. }
             | FunctionCallOutputContentItem::InputImage { .. }
             | FunctionCallOutputContentItem::InputAudio { .. }
+            | FunctionCallOutputContentItem::InputFile { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -2638,20 +2644,33 @@ impl CallToolResult {
         if let Some(structured_content) = &self.structured_content
             && !structured_content.is_null()
         {
-            match serde_json::to_string(structured_content) {
-                Ok(serialized_structured_content) => {
+            let serialized_structured_content = match serde_json::to_string(structured_content) {
+                Ok(serialized) => serialized,
+                Err(error) => {
                     return FunctionCallOutputPayload {
-                        body: FunctionCallOutputBody::Text(serialized_structured_content),
-                        success: Some(self.success()),
-                    };
-                }
-                Err(err) => {
-                    return FunctionCallOutputPayload {
-                        body: FunctionCallOutputBody::Text(err.to_string()),
+                        body: FunctionCallOutputBody::Text(error.to_string()),
                         success: Some(false),
                     };
                 }
+            };
+            let has_non_text_content = self
+                .content
+                .iter()
+                .any(|block| block.get("type").and_then(serde_json::Value::as_str) != Some("text"));
+            if !has_non_text_content {
+                return FunctionCallOutputPayload {
+                    body: FunctionCallOutputBody::Text(serialized_structured_content),
+                    success: Some(self.success()),
+                };
             }
+            let mut content_items = content_items;
+            content_items.push(FunctionCallOutputContentItem::InputText {
+                text: format!("Structured MCP result:\n{serialized_structured_content}"),
+            });
+            return FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::ContentItems(content_items),
+                success: Some(self.success()),
+            };
         }
 
         FunctionCallOutputPayload {
@@ -3645,9 +3664,6 @@ mod tests {
             meta: None,
         };
 
-        let resource_link = serde_json::to_string(&content[1]).expect("serialize resource link");
-        let malformed_audio =
-            serde_json::to_string(&content[2]).expect("serialize malformed audio");
         assert_eq!(
             call_tool_result.as_function_call_output_payload(),
             FunctionCallOutputPayload {
@@ -3656,10 +3672,11 @@ mod tests {
                         text: "caption".to_string(),
                     },
                     FunctionCallOutputContentItem::InputText {
-                        text: resource_link,
+                        text: "MCP resource: notes\nURI: file:///notes.txt".to_string(),
                     },
                     FunctionCallOutputContentItem::InputText {
-                        text: malformed_audio,
+                        text: "Unsupported MCP content block (audio).\nMIME type: audio/wav\nMedia payload unavailable or invalid."
+                            .to_string(),
                     },
                 ]),
                 success: Some(true),
@@ -3668,9 +3685,81 @@ mod tests {
     }
 
     #[test]
-    fn preserves_structured_mcp_content() {
+    fn converts_embedded_resources_without_losing_text_or_media() {
         let call_tool_result = CallToolResult {
-            content: vec![serde_json::json!({"type":"text","text":"ignored"})],
+            content: vec![
+                serde_json::json!({
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///notes.txt",
+                        "mimeType": "text/plain",
+                        "text": "preview: data:image/png;base64,SECRETPIXEL",
+                        "_meta": {"private": "do not expose"},
+                    },
+                }),
+                serde_json::json!({
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///preview.png",
+                        "mimeType": "image/png",
+                        "blob": "PNGBASE64",
+                        "_meta": {"private": "do not expose"},
+                    },
+                }),
+                serde_json::json!({
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///report.pdf",
+                        "mimeType": "application/pdf",
+                        "blob": "PDFBASE64",
+                        "_meta": {"private": "do not expose"},
+                    },
+                }),
+            ],
+            structured_content: None,
+            is_error: Some(false),
+            meta: None,
+        };
+
+        let payload = call_tool_result.as_function_call_output_payload();
+        let Some(items) = payload.content_items() else {
+            panic!("expected content items");
+        };
+        assert_eq!(
+            items[0],
+            FunctionCallOutputContentItem::InputText {
+                text: "MCP resource content (text/plain) at file:///notes.txt:\n\
+                      preview: data:image/png;base64,SECRETPIXEL"
+                    .to_string(),
+            }
+        );
+        assert!(matches!(
+            &items[1],
+            FunctionCallOutputContentItem::InputImage {
+                image: ImageReference::Inline { image_url },
+                ..
+            } if image_url == "data:image/png;base64,PNGBASE64"
+        ));
+        assert_eq!(
+            items[2],
+            FunctionCallOutputContentItem::InputFile {
+                file_url: "data:application/pdf;base64,PDFBASE64".to_string(),
+                filename: "mcp-resource.pdf".to_string(),
+            }
+        );
+        let text_output = function_call_output_content_items_to_text(items).unwrap_or_default();
+        assert!(text_output.contains("SECRETPIXEL"));
+        assert!(!text_output.contains("do not expose"));
+    }
+
+    #[test]
+    fn preserves_structured_mcp_content_with_media() {
+        let call_tool_result = CallToolResult {
+            content: vec![
+                serde_json::json!({"type":"text","text":"caption"}),
+                serde_json::json!({"type":"image","data":"BASE64_IMAGE","mimeType":"image/png"}),
+                serde_json::json!({"type":"audio","data":"BASE64_AUDIO","mimeType":"audio/wav"}),
+            ],
             structured_content: Some(serde_json::json!({"result":"structured"})),
             is_error: Some(false),
             meta: None,
@@ -3679,9 +3768,23 @@ mod tests {
         assert_eq!(
             call_tool_result.as_function_call_output_payload(),
             FunctionCallOutputPayload {
-                body: FunctionCallOutputBody::Text(
-                    serde_json::json!({"result":"structured"}).to_string(),
-                ),
+                body: FunctionCallOutputBody::ContentItems(vec![
+                    FunctionCallOutputContentItem::InputText {
+                        text: "caption".to_string(),
+                    },
+                    FunctionCallOutputContentItem::InputImage {
+                        image: ImageReference::Inline {
+                            image_url: "data:image/png;base64,BASE64_IMAGE".to_string(),
+                        },
+                        detail: Some(DEFAULT_IMAGE_DETAIL),
+                    },
+                    FunctionCallOutputContentItem::inline_audio(
+                        "data:audio/wav;base64,BASE64_AUDIO".to_string(),
+                    ),
+                    FunctionCallOutputContentItem::InputText {
+                        text: "Structured MCP result:\n{\"result\":\"structured\"}".to_string(),
+                    },
+                ]),
                 success: Some(true),
             }
         );
@@ -4325,7 +4428,7 @@ mod tests {
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: format!(
-                        "Codex cannot attach audio at `{}`: unsupported audio format; use wav, mp3, m4a, webm, or ogg.",
+                        "Web2Codex cannot attach audio at `{}`: unsupported audio format; use wav, mp3, m4a, webm, or ogg.",
                         audio_path.display()
                     ),
                 }],
@@ -4349,7 +4452,7 @@ mod tests {
             panic!("expected local audio error placeholder");
         };
         assert!(
-            text.starts_with("Codex could not read the local audio at `missing.wav`: "),
+            text.starts_with("Web2Codex could not read the local audio at `missing.wav`: "),
             "unexpected placeholder: {text}"
         );
     }
@@ -4835,7 +4938,7 @@ mod tests {
             ResponseInputItem::Message { content, .. } => {
                 assert_eq!(content.len(), 1);
                 let expected = format!(
-                    "Codex cannot attach image at `{}`: unsupported image `image/svg+xml`.",
+                    "Web2Codex cannot attach image at `{}`: unsupported image `image/svg+xml`.",
                     svg_path.display()
                 );
                 match &content[0] {

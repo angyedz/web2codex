@@ -8,7 +8,7 @@ expression: normalize_snapshot_paths(terminal.backend().vt100().screen().content
 • Working (0s • esc to interrupt)
 
 
-› Ask Codex to do anything
+› Ask Web2Codex to do anything
 
   gpt-5 default · /tmp/project
   ? for shortcuts

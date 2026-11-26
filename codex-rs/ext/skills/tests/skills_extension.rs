@@ -3304,6 +3304,165 @@ async fn executor_catalog_emits_at_most_four_warnings() -> TestResult {
 }
 
 #[tokio::test]
+async fn host_skills_are_discoverable_and_readable_through_mcp_when_catalog_is_hidden() -> TestResult
+{
+    let codex_home_dir = tempfile::tempdir()?;
+    let skill_dir = codex_home_dir.path().join("skills/on-demand-demo");
+    std::fs::create_dir_all(&skill_dir)?;
+    let skill_contents =
+        "---\nname: on-demand-demo\ndescription: Read on demand.\n---\n# On-demand demo\n";
+    std::fs::write(skill_dir.join("SKILL.md"), skill_contents)?;
+    let codex_home = AbsolutePathBuf::try_from(std::fs::canonicalize(codex_home_dir.path())?)?;
+    let config_layer_stack = ConfigLayerStack::new(
+        Vec::new(),
+        Default::default(),
+        ConfigRequirementsToml::default(),
+    )?;
+    let service = HostSkillsService::new_with_restriction_product(
+        codex_home.clone(),
+        /*bundled_skills_enabled*/ false,
+        /*restriction_product*/ None,
+    );
+    service.set_extra_roots(vec![AbsolutePathBuf::try_from(std::fs::canonicalize(
+        codex_home_dir.path().join("skills"),
+    )?)?]);
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
+    let snapshot = service
+        .snapshot_for_config(
+            &HostSkillsLoadInput::new(codex_home.clone(), Vec::new(), config_layer_stack),
+            Some(&access),
+        )
+        .await;
+    assert!(snapshot.outcome().errors.is_empty());
+
+    let mut config = default_config();
+    config.include_instructions = false;
+    config.bundled_skills_enabled = false;
+    let mut builder = ExtensionRegistryBuilder::new();
+    install(&mut builder, skills_extension_config);
+    let registry = builder.build();
+    let session_store = ExtensionData::new("session-on-demand-skills");
+    let thread_store = ExtensionData::new("thread-on-demand-skills");
+    registry.thread_lifecycle_contributors()[0]
+        .on_thread_start(ThreadStartInput {
+            config: &config,
+            session_source: &SessionSource::Cli,
+            persistent_thread_state_available: true,
+            environments: &[],
+            mcp_resource_client: None,
+            extension_metrics: None,
+            session_store: &session_store,
+            thread_store: &thread_store,
+        })
+        .await;
+    let turn_store = ExtensionData::new("turn-on-demand-skills");
+    turn_store.insert(snapshot);
+    let step_store = ExtensionData::new("step-on-demand-skills");
+    let selected_plugins = SelectedPluginSnapshot::default();
+    prepare_step(
+        &registry,
+        codex_extension_api::StepPreparationInput {
+            turn_id: "turn-on-demand-skills",
+            ready_selected_capability_roots: &[],
+            executor_capability_discovery: None,
+            executor_capability_discovery_v2: None,
+            selected_plugins: &selected_plugins,
+            session_store: &session_store,
+            thread_store: &thread_store,
+            turn_store: &turn_store,
+            step_store: &step_store,
+        },
+    )
+    .await;
+    let skill_prompt_fragments = prepared_turn_input(
+        &registry,
+        TurnInputContext {
+            step_store: &step_store,
+            turn_id: "turn-on-demand-skills".to_string(),
+            user_input: vec![UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            environments: Vec::new(),
+        },
+        None,
+        &session_store,
+        &thread_store,
+        &turn_store,
+    )
+    .await;
+    assert!(skill_prompt_fragments.is_empty());
+    let tools =
+        registry.tool_contributors()[0].tools_for_step(&session_store, &thread_store, &step_store);
+    let list_tool = tools
+        .iter()
+        .find(|tool| tool.tool_name().name == "list")
+        .ok_or("skills.list should remain available with instructions hidden")?;
+    let list_payload = ToolPayload::Function {
+        arguments: serde_json::json!({"authority": {"kind": "host"}}).to_string(),
+    };
+    let listed = list_tool
+        .handle(ToolCall {
+            turn_id: "turn-on-demand-skills".to_string(),
+            call_id: "list-on-demand-skills".to_string(),
+            tool_name: list_tool.tool_name(),
+            model: "gpt-test".to_string(),
+            codex_turn_metadata: None,
+            truncation_policy: TruncationPolicy::Bytes(10_000),
+            source: ToolCallSource::Direct,
+            conversation_history: ConversationHistory::default(),
+            turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: Arc::new(InlineAttachmentStore),
+            ephemeral: false,
+            environments: Vec::new(),
+            payload: list_payload.clone(),
+        })
+        .await?
+        .post_tool_use_response("list-on-demand-skills", &list_payload)
+        .ok_or("skills.list should return a structured host catalog")?;
+    let skill = listed["skills"]
+        .as_array()
+        .and_then(|skills| skills.first())
+        .ok_or("the host skill should be listed")?;
+    assert_eq!(skill["authority"]["kind"], "host");
+    assert_eq!(skill["name"], "on-demand-demo");
+
+    let read_tool = tools
+        .iter()
+        .find(|tool| tool.tool_name().name == "read")
+        .ok_or("skills.read should remain available with instructions hidden")?;
+    let read_payload = ToolPayload::Function {
+        arguments: serde_json::json!({"package": skill["package"]}).to_string(),
+    };
+    let read = read_tool
+        .handle(ToolCall {
+            turn_id: "turn-on-demand-skills".to_string(),
+            call_id: "read-on-demand-skills".to_string(),
+            tool_name: read_tool.tool_name(),
+            model: "gpt-test".to_string(),
+            codex_turn_metadata: None,
+            truncation_policy: TruncationPolicy::Bytes(10_000),
+            source: ToolCallSource::Direct,
+            conversation_history: ConversationHistory::default(),
+            turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: Arc::new(InlineAttachmentStore),
+            ephemeral: false,
+            environments: Vec::new(),
+            payload: read_payload.clone(),
+        })
+        .await?
+        .post_tool_use_response("read-on-demand-skills", &read_payload)
+        .ok_or("skills.read should return the host skill contents")?;
+    assert!(
+        read["contents"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("# On-demand demo")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn host_catalog_compacts_shared_paths_under_budget_pressure() -> TestResult {
     let test_root = test_codex_home();
     let root = test_root.join(

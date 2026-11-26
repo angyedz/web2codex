@@ -283,6 +283,7 @@ impl SkillToolContext {
 #[derive(Deserialize, Hash, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum InstallationSource {
+    Host,
     Cloud,
     Executor { environment_id: String },
 }
@@ -298,6 +299,7 @@ impl InstallationSource {
     fn matches(&self, source: &SkillSourceLocation) -> bool {
         source.enabled
             && match self {
+                Self::Host => source.authority.kind == SkillSourceKind::Host,
                 Self::Cloud => source.authority.kind == SkillSourceKind::Cloud,
                 Self::Executor { environment_id } => {
                     source.authority.kind == SkillSourceKind::Executor
@@ -314,6 +316,10 @@ impl InstallationSource {
 #[serde(untagged)]
 #[schemars(deny_unknown_fields)]
 enum InstallationLocation {
+    Host {
+        skill_root: String,
+        resource: String,
+    },
     Cloud {
         package: String,
         resource: String,
@@ -330,6 +336,17 @@ impl InstallationLocation {
             return None;
         }
         match &source.authority.kind {
+            SkillSourceKind::Host => {
+                let resource = source.main_prompt.as_str().to_string();
+                let skill_root = std::path::Path::new(&resource)
+                    .parent()?
+                    .to_string_lossy()
+                    .into_owned();
+                Some(Self::Host {
+                    skill_root,
+                    resource,
+                })
+            }
             SkillSourceKind::Cloud => Some(Self::Cloud {
                 package: source.package.0.clone(),
                 resource: source.main_prompt.as_str().to_string(),
@@ -341,7 +358,7 @@ impl InstallationLocation {
                     skill_root: path.parent()?.inferred_native_path_string(),
                 })
             }
-            SkillSourceKind::Host | SkillSourceKind::Custom(_) => None,
+            SkillSourceKind::Custom(_) => None,
         }
     }
 }
@@ -349,6 +366,7 @@ impl InstallationLocation {
 #[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum SkillToolAuthority {
+    Host,
     Cloud,
     Executor { id: String },
 }
@@ -356,6 +374,7 @@ pub(crate) enum SkillToolAuthority {
 impl SkillToolAuthority {
     fn selector(&self) -> SkillToolAuthoritySelector {
         match self {
+            Self::Host => SkillToolAuthoritySelector::Host,
             Self::Cloud => SkillToolAuthoritySelector::Cloud,
             Self::Executor { .. } => SkillToolAuthoritySelector::Executor,
         }
@@ -363,13 +382,14 @@ impl SkillToolAuthority {
 
     pub(crate) fn from_authority(authority: &SkillAuthority) -> Option<Self> {
         match &authority.kind {
+            SkillSourceKind::Host => Some(Self::Host),
             SkillSourceKind::Cloud if authority.id == CODEX_APPS_MCP_SERVER_NAME => {
                 Some(Self::Cloud)
             }
             SkillSourceKind::Executor => Some(Self::Executor {
                 id: authority.id.clone(),
             }),
-            SkillSourceKind::Host | SkillSourceKind::Cloud | SkillSourceKind::Custom(_) => None,
+            SkillSourceKind::Cloud | SkillSourceKind::Custom(_) => None,
         }
     }
 }
@@ -465,6 +485,6 @@ fn skill_json_output<T: Serialize>(
     let output = JsonToolOutput::new(value);
     Ok(match authority {
         SkillToolAuthoritySelector::Cloud => Box::new(output.with_external_context()),
-        SkillToolAuthoritySelector::Executor => Box::new(output),
+        SkillToolAuthoritySelector::Host | SkillToolAuthoritySelector::Executor => Box::new(output),
     })
 }

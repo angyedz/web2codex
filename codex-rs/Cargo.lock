@@ -2632,6 +2632,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-segmentation",
  "url",
+ "uuid",
  "vt100",
  "which 8.0.0",
  "windows-sys 0.61.2",
@@ -4748,6 +4749,7 @@ dependencies = [
  "codex-shell-command",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
+ "fslock",
  "include_dir",
  "pretty_assertions",
  "serde",
@@ -4968,6 +4970,7 @@ dependencies = [
  "codex-realtime-webrtc",
  "codex-rollout",
  "codex-sandboxing",
+ "codex-secrets",
  "codex-shell-command",
  "codex-state",
  "codex-terminal-detection",
@@ -5050,7 +5053,8 @@ dependencies = [
  "windows-sys 0.61.2",
  "winsplit",
  "wiremock",
- "zbus 4.4.0",
+ "zbus",
+ "zeroize",
 ]
 
 [[package]]
@@ -5428,6 +5432,8 @@ dependencies = [
  "tray-icon",
  "url",
  "uuid",
+ "windows 0.62.2",
+ "windows-sys 0.61.2",
  "wry",
 ]
 

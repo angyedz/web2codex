@@ -22,6 +22,8 @@ use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use crate::event_processor::handle_last_message;
 
+const WEB2CODEX_PROVIDER_ID: &str = "web2codex";
+
 pub(crate) struct EventProcessorWithHumanOutput {
     bold: Style,
     cyan: Style,
@@ -33,12 +35,14 @@ pub(crate) struct EventProcessorWithHumanOutput {
     yellow: Style,
     show_agent_reasoning: bool,
     show_raw_agent_reasoning: bool,
+    model_provider_id: String,
     last_message_path: Option<PathBuf>,
     final_message: Option<String>,
     final_message_rendered: bool,
     emit_final_message_on_shutdown: bool,
     last_total_token_usage: Option<ThreadTokenUsage>,
     last_turn_diff: String,
+    last_non_retryable_error: Option<String>,
 }
 
 impl EventProcessorWithHumanOutput {
@@ -59,16 +63,21 @@ impl EventProcessorWithHumanOutput {
             yellow: style(Style::new().yellow(), Style::new()),
             show_agent_reasoning: !config.hide_agent_reasoning,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            model_provider_id: config.model_provider_id.clone(),
             last_message_path,
             final_message: None,
             final_message_rendered: false,
             emit_final_message_on_shutdown: false,
             last_total_token_usage: None,
             last_turn_diff: String::new(),
+            last_non_retryable_error: None,
         }
     }
 
     fn render_item_started(&self, item: &ThreadItemPayload) {
+        if !should_render_tool_activity(&self.model_provider_id) {
+            return;
+        }
         match item {
             ThreadItemPayload::CommandExecution { command, cwd, .. } => {
                 eprintln!(
@@ -99,15 +108,29 @@ impl EventProcessorWithHumanOutput {
     }
 
     fn render_item_completed(&mut self, item: ThreadItemPayload) {
+        if !should_render_tool_activity(&self.model_provider_id)
+            && !matches!(
+                &item,
+                ThreadItemPayload::AgentMessage { .. } | ThreadItemPayload::Reasoning { .. }
+            )
+        {
+            return;
+        }
         match item {
             ThreadItemPayload::AgentMessage { text, .. } => {
-                eprintln!(
-                    "{}\n{}",
-                    "codex".style(self.italic).style(self.magenta),
-                    text
+                self.final_message_rendered = should_render_agent_message_immediately(
+                    &self.model_provider_id,
+                    std::io::stdout().is_terminal(),
+                    std::io::stderr().is_terminal(),
                 );
+                if self.final_message_rendered {
+                    eprintln!(
+                        "{}\n{}",
+                        "Web2Codex".style(self.italic).style(self.magenta),
+                        text
+                    );
+                }
                 self.final_message = Some(text);
-                self.final_message_rendered = true;
             }
             ThreadItemPayload::Reasoning {
                 summary, content, ..
@@ -211,6 +234,26 @@ impl EventProcessorWithHumanOutput {
     }
 }
 
+fn should_render_tool_activity(model_provider_id: &str) -> bool {
+    model_provider_id != WEB2CODEX_PROVIDER_ID
+}
+
+fn should_render_auxiliary_progress(model_provider_id: &str) -> bool {
+    model_provider_id != WEB2CODEX_PROVIDER_ID
+}
+
+fn should_render_agent_message_immediately(
+    model_provider_id: &str,
+    stdout_is_terminal: bool,
+    stderr_is_terminal: bool,
+) -> bool {
+    model_provider_id != WEB2CODEX_PROVIDER_ID || (stdout_is_terminal && stderr_is_terminal)
+}
+
+fn should_render_token_usage(model_provider_id: &str) -> bool {
+    model_provider_id != WEB2CODEX_PROVIDER_ID
+}
+
 impl EventProcessor for EventProcessorWithHumanOutput {
     fn print_config_summary(
         &mut self,
@@ -219,7 +262,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         session_configured_event: &SessionConfiguredEvent,
     ) {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
-        eprintln!("OpenAI Codex v{VERSION}\n--------");
+        eprintln!("Web2Codex v{VERSION}\n--------");
         for (key, value) in config_summary_entries(config, session_configured_event) {
             eprintln!("{} {}", format!("{key}:").style(self.bold), value);
         }
@@ -252,11 +295,12 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 CodexStatus::Running
             }
             ServerNotification::Error(notification) => {
-                eprintln!(
-                    "{} {}",
-                    "ERROR:".style(self.red).style(self.bold),
-                    notification.error
-                );
+                let message = &notification.error.message;
+                if notification.will_retry
+                    || should_render_error_once(message, &mut self.last_non_retryable_error)
+                {
+                    eprintln!("{} {}", "ERROR:".style(self.red).style(self.bold), message);
+                }
                 CodexStatus::Running
             }
             ServerNotification::DeprecationNotice(notification) => {
@@ -271,20 +315,24 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 CodexStatus::Running
             }
             ServerNotification::HookStarted(notification) => {
-                eprintln!(
-                    "{} {}",
-                    "hook:".style(self.bold),
-                    format!("{:?}", notification.run.event_name).style(self.dimmed)
-                );
+                if should_render_auxiliary_progress(&self.model_provider_id) {
+                    eprintln!(
+                        "{} {}",
+                        "hook:".style(self.bold),
+                        format!("{:?}", notification.run.event_name).style(self.dimmed)
+                    );
+                }
                 CodexStatus::Running
             }
             ServerNotification::HookCompleted(notification) => {
-                eprintln!(
-                    "{} {} {:?}",
-                    "hook:".style(self.bold),
-                    format!("{:?}", notification.run.event_name).style(self.dimmed),
-                    notification.run.status
-                );
+                if should_render_auxiliary_progress(&self.model_provider_id) {
+                    eprintln!(
+                        "{} {} {:?}",
+                        "hook:".style(self.bold),
+                        format!("{:?}", notification.run.event_name).style(self.dimmed),
+                        notification.run.status
+                    );
+                }
                 CodexStatus::Running
             }
             ServerNotification::ItemStarted(notification) => {
@@ -311,6 +359,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             }
             ServerNotification::TurnCompleted(notification) => match notification.turn.status {
                 TurnStatus::Completed => {
+                    self.last_non_retryable_error = None;
                     let rendered_message = self
                         .final_message_rendered
                         .then(|| self.final_message.clone())
@@ -330,11 +379,22 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     self.final_message_rendered = false;
                     self.emit_final_message_on_shutdown = false;
                     if let Some(error) = notification.turn.error {
-                        eprintln!("{} {}", "ERROR:".style(self.red).style(self.bold), error);
+                        if should_render_error_once(
+                            &error.message,
+                            &mut self.last_non_retryable_error,
+                        ) {
+                            eprintln!(
+                                "{} {}",
+                                "ERROR:".style(self.red).style(self.bold),
+                                error.message
+                            );
+                        }
                     }
+                    self.last_non_retryable_error = None;
                     CodexStatus::InitiateShutdown
                 }
                 TurnStatus::Interrupted => {
+                    self.last_non_retryable_error = None;
                     self.final_message = None;
                     self.final_message_rendered = false;
                     self.emit_final_message_on_shutdown = false;
@@ -344,7 +404,9 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 TurnStatus::InProgress => CodexStatus::Running,
             },
             ServerNotification::TurnDiffUpdated(notification) => {
-                if notification.diff != self.last_turn_diff && !notification.diff.trim().is_empty()
+                if should_render_auxiliary_progress(&self.model_provider_id)
+                    && notification.diff != self.last_turn_diff
+                    && !notification.diff.trim().is_empty()
                 {
                     eprintln!("{}", notification.diff);
                 }
@@ -353,29 +415,32 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 CodexStatus::Running
             }
             ServerNotification::TurnPlanUpdated(notification) => {
-                if let Some(explanation) = notification.explanation {
-                    eprintln!("{}", explanation.style(self.italic));
-                }
-                for step in notification.plan {
-                    match step.status {
-                        codex_app_server_protocol::TurnPlanStepStatus::Completed => {
-                            eprintln!("  {} {}", "✓".style(self.green), step.step);
-                        }
-                        codex_app_server_protocol::TurnPlanStepStatus::InProgress => {
-                            eprintln!("  {} {}", "→".style(self.cyan), step.step);
-                        }
-                        codex_app_server_protocol::TurnPlanStepStatus::Pending => {
-                            eprintln!(
-                                "  {} {}",
-                                "•".style(self.dimmed),
-                                step.step.style(self.dimmed)
-                            );
+                if should_render_auxiliary_progress(&self.model_provider_id) {
+                    if let Some(explanation) = notification.explanation {
+                        eprintln!("{}", explanation.style(self.italic));
+                    }
+                    for step in notification.plan {
+                        match step.status {
+                            codex_app_server_protocol::TurnPlanStepStatus::Completed => {
+                                eprintln!("  {} {}", "✓".style(self.green), step.step);
+                            }
+                            codex_app_server_protocol::TurnPlanStepStatus::InProgress => {
+                                eprintln!("  {} {}", "→".style(self.cyan), step.step);
+                            }
+                            codex_app_server_protocol::TurnPlanStepStatus::Pending => {
+                                eprintln!(
+                                    "  {} {}",
+                                    "•".style(self.dimmed),
+                                    step.step.style(self.dimmed)
+                                );
+                            }
                         }
                     }
                 }
                 CodexStatus::Running
             }
             ServerNotification::TurnStarted(_) => {
+                self.last_non_retryable_error = None;
                 self.last_turn_diff.clear();
                 CodexStatus::Running
             }
@@ -408,7 +473,9 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             Ok(())
         };
 
-        if let Some(usage) = &self.last_total_token_usage {
+        if should_render_token_usage(&self.model_provider_id)
+            && let Some(usage) = &self.last_total_token_usage
+        {
             eprintln!(
                 "{}\n{}",
                 "tokens used".style(self.dimmed),
@@ -430,11 +497,20 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         {
             eprintln!(
                 "{}\n{}",
-                "codex".style(self.italic).style(self.magenta),
+                "Web2Codex".style(self.italic).style(self.magenta),
                 message
             );
         }
         output_result
+    }
+}
+
+fn should_render_error_once(error: &str, last_error: &mut Option<String>) -> bool {
+    if last_error.as_deref() == Some(error) {
+        false
+    } else {
+        *last_error = Some(error.to_string());
+        true
     }
 }
 

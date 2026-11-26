@@ -73,7 +73,7 @@ async fn voice_composer_preserves_normal_colors_across_microphone_states() {
             insta::assert_snapshot!(rows, @"
             0:
             1:  voice ● listening     f9 mute     /voice stop
-            2:    mic ▁▁▁▁▁▁  codex ▁▁▁▁▁▁
+            2:    mic ▁▁▁▁▁▁  Web2Codex ▁▁▁▁▁▁
             3:
             4: › typed
             ");
@@ -636,7 +636,7 @@ async fn compact_voice_meters_keep_real_speaker_history_when_the_microphone_is_m
     let live = render_bottom_popup(&chat, /*width*/ 45);
     let meters = live.lines().find(|line| line.contains("mic")).unwrap();
     assert!(meters.contains("mic ▁▃▄▅▇█"));
-    assert!(meters.contains("codex █▇▅▃▂▁"));
+    assert!(meters.contains("Web2Codex █▇▅▃▂▁"));
     assert_eq!(
         live.lines().filter(|line| line.contains("codex")).count(),
         1
@@ -648,7 +648,7 @@ async fn compact_voice_meters_keep_real_speaker_history_when_the_microphone_is_m
         chat.update_realtime_footer();
         let muted = render_bottom_popup(&chat, /*width*/ 45);
         assert!(muted.contains("mic ▁▁▁▁▁▁"));
-        assert!(muted.contains("codex █▇▅▃▂▁"));
+        assert!(muted.contains("Web2Codex █▇▅▃▂▁"));
     }
     chat.thread_id = Some(ThreadId::new());
     chat.update_realtime_footer();

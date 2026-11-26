@@ -1,4 +1,5 @@
 use crate::app::app_server_requests::ResolvedAppServerRequest;
+use crate::app_event::McpTunnelSetupAction;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::key_hint::KeyBinding;
@@ -48,6 +49,20 @@ pub(crate) trait BottomPaneView: Renderable {
     /// Handle a key event while the view is active. A redraw is always
     /// scheduled after this call.
     fn handle_key_event(&mut self, _key_event: KeyEvent) {}
+
+    /// Apply the result of a background MCP setup action while its wizard is open.
+    fn handle_mcp_tunnel_setup_action_completed(
+        &mut self,
+        _action: McpTunnelSetupAction,
+        _succeeded: bool,
+    ) -> bool {
+        false
+    }
+
+    /// Handle a mouse event while this view is active. Return true when the event belongs to the view.
+    fn handle_mouse_event(&mut self, _mouse_event: crossterm::event::MouseEvent) -> bool {
+        false
+    }
 
     /// Handle a configured action while preserving the physical key that triggered it.
     fn handle_key_event_with_activation_key(

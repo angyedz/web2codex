@@ -38,8 +38,13 @@ fn main() -> anyhow::Result<()> {
             .config_overrides
             .prepend_root_overrides(top_cli.config_overrides);
 
-        run_main(inner, arg0_paths).await?;
-        Ok(())
+        match run_main(inner, arg0_paths).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.downcast_ref::<codex_exec::ExecTurnFailed>().is_some() => {
+                std::process::exit(1);
+            }
+            Err(err) => Err(err),
+        }
     })
 }
 

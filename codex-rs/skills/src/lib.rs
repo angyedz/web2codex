@@ -82,6 +82,21 @@ pub fn install_system_skills(codex_home: &AbsolutePathBuf) -> Result<(), SystemS
     fs::create_dir_all(skills_root_dir.as_path())
         .map_err(|source| SystemSkillsError::io("create skills root dir", source))?;
 
+    // Several Web2Codex processes can start at once when a request fans out to
+    // subagents. Serialize the shared cache replacement across processes so a
+    // second startup cannot delete the directory while the first is writing it.
+    let install_lock_path = skills_root_dir.join(".system-skills-install.lock");
+    let mut _install_lock =
+        fslock::LockFile::open(install_lock_path.as_path()).map_err(|source| {
+            SystemSkillsError::io(
+                "open system skills install lock",
+                std::io::Error::other(source),
+            )
+        })?;
+    _install_lock.lock().map_err(|source| {
+        SystemSkillsError::io("lock system skills install", std::io::Error::other(source))
+    })?;
+
     let dest_system = system_cache_root_dir(codex_home);
 
     let marker_path = dest_system.join(SYSTEM_SKILLS_MARKER_FILENAME);
@@ -194,7 +209,19 @@ impl SystemSkillsError {
 #[cfg(test)]
 mod tests {
     use super::SYSTEM_SKILLS_DIR;
+    use super::SYSTEM_SKILLS_MARKER_FILENAME;
     use super::collect_fingerprint_items;
+    use super::embedded_system_skills_fingerprint;
+    use super::install_system_skills;
+    use super::read_marker;
+    use super::system_cache_root_dir;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    use std::fs;
+    use std::process::Command;
+    use std::process::Stdio;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    use std::thread;
 
     #[test]
     fn fingerprint_traverses_nested_entries() {
@@ -213,5 +240,108 @@ mod tests {
                 .binary_search_by(|probe| probe.as_str().cmp("skill-creator/scripts/init_skill.py"))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn concurrent_system_skill_installations_share_a_valid_cache() {
+        static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
+        let unique = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+        let temp_home = std::env::temp_dir().join(format!(
+            "codex-skills-concurrent-install-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_home).expect("create temporary CODEX_HOME");
+        let codex_home = AbsolutePathBuf::try_from(temp_home.clone())
+            .expect("temporary CODEX_HOME path should be absolute");
+
+        let installers = (0..8)
+            .map(|_| {
+                let codex_home = codex_home.clone();
+                thread::spawn(move || install_system_skills(&codex_home))
+            })
+            .collect::<Vec<_>>();
+
+        for installer in installers {
+            installer
+                .join()
+                .expect("installer thread should not panic")
+                .expect("concurrent install should succeed");
+        }
+
+        let cache_root = system_cache_root_dir(&codex_home);
+        let marker = cache_root.join(SYSTEM_SKILLS_MARKER_FILENAME);
+        assert_eq!(
+            read_marker(&marker).expect("installed marker should be readable"),
+            embedded_system_skills_fingerprint()
+        );
+        fs::remove_dir_all(&temp_home).expect("remove temporary CODEX_HOME");
+    }
+
+    #[test]
+    fn concurrent_system_skill_installations_across_processes_share_a_valid_cache() {
+        static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+        const CHILD_HOME_ENV: &str = "CODEX_SKILLS_INSTALL_TEST_CHILD_HOME";
+
+        let unique = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+        let temp_home = std::env::temp_dir().join(format!(
+            "codex-skills-process-install-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_home).expect("create temporary CODEX_HOME");
+
+        let executable = std::env::current_exe().expect("locate current test executable");
+        let mut children = Vec::new();
+        let mut spawn_errors = Vec::new();
+        for _ in 0..8 {
+            match Command::new(&executable)
+                .args(["--exact", "tests::install_system_skills_child_process"])
+                .env(CHILD_HOME_ENV, &temp_home)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => children.push(child),
+                Err(error) => spawn_errors.push(error.to_string()),
+            }
+        }
+
+        let statuses = children
+            .into_iter()
+            .map(|mut child| child.wait())
+            .collect::<Vec<_>>();
+        let cache_root = temp_home.join("skills").join(".system");
+        let marker = cache_root.join(SYSTEM_SKILLS_MARKER_FILENAME);
+        let installed_fingerprint = fs::read_to_string(&marker);
+        let cleanup_result = fs::remove_dir_all(&temp_home);
+
+        assert!(
+            spawn_errors.is_empty(),
+            "could not launch child tests: {spawn_errors:?}"
+        );
+        assert!(
+            statuses
+                .iter()
+                .all(|status| status.as_ref().is_ok_and(|status| status.success())),
+            "one or more child installers failed: {statuses:?}"
+        );
+        assert_eq!(
+            installed_fingerprint
+                .expect("concurrent child installs should leave a readable marker")
+                .trim(),
+            embedded_system_skills_fingerprint()
+        );
+        cleanup_result.expect("remove temporary CODEX_HOME");
+    }
+
+    #[test]
+    fn install_system_skills_child_process() {
+        const CHILD_HOME_ENV: &str = "CODEX_SKILLS_INSTALL_TEST_CHILD_HOME";
+        let Some(home) = std::env::var_os(CHILD_HOME_ENV) else {
+            return;
+        };
+        let codex_home = AbsolutePathBuf::try_from(std::path::PathBuf::from(home))
+            .expect("child CODEX_HOME is absolute");
+        install_system_skills(&codex_home).expect("child process should install system skills");
     }
 }

@@ -102,6 +102,18 @@ def build_package_dir(
         )
     write_json(package_dir / "codex-package.json", metadata)
 
+    if variant.name == "web2codex" and spec.is_windows:
+        (package_dir / "web2codex.cmd").write_bytes(
+            b'@echo off\r\nsetlocal\r\nset "CODEX_WINDOWS_REGISTERED_CORE=0"\r\n"%~dp0bin\\web2codex.exe" %*\r\n'
+        )
+        (package_dir / "README-FIRST.txt").write_text(
+            "Web2Codex for Windows\n\n"
+            "In PowerShell, open this extracted folder and run:\n"
+            "    .\\web2codex.cmd\n\n"
+            "If you add this folder to PATH, you can run web2codex.cmd from any folder.\n",
+            encoding="utf-8",
+        )
+
 
 def validate_package_dir(
     package_dir: Path,
@@ -172,10 +184,22 @@ def validate_package_dir(
         required_files.append(browser_path)
         executable_files.append(browser_path)
 
+    if variant.name == "web2codex" and spec.is_windows:
+        required_files.extend([Path("web2codex.cmd"), Path("README-FIRST.txt")])
+
     for relative_file in required_files:
         path = package_dir / relative_file
         if not path.is_file():
             raise RuntimeError(f"Missing package file: {relative_file}")
+
+    if variant.name == "web2codex" and spec.is_windows:
+        launcher = (package_dir / "web2codex.cmd").read_bytes()
+        if b'"%~dp0bin\\web2codex.exe" %*' not in launcher:
+            raise RuntimeError("Web2Codex Windows launcher does not target bin/web2codex.exe")
+        if b'set "CODEX_WINDOWS_REGISTERED_CORE=0"' not in launcher:
+            raise RuntimeError(
+                "Web2Codex Windows launcher does not clear an inherited registered-core marker"
+            )
 
     if not spec.is_windows:
         for relative_file in executable_files:

@@ -1,3 +1,3 @@
-# Authentication
+# Signing in to Web2Codex
 
-For information about Codex CLI authentication, see [this documentation](https://developers.openai.com/codex/auth).
+Web2Codex signs in through its private ChatGPT browser window and keeps that browser session in a separate profile. See the [ChatGPT Web setup instructions](../README.md#chatgpt-web) for details.

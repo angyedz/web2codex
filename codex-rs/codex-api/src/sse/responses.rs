@@ -563,6 +563,7 @@ pub fn process_responses_event(
             }
         }
         "codex.response.metadata"
+        | "codex.response.keepalive"
         | "response.content_part.added"
         | "response.content_part.done"
         | "response.custom_tool_call_input.done"
@@ -807,6 +808,47 @@ mod tests {
 
     fn idle_timeout() -> Duration {
         Duration::from_millis(1000)
+    }
+
+    #[tokio::test]
+    async fn keepalive_data_events_reset_the_sse_idle_timeout() {
+        let events = vec![
+            (
+                Duration::from_millis(20),
+                Bytes::from_static(
+                    b"event: codex.response.keepalive\ndata: {\"type\":\"codex.response.keepalive\"}\n\n",
+                ),
+            ),
+            (
+                Duration::from_millis(20),
+                Bytes::from_static(
+                    b"event: codex.response.keepalive\ndata: {\"type\":\"codex.response.keepalive\"}\n\n",
+                ),
+            ),
+            (
+                Duration::from_millis(20),
+                Bytes::from_static(
+                    b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp1\",\"end_turn\":true}}\n\n",
+                ),
+            ),
+        ];
+        let stream = stream::iter(events).then(|(delay, chunk)| async move {
+            tokio::time::sleep(delay).await;
+            Ok::<_, TransportError>(chunk)
+        });
+        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
+        tokio::spawn(process_sse(
+            Box::pin(stream),
+            tx,
+            Duration::from_millis(35),
+            /*telemetry*/ None,
+        ));
+
+        let mut received = Vec::new();
+        while let Some(event) = rx.recv().await {
+            received.push(event.expect("keepalive must not fail the response stream"));
+        }
+        assert_matches!(received.as_slice(), [ResponseEvent::Completed { response_id, .. }] if response_id == "resp1");
     }
 
     #[tokio::test]

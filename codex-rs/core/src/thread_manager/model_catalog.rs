@@ -40,6 +40,13 @@ pub fn build_startup_models(
     installation_id: String,
     factory: Arc<dyn ModelCatalogFactory>,
 ) -> StartupModels {
+    // Web2Codex's live `/models` endpoint is authoritative. A user's static catalog may
+    // describe the original Codex backend and must not make stale official IDs look valid.
+    let catalog = if config.model_provider_id == "web2codex" {
+        None
+    } else {
+        config.model_catalog.clone()
+    };
     let runtime_auth = RuntimeAuthSlot::default();
     let runtime = runtime_for_config(
         &runtime_auth,
@@ -49,7 +56,7 @@ pub fn build_startup_models(
     );
     let catalog = ThreadModelCatalog::new(
         config.model_provider.clone(),
-        config.model_catalog.clone(),
+        catalog,
         factory,
         config.features.enabled(Feature::ApiKeyModelDiscovery),
         ProviderAuthContext {
@@ -87,7 +94,11 @@ pub fn build_models_manager(
     };
     ModelCatalogSettings::disk(config.codex_home.to_path_buf()).build(
         auth.model_provider(config.model_provider.clone()),
-        config.model_catalog.clone(),
+        if config.model_provider_id == "web2codex" {
+            None
+        } else {
+            config.model_catalog.clone()
+        },
         config.features.enabled(Feature::ApiKeyModelDiscovery),
     )
 }
@@ -126,11 +137,15 @@ impl ThreadModelCatalog {
         originator: &str,
         session_source: &SessionSource,
     ) -> SharedModelsManager {
-        let models = config.model_catalog.as_ref().or_else(|| {
-            self.catalog
-                .as_ref()
-                .filter(|_| self.matches_catalog_provider(&config.model_provider))
-        });
+        let models = if config.model_provider_id == "web2codex" {
+            None
+        } else {
+            config.model_catalog.as_ref().or_else(|| {
+                self.catalog
+                    .as_ref()
+                    .filter(|_| self.matches_catalog_provider(&config.model_provider))
+            })
+        };
         let auth = ProviderAuthContext {
             credentials,
             runtime_auth: runtime.map(|runtime| (runtime, config.runtime_auth_mode)),

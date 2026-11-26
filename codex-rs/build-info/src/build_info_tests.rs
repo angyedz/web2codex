@@ -7,8 +7,19 @@ use tempfile::tempdir;
 
 use crate::BuildInfo;
 use crate::build_id;
+use crate::is_newer_stable_release;
 
 const BUILD_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+#[test]
+fn stable_release_comparison_uses_semver_precedence() {
+    let installed = "0.1.0-prealpha.20261125";
+    assert_eq!(is_newer_stable_release("0.1.0", installed), Some(true));
+    assert_eq!(is_newer_stable_release("0.0.9", installed), Some(false));
+    assert_eq!(is_newer_stable_release("0.1.0", "0.1.0+local"), Some(false));
+    assert_eq!(is_newer_stable_release("0.2.0-alpha.1", installed), None);
+    assert_eq!(is_newer_stable_release("0.1.0", "unknown"), None);
+}
 
 /// A packaged runtime takes its release identity from its package manifest.
 #[test]

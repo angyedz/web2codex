@@ -10,7 +10,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -315,12 +314,57 @@ impl CapturedSideWork {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WebBrowserAction {
+    Open,
+    Login,
+    Hide,
+    Models,
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpTunnelSetupAction {
+    OpenPlatformPage,
+    StartTunnel,
+    SmokeTest,
+}
+
+impl WebBrowserAction {
+    pub(crate) fn argument(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Login => "login",
+            Self::Hide => "hide",
+            Self::Models => "models",
+            Self::Status => "status",
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
     OpenDaemonMenu,
-    /// Run the private MCP tunnel setup wizard in the current terminal session.
+    /// Open the native Web2Codex MCP tunnel setup wizard.
     OpenMcpTunnelSetup,
+    /// Open an OpenAI settings page in the persistent Web2Codex browser.
+    OpenMcpSetupPage(String),
+    /// Run tunnel setup actions without taking over the TUI terminal.
+    StartMcpTunnelSetup,
+    RunMcpTunnelSmokeTest {
+        cancellation: CancellationToken,
+    },
+    McpTunnelSetupActionCompleted {
+        action: McpTunnelSetupAction,
+        succeeded: bool,
+    },
+    ManageWebBrowser(WebBrowserAction),
+    /// Close a completed or interrupted subagent's private browser tab without opening the browser window.
+    CloseWebBrowserAgentTab {
+        thread_id: String,
+        agent_path: String,
+    },
     ConfirmDaemonRestart,
     RunDaemonRestart,
     ConfirmDaemonUpdate(crate::update_action::DaemonUpdateSource),

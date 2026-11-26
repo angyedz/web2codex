@@ -2,14 +2,14 @@
 source: cli/tests/doctor_enterprise_network.rs
 expression: stdout
 ---
-Codex Doctor v0.0.0
+Web2Codex Doctor v0.0.0
 
 Notes
-   [XX] config       config could not be loaded - Fix the reported config error, then rerun codex doctor.
+   [XX] config       config could not be loaded - Fix the reported config error, then rerun web2codex doctor.
 -------------------------------------------------------------
 
 Configuration
-  [XX] config       config could not be loaded - Fix the reported config error, then rerun codex doctor.
+  [XX] config       config could not be loaded - Fix the reported config error, then rerun web2codex doctor.
       feature flags            0 enabled · 0 overridden
       error                    invalid configuration
       file                     <CODEX_HOME>/config.toml

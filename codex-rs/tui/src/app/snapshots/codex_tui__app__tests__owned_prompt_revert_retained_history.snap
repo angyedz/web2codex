@@ -2,9 +2,9 @@
 source: tui/src/app/tests.rs
 expression: transcript
 ---
-  /init - create an AGENTS.md file with instructions for Codex
+  /init - create an AGENTS.md file with instructions for Web2Codex
   /status - show current session configuration
-  /permissions - choose what Codex is allowed to do
+  /permissions - choose what Web2Codex is allowed to do
   /model - choose what model and reasoning effort to use
   /review - review any changes and find issues
 

@@ -411,7 +411,7 @@ pub(super) fn reapply_raw_mode_after_resume() -> Result<()> {
     enable_raw_mode()
 }
 
-/// Restore the terminal after Codex is exiting.
+/// Restore the terminal after Web2Codex is exiting.
 ///
 /// Uses a stronger keyboard reset than `restore` so the parent shell recovers even if a
 /// terminal missed the stack pop that normally pairs with [`set_modes`].

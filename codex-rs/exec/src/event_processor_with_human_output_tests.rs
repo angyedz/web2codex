@@ -27,6 +27,11 @@ use super::final_message_from_turn_items;
 use super::reasoning_text;
 use super::should_print_final_message_to_stdout;
 use super::should_print_final_message_to_tty;
+use super::should_render_agent_message_immediately;
+use super::should_render_auxiliary_progress;
+use super::should_render_error_once;
+use super::should_render_token_usage;
+use super::should_render_tool_activity;
 use crate::event_processor::EventProcessor;
 
 #[test]
@@ -80,12 +85,14 @@ fn turn_diff_notifications_render_only_changes() -> anyhow::Result<()> {
         yellow: Style::new(),
         show_agent_reasoning: true,
         show_raw_agent_reasoning: false,
+        model_provider_id: "openai".to_string(),
         last_message_path: None,
         final_message: None,
         final_message_rendered: false,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
         last_turn_diff: String::new(),
+        last_non_retryable_error: None,
     };
     let first = "@@ -1 +1 @@\n-value=1\n+value=2";
     let changed = "@@ -1 +1 @@\n-value=1\n+value=3";
@@ -130,6 +137,24 @@ fn turn_diff_notifications_render_only_changes() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[test]
+fn identical_server_and_turn_errors_render_only_once() {
+    let mut last_error = None;
+
+    assert!(should_render_error_once(
+        "stream disconnected before completion",
+        &mut last_error,
+    ));
+    assert!(!should_render_error_once(
+        "stream disconnected before completion",
+        &mut last_error,
+    ));
+    assert!(should_render_error_once(
+        "a different failure",
+        &mut last_error
+    ));
 }
 
 #[test]
@@ -185,6 +210,46 @@ fn suppresses_final_tty_message_when_already_rendered() {
         /*stdout_is_terminal*/ true,
         /*stderr_is_terminal*/ true
     ));
+}
+
+#[test]
+fn web2codex_human_output_hides_tool_payloads() {
+    assert!(!should_render_tool_activity("web2codex"));
+    assert!(should_render_tool_activity("openai"));
+}
+
+#[test]
+fn web2codex_human_output_hides_auxiliary_progress() {
+    assert!(!should_render_auxiliary_progress("web2codex"));
+    assert!(should_render_auxiliary_progress("openai"));
+}
+
+#[test]
+fn web2codex_defers_final_message_to_stdout_when_output_is_piped() {
+    assert!(!should_render_agent_message_immediately(
+        "web2codex",
+        false,
+        false
+    ));
+    assert!(!should_render_agent_message_immediately(
+        "web2codex",
+        true,
+        false
+    ));
+    assert!(should_render_agent_message_immediately(
+        "web2codex",
+        true,
+        true
+    ));
+    assert!(should_render_agent_message_immediately(
+        "openai", false, false
+    ));
+}
+
+#[test]
+fn web2codex_hides_token_usage_from_user_facing_output() {
+    assert!(!should_render_token_usage("web2codex"));
+    assert!(should_render_token_usage("openai"));
 }
 
 #[test]
@@ -287,7 +352,7 @@ fn summarizes_managed_read_only_permission_profile() {
 
 #[tokio::test]
 async fn config_summary_entries_include_runtime_workspace_roots() {
-    let codex_home = tempfile::tempdir().expect("create codex home");
+    let codex_home = tempfile::tempdir().expect("create Web2Codex home");
     let cwd = tempfile::tempdir().expect("create cwd");
     let extra_root = tempfile::tempdir().expect("create extra root");
     let mut config = ConfigBuilder::default()
@@ -414,12 +479,14 @@ fn turn_completed_recovers_final_message_from_turn_items() {
         yellow: Style::new(),
         show_agent_reasoning: true,
         show_raw_agent_reasoning: false,
+        model_provider_id: "openai".to_string(),
         last_message_path: None,
         final_message: None,
         final_message_rendered: false,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
         last_turn_diff: String::new(),
+        last_non_retryable_error: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -467,12 +534,14 @@ fn turn_completed_overwrites_stale_final_message_from_turn_items() {
         yellow: Style::new(),
         show_agent_reasoning: true,
         show_raw_agent_reasoning: false,
+        model_provider_id: "openai".to_string(),
         last_message_path: None,
         final_message: Some("stale answer".to_string()),
         final_message_rendered: true,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
         last_turn_diff: String::new(),
+        last_non_retryable_error: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -521,12 +590,14 @@ fn turn_completed_preserves_streamed_final_message_when_turn_items_are_empty() {
         yellow: Style::new(),
         show_agent_reasoning: true,
         show_raw_agent_reasoning: false,
+        model_provider_id: "openai".to_string(),
         last_message_path: None,
         final_message: Some("streamed answer".to_string()),
         final_message_rendered: false,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
         last_turn_diff: String::new(),
+        last_non_retryable_error: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -567,12 +638,14 @@ fn turn_failed_clears_stale_final_message() {
         yellow: Style::new(),
         show_agent_reasoning: true,
         show_raw_agent_reasoning: false,
+        model_provider_id: "openai".to_string(),
         last_message_path: None,
         final_message: Some("partial answer".to_string()),
         final_message_rendered: true,
         emit_final_message_on_shutdown: true,
         last_total_token_usage: None,
         last_turn_diff: String::new(),
+        last_non_retryable_error: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -614,12 +687,14 @@ fn turn_interrupted_clears_stale_final_message() {
         yellow: Style::new(),
         show_agent_reasoning: true,
         show_raw_agent_reasoning: false,
+        model_provider_id: "openai".to_string(),
         last_message_path: None,
         final_message: Some("partial answer".to_string()),
         final_message_rendered: true,
         emit_final_message_on_shutdown: true,
         last_total_token_usage: None,
         last_turn_diff: String::new(),
+        last_non_retryable_error: None,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(

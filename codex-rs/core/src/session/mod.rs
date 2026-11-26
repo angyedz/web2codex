@@ -628,6 +628,12 @@ impl Session {
         session_source: &SessionSource,
         allow_provider_model_fallback: bool,
     ) -> CodexResult<(String, CatalogModel)> {
+        let web2codex_provider = config.model_provider_id == "web2codex";
+        if web2codex_provider && config.model_provider.model_catalog_url.is_none() {
+            return Err(CodexErr::InvalidRequest(
+                "Web2Codex has no ChatGPT Web model catalog configured. No official model catalog or backend fallback is available.".to_string(),
+            ));
+        }
         // Child catalogs are initialized by their selector. Reading only memory here
         // preserves the loaded snapshot shared with the parent.
         let refresh_strategy = if session_source.is_non_root_agent() {
@@ -635,19 +641,46 @@ impl Session {
         } else {
             RefreshStrategy::OnlineIfUncached
         };
-        if !session_source.is_non_root_agent() {
-            let _ = models_manager
+        let model = if web2codex_provider {
+            // The trait's default get_default_model implementation preserves any explicit
+            // model, even when provider fallback is enabled. Resolve Web2Codex selections
+            // directly against its live catalog so stale Codex IDs cannot reach the web
+            // bridge or silently fall through to another backend.
+            let available_models = models_manager
                 .list_models(refresh_strategy, config.http_client_factory())
                 .await;
-        }
-        let model = models_manager
-            .get_default_model(
-                &config.model,
-                allow_provider_model_fallback,
-                refresh_strategy,
-                config.http_client_factory(),
-            )
-            .await;
+            if available_models.is_empty() {
+                return Err(CodexErr::InvalidRequest(
+                    "The ChatGPT Web model catalog is empty. Sign in with `web2codex web login`, then check `web2codex web models`. Web2Codex will not switch to an official model catalog or backend.".to_string(),
+                ));
+            }
+            config
+                .model
+                .as_deref()
+                .and_then(|requested_model| {
+                    available_models
+                        .iter()
+                        .find(|preset| preset.model == requested_model)
+                })
+                .or_else(|| available_models.iter().find(|preset| preset.is_default))
+                .or_else(|| available_models.first())
+                .map(|preset| preset.model.clone())
+                .unwrap_or_default()
+        } else {
+            if !session_source.is_non_root_agent() {
+                let _ = models_manager
+                    .list_models(refresh_strategy, config.http_client_factory())
+                    .await;
+            }
+            models_manager
+                .get_default_model(
+                    &config.model,
+                    allow_provider_model_fallback,
+                    refresh_strategy,
+                    config.http_client_factory(),
+                )
+                .await
+        };
         if model.trim().is_empty() {
             return Err(CodexErr::InvalidRequest(
                 "No models are available. Set `model` explicitly or check your model catalog configuration.".to_string(),
@@ -844,6 +877,8 @@ impl Session {
             Arc::clone(&auth_manager),
             &installation_id,
         );
+        let requested_model = config.model.clone();
+        let web2codex_provider = config.model_provider_id == "web2codex";
         let (model, model_info) = Self::resolve_startup_model(
             models_manager.as_ref(),
             &config,
@@ -851,6 +886,18 @@ impl Session {
             allow_provider_model_fallback,
         )
         .await?;
+        if web2codex_provider
+            && let Some(requested_model) = requested_model.as_deref()
+            && requested_model != model
+        {
+            let warning = format!(
+                "The saved model `{requested_model}` is not in the current ChatGPT Web catalog. This session is using `{model}`. Your config and saved chat history were left unchanged; select a model from the current list with `/model`."
+            );
+            let config = Arc::make_mut(&mut config);
+            if !config.startup_warnings.contains(&warning) {
+                config.startup_warnings.push(warning);
+            }
+        }
         let requested_approvals_reviewer = config
             .requested_approvals_reviewer
             .unwrap_or(config.approvals_reviewer);
@@ -5830,6 +5877,13 @@ impl Session {
                 }
             }
             budget_result?;
+        } else if turn_context.config.model_provider_id == "web2codex"
+            && matches!(context, TokenUsageContext::Sampling { .. })
+        {
+            // The web transport leaves server usage unknown. Refresh the local
+            // context estimate for the footer and compaction, while leaving
+            // recorded spending and per-model usage counters untouched.
+            self.recompute_token_usage(turn_context).await;
         }
         Ok(())
     }

@@ -1333,7 +1333,9 @@ impl App {
                     }
                 }
                 TuiEvent::Mouse(mouse) => {
-                    self.start_right_click_paste(tui, mouse, ClipboardPasteContext::Composer);
+                    if !self.chat_widget.handle_bottom_pane_mouse(mouse) {
+                        self.start_right_click_paste(tui, mouse, ClipboardPasteContext::Composer);
+                    }
                 }
                 TuiEvent::FocusLost => {}
             }

@@ -77,9 +77,6 @@ pub use windows::WindowsSystemConfigNamespaceProbe;
 #[cfg(windows)]
 pub use windows::probe_windows_system_config_namespace;
 
-#[cfg(unix)]
-const SYSTEM_CONFIG_TOML_FILE_UNIX: &str = "/etc/codex/config.toml";
-
 #[cfg(windows)]
 const DEFAULT_PROGRAM_DATA_DIR_WINDOWS: &str = r"C:\ProgramData";
 
@@ -111,8 +108,9 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// composed with config-style TOML merging plus field-specific handling for
 /// hooks, rules, deny-read permissions, and remote sandbox config:
 ///
-/// - system    `/etc/codex/requirements.toml` (Unix) or
-///   `%ProgramData%\OpenAI\Codex\requirements.toml` (Windows)
+/// - system    `/etc/codex/requirements.toml` or `%ProgramData%\OpenAI\Codex\requirements.toml`
+///   in Codex mode; `/etc/web2codex/requirements.toml` or `%ProgramData%\Web2Codex\requirements.toml`
+///   in Web2Codex mode
 /// - cloud:    enterprise-managed cloud config bundle requirements
 /// - legacy:   `/etc/codex/managed_config.toml` (Unix) reinterpreted as
 ///   requirements.toml
@@ -125,8 +123,8 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 ///
 /// - package:  optional default configuration supplied with the Codex package
 /// - admin:    managed preferences (*)
-/// - system    `/etc/codex/config.toml` (Unix) or
-///   `%ProgramData%\OpenAI\Codex\config.toml` (Windows)
+/// - system    product-specific machine configuration (`/etc/web2codex` or `%ProgramData%\Web2Codex`
+///   for Web2Codex; `/etc/codex` or `%ProgramData%\OpenAI\Codex` for Codex)
 /// - cloud     enterprise-managed cloud config bundle fragments
 /// - user      `${CODEX_HOME}/config.toml`
 /// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected
@@ -770,7 +768,17 @@ pub async fn load_requirements_toml(
 
 #[cfg(unix)]
 fn system_requirements_toml_file() -> io::Result<AbsolutePathBuf> {
-    AbsolutePathBuf::from_absolute_path(Path::new("/etc/codex/requirements.toml"))
+    unix_system_requirements_toml_file_for_product(is_web2codex_runtime())
+}
+
+#[cfg(unix)]
+fn unix_system_requirements_toml_file_for_product(web2codex: bool) -> io::Result<AbsolutePathBuf> {
+    let path = if web2codex {
+        "/etc/web2codex/requirements.toml"
+    } else {
+        "/etc/codex/requirements.toml"
+    };
+    AbsolutePathBuf::from_absolute_path(Path::new(path))
 }
 
 #[cfg(windows)]
@@ -825,7 +833,17 @@ fn has_local_managed_configuration_with_system_requirements_path(
 
 #[cfg(unix)]
 pub fn system_config_toml_file() -> io::Result<AbsolutePathBuf> {
-    AbsolutePathBuf::from_absolute_path(Path::new(SYSTEM_CONFIG_TOML_FILE_UNIX))
+    unix_system_config_toml_file_for_product(is_web2codex_runtime())
+}
+
+#[cfg(unix)]
+fn unix_system_config_toml_file_for_product(web2codex: bool) -> io::Result<AbsolutePathBuf> {
+    let path = if web2codex {
+        "/etc/web2codex/config.toml"
+    } else {
+        "/etc/codex/config.toml"
+    };
+    AbsolutePathBuf::from_absolute_path(Path::new(path))
 }
 
 #[cfg(windows)]
@@ -843,7 +861,12 @@ fn system_config_toml_file_with_overrides(
 }
 
 #[cfg(windows)]
-fn windows_codex_system_dir() -> PathBuf {
+fn windows_system_config_dir() -> PathBuf {
+    windows_system_config_dir_for_product(is_web2codex_runtime())
+}
+
+#[cfg(windows)]
+fn windows_system_config_dir_for_product(web2codex: bool) -> PathBuf {
     let program_data = windows_program_data_dir_from_known_folder().unwrap_or_else(|err| {
         tracing::warn!(
             error = %err,
@@ -851,14 +874,23 @@ fn windows_codex_system_dir() -> PathBuf {
         );
         PathBuf::from(DEFAULT_PROGRAM_DATA_DIR_WINDOWS)
     });
-    program_data.join("OpenAI").join("Codex")
+    if web2codex {
+        program_data.join("Web2Codex")
+    } else {
+        program_data.join("OpenAI").join("Codex")
+    }
 }
 
 #[cfg(windows)]
 fn windows_system_requirements_toml_file() -> io::Result<AbsolutePathBuf> {
+    let policy_key = if is_web2codex_runtime() {
+        r"SOFTWARE\Policies\Web2Codex"
+    } else {
+        r"SOFTWARE\Policies\OpenAI\Codex"
+    };
     if let Ok(path) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
         .open_subkey_with_flags(
-            r"SOFTWARE\Policies\OpenAI\Codex",
+            policy_key,
             winreg::enums::KEY_READ | winreg::enums::KEY_WOW64_64KEY,
         )
         .and_then(|key| key.get_value::<std::ffi::OsString, _>("RequirementsPath"))
@@ -866,14 +898,23 @@ fn windows_system_requirements_toml_file() -> io::Result<AbsolutePathBuf> {
         return AbsolutePathBuf::from_absolute_path_checked(path);
     }
 
-    let requirements_toml_file = windows_codex_system_dir().join("requirements.toml");
+    let requirements_toml_file = windows_system_config_dir().join("requirements.toml");
     AbsolutePathBuf::try_from(requirements_toml_file)
 }
 
 #[cfg(windows)]
 fn windows_system_config_toml_file() -> io::Result<AbsolutePathBuf> {
-    let config_toml_file = windows_codex_system_dir().join("config.toml");
+    windows_system_config_toml_file_for_product(is_web2codex_runtime())
+}
+
+#[cfg(windows)]
+fn windows_system_config_toml_file_for_product(web2codex: bool) -> io::Result<AbsolutePathBuf> {
+    let config_toml_file = windows_system_config_dir_for_product(web2codex).join("config.toml");
     AbsolutePathBuf::try_from(config_toml_file)
+}
+
+fn is_web2codex_runtime() -> bool {
+    std::env::var_os("WEB2CODEX_HOME").is_some_and(|value| !value.is_empty())
 }
 
 #[cfg(windows)]
@@ -2201,33 +2242,57 @@ foo = "xyzzy"
     #[cfg(windows)]
     #[test]
     fn windows_codex_system_dir_uses_expected_suffix() {
-        let expected = windows_program_data_dir_from_known_folder()
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_PROGRAM_DATA_DIR_WINDOWS))
-            .join("OpenAI")
-            .join("Codex");
-        assert_eq!(windows_codex_system_dir(), expected);
-        assert!(windows_codex_system_dir().ends_with(Path::new("OpenAI").join("Codex")));
+        let program_data = windows_program_data_dir_from_known_folder()
+            .unwrap_or_else(|_| PathBuf::from(DEFAULT_PROGRAM_DATA_DIR_WINDOWS));
+        assert_eq!(
+            windows_system_config_dir_for_product(false),
+            program_data.join("OpenAI").join("Codex")
+        );
+        assert_eq!(
+            windows_system_config_dir_for_product(true),
+            program_data.join("Web2Codex")
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_system_config_toml_file_uses_expected_suffix() {
-        let expected = windows_program_data_dir_from_known_folder()
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_PROGRAM_DATA_DIR_WINDOWS))
-            .join("OpenAI")
-            .join("Codex")
-            .join("config.toml");
+        let expected = windows_system_config_dir_for_product(false).join("config.toml");
+        let web2codex_expected = windows_system_config_dir_for_product(true).join("config.toml");
         assert_eq!(
-            windows_system_config_toml_file()
-                .expect("config.toml path")
+            windows_system_config_toml_file_for_product(false)
+                .expect("Codex config path")
                 .as_path(),
             expected.as_path()
         );
-        assert!(
-            windows_system_config_toml_file()
-                .expect("config.toml path")
-                .as_path()
-                .ends_with(Path::new("OpenAI").join("Codex").join("config.toml"))
+        assert_eq!(
+            windows_system_config_toml_file_for_product(true)
+                .expect("Web2Codex config path")
+                .as_path(),
+            web2codex_expected.as_path()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_system_configuration_uses_product_specific_paths() {
+        assert_eq!(
+            unix_system_config_toml_file_for_product(false)
+                .expect("Codex system config path")
+                .as_path(),
+            Path::new("/etc/codex/config.toml")
+        );
+        assert_eq!(
+            unix_system_config_toml_file_for_product(true)
+                .expect("Web2Codex system config path")
+                .as_path(),
+            Path::new("/etc/web2codex/config.toml")
+        );
+        assert_eq!(
+            unix_system_requirements_toml_file_for_product(true)
+                .expect("Web2Codex requirements path")
+                .as_path(),
+            Path::new("/etc/web2codex/requirements.toml")
         );
     }
 }

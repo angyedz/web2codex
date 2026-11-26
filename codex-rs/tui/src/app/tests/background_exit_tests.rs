@@ -287,7 +287,7 @@ async fn embedded_exit_keeps_the_session_summary() {
     assert_snapshot!(output, @"
     Token usage: total=2 input=0 output=2
     To continue this session, run:
-      codex resume THREAD_ID
+      web2codex resume THREAD_ID
     ");
 }
 
@@ -355,9 +355,9 @@ async fn daemon_ctrl_c_shows_background_exit_menu_and_escape_dismisses_it() -> R
       Choose what happens to the current task.
 
 
-    › 1. Cancel task        Stop the current task and stay in Codex
-      2. Run in background  Exit Codex and leave the task running
-      3. Exit               Stop the current task and exit Codex
+    › 1. Cancel task        Stop the current task and stay in Web2Codex
+      2. Run in background  Exit Web2Codex and leave the task running
+      3. Exit               Stop the current task and exit Web2Codex
 
       enter select · esc back
     ");
@@ -625,8 +625,8 @@ async fn daemon_ctrl_c_hides_background_exit_for_running_background_side_thread(
       Choose what happens to the current task.
 
 
-    › 1. Cancel task  Stop the current task and stay in Codex
-      2. Exit         Stop the current task and exit Codex
+    › 1. Cancel task  Stop the current task and stay in Web2Codex
+      2. Exit         Stop the current task and exit Web2Codex
 
       enter select · esc back
     ");

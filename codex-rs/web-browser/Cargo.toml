@@ -17,3 +17,7 @@ tray-icon = { version = "0.26.1", default-features = false, features = ["ksni", 
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 wry = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility"] }

@@ -41,7 +41,10 @@ pub(crate) fn run() -> anyhow::Result<()> {
     println!("Checking for the latest Web2Codex release...");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))
-        .user_agent(concat!("web2codex/", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!(
+            "web2codex/{}",
+            codex_build_info::runtime_version(env!("CARGO_PKG_VERSION"))
+        ))
         .build()
         .context("could not create the GitHub Releases client")?;
 

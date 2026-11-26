@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -7,10 +8,12 @@ use anyhow::anyhow;
 use anyhow::bail;
 use clap::ArgGroup;
 use clap::builder::TypedValueParser;
+use clap::ValueEnum;
 use codex_config::types::AppToolApproval;
 use codex_config::types::McpServerAuth;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerOAuthConfig;
+use codex_config::types::McpStartupReadiness;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::McpManager;
 use codex_core::config::Config;
@@ -102,8 +105,51 @@ pub struct AddArgs {
     /// Name for the MCP server configuration.
     pub name: String,
 
+    /// Maximum time to initialize the server and list its tools, in seconds.
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    startup_timeout_sec: Option<u64>,
+
+    /// Maximum time to wait for each tool call, in seconds.
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    tool_timeout_sec: Option<u64>,
+
+    /// Fail non-interactive runs when this server cannot start.
+    #[arg(long)]
+    required: bool,
+
+    /// Permit parallel calls to tools from this server.
+    #[arg(long)]
+    parallel_tools: bool,
+
+    /// Expose only this tool from the server. Repeat to allow multiple tools.
+    #[arg(long = "enable-tool", value_name = "NAME", action = clap::ArgAction::Append)]
+    enabled_tools: Vec<String>,
+
+    /// Hide this tool from the model. Repeat to hide multiple tools.
+    #[arg(long = "disable-tool", value_name = "NAME", action = clap::ArgAction::Append)]
+    disabled_tools: Vec<String>,
+
+    /// Use a valid cached catalog while the live server connects.
+    #[arg(long, value_enum, default_value = "connection")]
+    startup_readiness: StartupReadinessArg,
+
     #[command(flatten)]
     pub transport_args: AddMcpTransportArgs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum StartupReadinessArg {
+    Connection,
+    Catalog,
+}
+
+impl From<StartupReadinessArg> for McpStartupReadiness {
+    fn from(value: StartupReadinessArg) -> Self {
+        match value {
+            StartupReadinessArg::Connection => Self::Connection,
+            StartupReadinessArg::Catalog => Self::Catalog,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -157,6 +203,17 @@ pub struct AddMcpStreamableHttpArgs {
         requires = "url"
     )]
     pub bearer_token_env_var: Option<String>,
+
+    /// Add an HTTP header whose value is read from a process environment variable.
+    /// Repeat for multiple headers; API keys stay out of the command line and config file.
+    #[arg(
+        long = "env-header",
+        value_parser = parse_env_http_header,
+        value_name = "HEADER=ENV_VAR",
+        action = clap::ArgAction::Append,
+        requires = "url"
+    )]
+    pub env_http_headers: Vec<(String, String)>,
 
     /// Optional OAuth client identifier to use for this MCP server.
     #[arg(long = "oauth-client-id", value_name = "CLIENT_ID", requires = "url")]
@@ -306,6 +363,13 @@ async fn run_add(config: &Config, add_args: AddArgs) -> Result<()> {
     let AddArgs {
         name,
         transport_args,
+        startup_timeout_sec,
+        tool_timeout_sec,
+        required,
+        parallel_tools,
+        enabled_tools,
+        disabled_tools,
+        startup_readiness,
     } = add_args;
 
     validate_server_name(&name)?;
@@ -347,27 +411,36 @@ async fn run_add(config: &Config, add_args: AddArgs) -> Result<()> {
                     Some(AddMcpStreamableHttpArgs {
                         url,
                         bearer_token_env_var,
+                        env_http_headers,
                         oauth_client_id,
                         oauth_client_secret,
                         oauth_client_registration,
                         oauth_resource,
                     }),
                 ..
-            } => (
-                McpServerTransportConfig::StreamableHttp {
-                    url,
-                    bearer_token_env_var,
-                    http_headers: None,
-                    env_http_headers: None,
-                    http_headers_helper: None,
-                },
-                oauth_client_id,
-                oauth_client_secret,
-                oauth_client_registration
-                    .map(McpOAuthClientRegistration::from)
-                    .unwrap_or_default(),
-                oauth_resource,
-            ),
+            } => {
+                let env_http_headers = collect_env_http_headers(env_http_headers)?;
+                validate_http_auth_options(
+                    bearer_token_env_var.as_deref(),
+                    oauth_client_id.as_deref(),
+                    env_http_headers.as_ref(),
+                )?;
+                (
+                    McpServerTransportConfig::StreamableHttp {
+                        url,
+                        bearer_token_env_var,
+                        http_headers: None,
+                        env_http_headers,
+                        http_headers_helper: None,
+                    },
+                    oauth_client_id,
+                    oauth_client_secret,
+                    oauth_client_registration
+                        .map(McpOAuthClientRegistration::from)
+                        .unwrap_or_default(),
+                    oauth_resource,
+                )
+            }
             AddMcpTransportArgs { .. } => {
                 bail!("exactly one of --command or --url must be provided")
             }
@@ -427,17 +500,17 @@ async fn run_add(config: &Config, add_args: AddArgs) -> Result<()> {
         transport: transport.clone(),
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
-        required: false,
-        startup_readiness: Default::default(),
-        supports_parallel_tool_calls: false,
+        required,
+        startup_readiness: startup_readiness.into(),
+        supports_parallel_tool_calls: parallel_tools,
         tool_input_schema_max_bytes: None,
         omit_tools_from: None,
         disabled_reason: None,
-        startup_timeout_sec: None,
-        tool_timeout_sec: None,
+        startup_timeout_sec: startup_timeout_sec.map(Duration::from_secs),
+        tool_timeout_sec: tool_timeout_sec.map(Duration::from_secs),
         default_tools_approval_mode: None,
-        enabled_tools: None,
-        disabled_tools: None,
+        enabled_tools: (!enabled_tools.is_empty()).then_some(enabled_tools),
+        disabled_tools: (!disabled_tools.is_empty()).then_some(disabled_tools),
         scopes: None,
         oauth: oauth_client_id
             .clone()
@@ -569,7 +642,7 @@ async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
 
     if matches!(server.auth, codex_config::types::McpServerAuth::EmaAuth) {
         bail!(
-            "Enterprise MCP authorization is managed by Codex account sign-in. Open Codex to sign in."
+            "Enterprise MCP authorization is managed by the signed-in ChatGPT account. Open Web2Codex to sign in."
         );
     }
 
@@ -649,7 +722,7 @@ async fn run_logout(config: &Config, logout_args: LogoutArgs) -> Result<()> {
             AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
         let auth = auth_manager.auth().await;
         let scope = ema_auth_scope(auth.as_ref())
-            .context("Sign in to your Codex account before removing enterprise authorization")?;
+            .context("Sign in to your Web2Codex account before removing enterprise authorization")?;
         // Cleanup must remain available even when this server is no longer eligible
         // for EMA (for example, after disabling the feature or changing its transport).
         let profile = config
@@ -1161,6 +1234,67 @@ fn parse_env_pair(raw: &str) -> Result<(String, String), String> {
         .ok_or_else(|| "environment entries must be in KEY=VALUE form".to_string())?;
 
     Ok((key.to_string(), value))
+}
+
+fn parse_env_http_header(raw: &str) -> Result<(String, String), String> {
+    let (header, env_var) = parse_env_pair(raw)?;
+    http::header::HeaderName::from_bytes(header.as_bytes())
+        .map_err(|_| "HTTP header names must use valid ASCII token characters".to_string())?;
+    let mut chars = env_var.chars();
+    let valid_start = chars
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+    if !valid_start
+        || !chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err(
+            "header values must name an environment variable (for example API_TOKEN)".into(),
+        );
+    }
+    Ok((header, env_var))
+}
+
+fn collect_env_http_headers(
+    headers: Vec<(String, String)>,
+) -> Result<Option<HashMap<String, String>>> {
+    let mut collected = HashMap::with_capacity(headers.len());
+    for (name, env_var) in headers {
+        if collected
+            .keys()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&name))
+        {
+            bail!("HTTP header `{name}` was configured more than once");
+        }
+        collected.insert(name, env_var);
+    }
+    Ok((!collected.is_empty()).then_some(collected))
+}
+
+fn validate_http_auth_options(
+    bearer_token_env_var: Option<&str>,
+    oauth_client_id: Option<&str>,
+    env_http_headers: Option<&HashMap<String, String>>,
+) -> Result<()> {
+    let has_authorization_header = env_http_headers.is_some_and(|headers| {
+        headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("authorization"))
+    });
+
+    if oauth_client_id.is_some()
+        && (bearer_token_env_var.is_some() || has_authorization_header)
+    {
+        bail!(
+            "OAuth cannot be combined with --bearer-token-env-var or an Authorization --env-header; choose one authorization method"
+        );
+    }
+    if bearer_token_env_var.is_some() && has_authorization_header {
+        bail!(
+            "--bearer-token-env-var cannot be combined with an Authorization --env-header"
+        );
+    }
+
+    Ok(())
 }
 
 fn validate_server_name(name: &str) -> Result<()> {

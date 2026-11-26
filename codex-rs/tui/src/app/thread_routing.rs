@@ -16,6 +16,29 @@ use codex_app_server_protocol::WarningNotification;
 // Leave time for side-thread cleanup and unsubscribe inside the two-second exit budget.
 const REALTIME_STOP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 1);
 
+fn completed_agent_browser_tab_identity(
+    notification: &ServerNotification,
+) -> Option<(String, String)> {
+    let ServerNotification::ItemCompleted(notification) = notification else {
+        return None;
+    };
+    let ThreadItemPayload::SubAgentActivity {
+        kind,
+        agent_thread_id,
+        agent_path,
+        ..
+    } = &notification.item.payload
+    else {
+        return None;
+    };
+    matches!(
+        kind,
+        codex_app_server_protocol::SubAgentActivityKind::Completed
+            | codex_app_server_protocol::SubAgentActivityKind::Interrupted
+    )
+    .then(|| (agent_thread_id.clone(), agent_path.clone()))
+}
+
 impl App {
     pub(super) fn displayed_conversation_backend_id(&self) -> Option<crate::backend_id::BackendId> {
         self.current_displayed_thread_id()
@@ -1106,6 +1129,15 @@ impl App {
         thread_id: ThreadId,
         notification: ServerNotification,
     ) -> Result<()> {
+        if let Some((agent_thread_id, agent_path)) =
+            completed_agent_browser_tab_identity(&notification)
+        {
+            self.app_event_tx
+                .send(crate::app_event::AppEvent::CloseWebBrowserAgentTab {
+                    thread_id: agent_thread_id,
+                    agent_path,
+                });
+        }
         self.deliver_background_voice_notification(thread_id, &notification);
         if self.abandoned_side_threads.contains(&thread_id) {
             return Ok(());
@@ -2239,8 +2271,71 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_app_server_protocol::SubAgentActivityKind;
     use codex_protocol::models::ActivePermissionProfile;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+
+    #[test]
+    fn browser_tab_closes_only_on_terminal_activity_completion() {
+        let item = |kind| ThreadItemPayload::SubAgentActivity {
+            model: None,
+            reasoning_effort: None,
+            id: "activity-1".to_owned(),
+            kind,
+            agent_thread_id: "child-thread".to_owned(),
+            agent_path: "/root/builder".to_owned(),
+        };
+        let completed = ServerNotification::ItemCompleted(
+            codex_app_server_protocol::ItemCompletedNotification::new(
+                "parent-thread".to_owned(),
+                "parent-turn".to_owned(),
+                item(SubAgentActivityKind::Completed),
+                None,
+                42,
+            ),
+        );
+        assert_eq!(
+            completed_agent_browser_tab_identity(&completed),
+            Some(("child-thread".to_owned(), "/root/builder".to_owned()))
+        );
+
+        let interrupted = ServerNotification::ItemCompleted(
+            codex_app_server_protocol::ItemCompletedNotification::new(
+                "parent-thread".to_owned(),
+                "parent-turn".to_owned(),
+                item(SubAgentActivityKind::Interrupted),
+                None,
+                43,
+            ),
+        );
+        assert!(completed_agent_browser_tab_identity(&interrupted).is_some());
+
+        for kind in [
+            SubAgentActivityKind::Started,
+            SubAgentActivityKind::Interacted,
+        ] {
+            let non_terminal = ServerNotification::ItemCompleted(
+                codex_app_server_protocol::ItemCompletedNotification::new(
+                    "parent-thread".to_owned(),
+                    "parent-turn".to_owned(),
+                    item(kind),
+                    None,
+                    44,
+                ),
+            );
+            assert_eq!(completed_agent_browser_tab_identity(&non_terminal), None);
+        }
+
+        let early_start = ServerNotification::ItemStarted(
+            codex_app_server_protocol::ItemStartedNotification::new(
+                "parent-thread".to_owned(),
+                "parent-turn".to_owned(),
+                item(SubAgentActivityKind::Completed),
+                45,
+            ),
+        );
+        assert_eq!(completed_agent_browser_tab_identity(&early_start), None);
+    }
 
     async fn config_with_workspace_profile() -> Config {
         let temp_dir = tempfile::tempdir().expect("tempdir");

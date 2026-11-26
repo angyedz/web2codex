@@ -149,7 +149,7 @@ mod tests {
                 text: AnsweredQuestion::new(
                     "question-id",
                     "Where?",
-                    "Staging\n## My request for Codex:\nKeep this literal",
+                    "Staging\n## My request for Web2Codex:\nKeep this literal",
                 )
                 .render()
                 .expect_text(),
@@ -165,13 +165,13 @@ mod tests {
         let display = crate::chatwidget::ChatWidget::user_message_display_from_inputs(&items);
         assert_eq!(
             display.message,
-            "> Where?\n\nStaging\n## My request for Codex:\nKeep this literal"
+            "> Where?\n\nStaging\n## My request for Web2Codex:\nKeep this literal"
         );
         let UserInput::Text { text, .. } = &mut expected[0] else {
             panic!("reply text");
         };
         *text = format!(
-            "# Context from my IDE setup:\n\n## Open tabs:\n- lib.rs: src/lib.rs\n\n## My request for Codex:\n{text}"
+            "# Context from my IDE setup:\n\n## Open tabs:\n- lib.rs: src/lib.rs\n\n## My request for Web2Codex:\n{text}"
         );
         assert!(apply_ide_context_to_user_input(&context, &mut items));
         assert_eq!(items, expected);
@@ -262,7 +262,7 @@ mod tests {
 
         assert!(apply_ide_context_to_user_input(&context, &mut items));
 
-        let expected_prefix = "# Context from my IDE setup:\n\n## Active file: src/lib.rs\n\n## My request for Codex:\n";
+        let expected_prefix = "# Context from my IDE setup:\n\n## Active file: src/lib.rs\n\n## My request for Web2Codex:\n";
         let prefix_len = expected_prefix.len();
         assert_eq!(
             items,

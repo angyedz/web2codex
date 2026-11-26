@@ -412,13 +412,13 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
             .lines()
             .filter(|line| {
                 line.contains("Couldn't confirm whether")
-                    || line.contains("background Codex service")
+                    || line.contains("background Web2Codex service")
             })
             .collect::<Vec<_>>()
             .join("\n");
         if deferred_notice {
             assert_snapshot!(notices, @r###"
-⚠ A background Codex service is running v2.0.0, older than your Codex CLI
+⚠ A background Web2Codex service is running v2.0.0, older than your Web2Codex CLI
 "###);
         } else if edit_offline {
             assert!(notices.contains("unacknowledged prompt"));

@@ -1,5 +1,6 @@
 //! Immutable, policy-checked skill catalogs captured for one step.
 
+use crate::HostSkillsSnapshot;
 use crate::aliases::SkillCatalogAliases;
 use crate::catalog::SkillAuthority;
 use crate::catalog::SkillCatalog;
@@ -8,6 +9,7 @@ use crate::catalog::merge_catalogs;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::sync::Arc;
 
 /// Fully prepared before tool construction; retained unchanged by all step consumers.
 #[derive(Debug)]
@@ -16,6 +18,7 @@ pub(crate) struct SkillsStepState {
     pub(crate) tools_enabled: bool,
     pub(crate) catalog: SkillStepCatalog,
     pub(crate) host_catalog: Option<SkillCatalog>,
+    pub(crate) host_snapshot: Option<Arc<HostSkillsSnapshot>>,
     pub(crate) cloud_status: CatalogStatus,
     pub(crate) config: crate::SkillsExtensionConfig,
 }
@@ -28,6 +31,8 @@ pub(crate) struct SkillStepCatalog {
     /// None means no Cloud catalog was captured for this step.
     cloud_warnings: Option<Vec<String>>,
     executor_warnings: Vec<String>,
+    host_warnings: Vec<String>,
+    host_catalog: Option<SkillCatalog>,
 }
 
 impl SkillStepCatalog {
@@ -70,7 +75,26 @@ impl SkillStepCatalog {
             aliases,
             cloud_warnings,
             executor_warnings,
+            host_warnings: Vec::new(),
+            host_catalog: None,
         }
+    }
+
+    pub(crate) fn with_host_catalog(mut self, host: Option<SkillCatalog>) -> Self {
+        let mut host = host;
+        if let Some(host_catalog) = &mut host {
+            self.host_warnings = host_catalog.warnings.clone();
+            host_catalog.entries.retain_mut(|entry| {
+                if !entry.enabled {
+                    return false;
+                }
+                entry.sources.retain(|source| source.enabled);
+                true
+            });
+            self.merged.extend(host_catalog.clone());
+        }
+        self.host_catalog = host;
+        self
     }
 
     /// Selects one authority from the prepared catalog without consulting thread state.
@@ -78,16 +102,22 @@ impl SkillStepCatalog {
         &self,
         authority: SkillToolAuthoritySelector,
     ) -> SkillCatalog {
-        let entries = self
-            .merged
-            .entries
-            .iter()
+        let source = match authority {
+            SkillToolAuthoritySelector::Host => self.host_catalog.as_ref(),
+            SkillToolAuthoritySelector::Cloud | SkillToolAuthoritySelector::Executor => {
+                Some(&self.merged)
+            }
+        };
+        let entries = source
+            .into_iter()
+            .flat_map(|catalog| catalog.entries.iter())
             .filter(|entry| authority.matches(&entry.authority))
             .cloned()
             .collect();
         let warnings = match authority {
             SkillToolAuthoritySelector::Cloud => self.cloud_warnings.clone().unwrap_or_default(),
             SkillToolAuthoritySelector::Executor => self.executor_warnings.clone(),
+            SkillToolAuthoritySelector::Host => self.host_warnings.clone(),
         };
         SkillCatalog {
             is_partial: self.merged.is_partial,
@@ -100,6 +130,7 @@ impl SkillStepCatalog {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum SkillToolAuthoritySelector {
+    Host,
     Cloud,
     Executor,
 }
@@ -107,6 +138,7 @@ pub(crate) enum SkillToolAuthoritySelector {
 impl SkillToolAuthoritySelector {
     pub(crate) fn matches(self, authority: &SkillAuthority) -> bool {
         match self {
+            Self::Host => authority.kind == SkillSourceKind::Host,
             Self::Cloud => authority.kind == SkillSourceKind::Cloud,
             Self::Executor => authority.kind == SkillSourceKind::Executor,
         }

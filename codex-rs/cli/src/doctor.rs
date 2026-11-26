@@ -1,4 +1,4 @@
-//! Implements the `codex doctor` diagnostic report.
+//! Implements the `web2codex doctor` diagnostic report.
 //!
 //! Doctor is intentionally read-mostly: checks inspect the current installation,
 //! configuration, authentication, terminal, state paths, and bounded reachability
@@ -319,7 +319,7 @@ impl DoctorCheck {
 
 /// Builds, renders, and exits according to the current doctor report.
 ///
-/// This is the CLI entry point for codex doctor. It does not repair issues;
+/// This is the CLI entry point for web2codex doctor. It does not repair issues;
 /// failures are represented in the report and cause a non-zero process exit so
 /// scripts can distinguish a clean environment from one that needs attention.
 pub async fn run_doctor(
@@ -457,7 +457,7 @@ async fn build_report(
                         )
                         .detail(error.to_string())
                         .remediation(
-                            "Fix the reported authentication error, then rerun codex doctor.",
+                            "Fix the reported authentication error, then rerun web2codex doctor.",
                         ),
                     })
                 },
@@ -581,7 +581,7 @@ fn report_from_checks(checks: Vec<DoctorCheck>) -> DoctorReport {
         schema_version: 1,
         generated_at: generated_at(),
         overall_status,
-        codex_version: env!("CARGO_PKG_VERSION").to_string(),
+        codex_version: codex_build_info::runtime_version(env!("CARGO_PKG_VERSION")).to_string(),
         checks,
     }
 }
@@ -593,7 +593,7 @@ fn config_load_failure(err: &anyhow::Error) -> DoctorCheck {
         CheckStatus::Fail,
         "config could not be loaded",
     )
-    .remediation("Fix the reported config error, then rerun codex doctor.");
+    .remediation("Fix the reported config error, then rerun web2codex doctor.");
     // Error messages can echo config values. Report only typed metadata,
     // including errors wrapped by io::Error, whose source skips the wrapper.
     let config_error = err.chain().find_map(|cause| {
@@ -645,7 +645,7 @@ async fn load_config(
     .await?
     .build()
     .await
-    .context("failed to load Codex config")?;
+    .context("failed to load Web2Codex config")?;
     config.config_layer_stack.ensure_config_server_applied()?;
     Ok(config)
 }
@@ -681,7 +681,7 @@ fn config_overrides_from_interactive(
     }
 }
 
-/// JSON support report emitted by `codex doctor --json`.
+/// JSON support report emitted by `web2codex doctor --json`.
 ///
 /// The report is keyed by check id so support tooling can fetch paths like
 /// `checks["terminal.metadata"]` without scanning arrays. Human rendering can
@@ -946,14 +946,14 @@ fn installation_check(show_details: bool) -> DoctorCheck {
     let mut remediation = None;
 
     if path_entries.len() > 1 {
-        details.push(format!("PATH codex entries: {}", path_entries.len()));
+        details.push(format!("PATH Web2Codex entries: {}", path_entries.len()));
     }
     if show_details || path_entries.len() > 1 {
         details.extend(
             path_entries
                 .iter()
                 .enumerate()
-                .map(|(index, path)| format!("PATH codex #{}: {path}", index + 1)),
+                .map(|(index, path)| format!("PATH Web2Codex #{}: {path}", index + 1)),
         );
     }
 
@@ -964,7 +964,7 @@ fn installation_check(show_details: bool) -> DoctorCheck {
             status = status.max(CheckStatus::Warning);
             summary = "npm-managed launch is missing package-root provenance".to_string();
             remediation = Some(
-                "Reinstall or update Codex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
+                "Reinstall or update Web2Codex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
                     .to_string(),
             );
         }
@@ -1226,7 +1226,7 @@ fn auth_check(config: &Config) -> DoctorCheck {
             CheckStatus::Ok,
             "ChatGPT sign-in is handled by the private WebView",
         )
-        .detail("Codex API keys and OAuth credentials are not used for model access.");
+        .detail("Web2Codex API keys and OAuth credentials are not used for model access.");
     }
 
     let mut details = Vec::new();
@@ -1319,7 +1319,7 @@ fn auth_check(config: &Config) -> DoctorCheck {
             "auth.credentials",
             "auth",
             CheckStatus::Fail,
-            "no Codex credentials were found",
+            "no Web2Codex credentials were found",
         )
         .details(details)
         .remediation(concat!(
@@ -3792,7 +3792,7 @@ mod tests {
         let check = provider_specific_auth_check(
             /*requires_openai_auth*/ false,
             Some("PROVIDER_API_KEY"),
-            Some("Set PROVIDER_API_KEY before running Codex."),
+            Some("Set PROVIDER_API_KEY before running Web2Codex."),
             Vec::new(),
             |_| false,
         )
@@ -3805,7 +3805,7 @@ mod tests {
         );
         assert_eq!(
             check.remediation,
-            Some("Set PROVIDER_API_KEY before running Codex.".to_string())
+            Some("Set PROVIDER_API_KEY before running Web2Codex.".to_string())
         );
     }
 

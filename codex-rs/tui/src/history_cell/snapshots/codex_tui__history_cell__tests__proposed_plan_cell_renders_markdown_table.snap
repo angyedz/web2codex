@@ -36,7 +36,7 @@ expression: lines
         Span::from(" "),
         Span::from("  "),
         Span::from(" "),
-        Span::from("Codex"),
+        Span::from("Web2Codex"),
     ]).bg(Color::Rgb(244, 244, 244)),
     Line::from(" ").bg(Color::Rgb(244, 244, 244)),
 ]

@@ -3,7 +3,7 @@ source: tui/src/bottom_pane/chat_composer/footer_state_tests.rs
 expression: output
 ---
 
-› Ask Codex
+› Ask Web2Codex
 
   MODEL STATUS
   Find: needle

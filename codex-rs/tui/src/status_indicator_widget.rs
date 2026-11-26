@@ -12,6 +12,7 @@ use std::time::Instant;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -21,6 +22,7 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app_event_sender::AppEventSender;
+use crate::color::blend;
 use crate::key_hint;
 use crate::key_hint::ShortcutHint;
 use crate::line_truncation::line_width;
@@ -29,6 +31,11 @@ use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
 use crate::render::renderable::Renderable;
+use crate::terminal_palette::StdoutColorLevel;
+use crate::terminal_palette::default_bg;
+use crate::terminal_palette::default_fg;
+use crate::terminal_palette::effective_stdout_color_level;
+use crate::terminal_palette::rgb_color;
 use crate::text_formatting::capitalize_first;
 use crate::tui::FrameRequester;
 use crate::width::display_width;
@@ -57,6 +64,7 @@ pub(crate) struct StatusIndicatorWidget {
     /// Animated header text (defaults to "Working").
     header: String,
     header_started_at: Instant,
+    header_changed_at: Option<Instant>,
     details: Option<String>,
     details_max_lines: usize,
     /// Optional suffix rendered after the elapsed/interrupt segment.
@@ -89,6 +97,28 @@ pub fn fmt_elapsed_compact(elapsed_secs: u64) -> String {
     format!("{hours}h {minutes:02}m {seconds:02}s")
 }
 
+/// A short, fixed-width pulse acknowledges a new task phase before the regular spinner resumes.
+fn header_change_indicator(elapsed: Duration, motion: MotionMode) -> Option<Span<'static>> {
+    const FRAME: Duration = Duration::from_millis(80);
+    const DURATION: Duration = Duration::from_millis(320);
+    const SYMBOLS: [&str; 4] = ["◦", "•", "●", "•"];
+    const INTENSITIES: [f32; 4] = [0.25, 0.62, 1.0, 0.62];
+
+    if motion == MotionMode::Reduced || elapsed >= DURATION {
+        return None;
+    }
+    let index = (elapsed.as_millis() / FRAME.as_millis()) as usize;
+    let symbol = SYMBOLS[index.min(SYMBOLS.len() - 1)];
+    let intensity = INTENSITIES[index.min(INTENSITIES.len() - 1)];
+    let style = match (effective_stdout_color_level(), default_fg(), default_bg()) {
+        (StdoutColorLevel::TrueColor, Some(fg), Some(bg)) => {
+            Style::default().fg(rgb_color(blend(fg, bg, intensity)))
+        }
+        _ => Style::default(),
+    };
+    Some(Span::styled(symbol, style))
+}
+
 impl StatusIndicatorWidget {
     pub(crate) fn new(
         app_event_tx: AppEventSender,
@@ -99,6 +129,7 @@ impl StatusIndicatorWidget {
         Self {
             header: String::from("Working"),
             header_started_at: Instant::now(),
+            header_changed_at: None,
             details: None,
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
             inline_message: None,
@@ -125,7 +156,9 @@ impl StatusIndicatorWidget {
     pub(crate) fn update_header(&mut self, header: String) {
         if self.header != header {
             self.header = header;
-            self.header_started_at = Instant::now();
+            let now = Instant::now();
+            self.header_started_at = now;
+            self.header_changed_at = Some(now);
         }
     }
 
@@ -239,19 +272,21 @@ impl StatusIndicator<'_> {
             MotionMode::from_animations_enabled(row.animations_enabled && row.effects.shimmer);
 
         let mut spans = Vec::with_capacity(5);
-        if let Some(indicator) = activity_indicator(
-            Some(self.timer.last_resume_at),
-            progress,
-            ReducedMotionIndicator::Hidden,
-        ) {
+        let header_elapsed = now.saturating_duration_since(row.header_started_at);
+        let pulse = row.header_changed_at.and_then(|changed_at| {
+            header_change_indicator(now.saturating_duration_since(changed_at), progress)
+        });
+        if let Some(indicator) = pulse.or_else(|| {
+            activity_indicator(
+                Some(self.timer.last_resume_at),
+                progress,
+                ReducedMotionIndicator::Hidden,
+            )
+        }) {
             spans.push(indicator);
             spans.push(" ".into());
         }
-        spans.extend(summary_shimmer(
-            &row.header,
-            now.saturating_duration_since(row.header_started_at),
-            shimmer,
-        ));
+        spans.extend(summary_shimmer(&row.header, header_elapsed, shimmer));
         if !spans.is_empty() {
             spans.push(" ".into());
         }
@@ -331,6 +366,28 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn header_change_indicator_is_brief_fixed_width_and_respects_reduced_motion() {
+        for (elapsed, expected) in [
+            (Duration::from_millis(0), Some("◦")),
+            (Duration::from_millis(80), Some("•")),
+            (Duration::from_millis(160), Some("●")),
+            (Duration::from_millis(240), Some("•")),
+            (Duration::from_millis(320), None),
+        ] {
+            assert_eq!(
+                header_change_indicator(elapsed, MotionMode::Animated)
+                    .map(|span| span.content.into_owned())
+                    .as_deref(),
+                expected
+            );
+        }
+        assert_eq!(
+            header_change_indicator(Duration::ZERO, MotionMode::Reduced),
+            None
+        );
+    }
 
     #[test]
     fn changed_summary_restarts_shimmer_but_repeated_summary_keeps_phase() {

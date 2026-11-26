@@ -31,7 +31,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
                     if let Some(items) = output.content_items_mut() {
                         items.retain(|item| match item {
                             FunctionCallOutputContentItem::InputImage { .. }
-                            | FunctionCallOutputContentItem::InputAudio { .. } => false,
+                            | FunctionCallOutputContentItem::InputAudio { .. }
+                            | FunctionCallOutputContentItem::InputFile { .. } => false,
                             FunctionCallOutputContentItem::InputText { .. }
                             | FunctionCallOutputContentItem::EncryptedContent { .. } => true,
                         });
@@ -171,7 +172,8 @@ fn without_thread_item_media(mut item: ThreadItemPayload) -> ThreadItemPayload {
         } => {
             items.retain(|item| match item {
                 FunctionCallOutputContentItem::InputImage { .. }
-                | FunctionCallOutputContentItem::InputAudio { .. } => false,
+                | FunctionCallOutputContentItem::InputAudio { .. }
+                | FunctionCallOutputContentItem::InputFile { .. } => false,
                 FunctionCallOutputContentItem::InputText { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. } => true,
             });

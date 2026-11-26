@@ -4,7 +4,7 @@ expression: "normalize_snapshot_paths(format!(\"terminal title: {}\\nfooter:\\n{
 ---
 terminal title: Fix the login timeout | project
 footer:
-› Ask Codex to do anything
+› Ask Web2Codex to do anything
 
   gpt-5.2 default · /tmp/project · Fix the login timeout
   ← for agents · ? for shortcuts

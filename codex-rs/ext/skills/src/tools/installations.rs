@@ -66,7 +66,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for InstallationsTool {
     fn spec(&self) -> ToolSpec {
         skill_function_tool::<InstallationsArgs, InstallationsResponse>(
             TOOL_NAME,
-            "Find a skill's enabled Cloud and executor locations, including those omitted by skills.read. Pass its provided package directly; root aliases are resolved automatically. Use source {kind: cloud} for Cloud or {kind: executor, environment_id: ...} for one environment. Omit source for all locations. Cloud locations return package and resource: pass both directly to skills.read to read the main instruction file, usually SKILL.md. Executor locations return environment_id and skill_root, the absolute directory containing instructions and supporting files such as scripts. Pass next_cursor back as cursor with the same package and source to continue listing locations. Omit cursor to start again. An empty list without next_cursor means no enabled location matches.",
+            "Find a skill's enabled Cloud, host, and executor locations, including those omitted by skills.read. Pass its provided package directly; root aliases are resolved automatically. Use source {kind: cloud}, {kind: host}, or {kind: executor, environment_id: ...} to filter locations. Omit source for all locations. Cloud locations return package and resource. Host and executor locations return a skill_root; host skills expose their installed SKILL.md. Pass next_cursor back as cursor with the same package and source to continue listing locations. Omit cursor to start again. An empty list without next_cursor means no enabled location matches.",
         )
     }
 
@@ -82,6 +82,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for InstallationsTool {
                     parse_args(&call).inspect_err(|_| outcome = "invalid_arguments")?;
                 source_filter = match &args.source {
                     None => "all",
+                    Some(InstallationSource::Host) => "host",
                     Some(InstallationSource::Cloud) => "cloud",
                     Some(InstallationSource::Executor { .. }) => "executor",
                 };
@@ -176,6 +177,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for InstallationsTool {
                     .any(|location| matches!(location, InstallationLocation::Cloud { .. }))
                 {
                     SkillToolAuthoritySelector::Cloud
+                } else if response
+                    .installations
+                    .iter()
+                    .any(|location| matches!(location, InstallationLocation::Host { .. }))
+                {
+                    SkillToolAuthoritySelector::Host
                 } else {
                     SkillToolAuthoritySelector::Executor
                 };

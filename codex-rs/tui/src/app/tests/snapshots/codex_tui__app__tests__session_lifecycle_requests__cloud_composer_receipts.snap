@@ -10,7 +10,7 @@ expression: "rendered_receipts.join(\"\\n\\n\")"
 • Working (0s • esc to interrupt)
 
 
-› Ask Codex to do anything
+› Ask Web2Codex to do anything
 
   gpt-test default · /tmp/project
   ? for shortcuts
@@ -29,7 +29,7 @@ expression: "rendered_receipts.join(\"\\n\\n\")"
   ↳ follow up
     ⇧← edit last queued message
 
-› Ask Codex to do anything
+› Ask Web2Codex to do anything
 
   gpt-test default · /tmp/project
   ? for shortcuts
@@ -50,7 +50,7 @@ expression: "rendered_receipts.join(\"\\n\\n\")"
   ↳ follow up
     ⇧← edit last queued message
 
-› Ask Codex to do anything
+› Ask Web2Codex to do anything
 
   gpt-test default · /tmp/project
   ? for shortcuts

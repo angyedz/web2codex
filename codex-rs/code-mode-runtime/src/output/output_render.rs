@@ -184,6 +184,11 @@ fn into_code_mode_output(item: FunctionCallOutputContentItem) -> OutputItem {
         FunctionCallOutputContentItem::InputAudio {
             audio: AudioReference::Inline { audio_url },
         } => OutputItem::InputAudio { audio_url },
+        FunctionCallOutputContentItem::InputFile { filename, .. } => OutputItem::InputText {
+            text: format!(
+                "[MCP file output `{filename}` is available to the web chat, but Code Mode cannot render file attachments.]"
+            ),
+        },
         FunctionCallOutputContentItem::EncryptedContent { .. }
         | FunctionCallOutputContentItem::InputAudio {
             audio: AudioReference::File { .. },

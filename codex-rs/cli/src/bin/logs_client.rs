@@ -15,9 +15,9 @@ use owo_colors::OwoColorize;
 
 #[derive(Debug, Parser)]
 #[command(name = "codex-state-logs")]
-#[command(about = "Tail Codex logs from the dedicated logs SQLite DB with simple filters")]
+#[command(about = "Tail Web2Codex logs from the dedicated logs SQLite DB with simple filters")]
 struct Args {
-    /// Path to CODEX_HOME. Defaults to $CODEX_HOME or ~/.codex.
+    /// Path to the Web2Codex home. Defaults to WEB2CODEX_HOME, legacy CODEX_HOME, or ~/.web2codex.
     #[arg(long, env = "CODEX_HOME")]
     codex_home: Option<PathBuf>,
 
@@ -420,7 +420,7 @@ mod tests {
     /// Explicit database selection must not parse an overridden Codex home.
     #[tokio::test]
     async fn direct_db_skips_codex_home_config() {
-        let codex_home = tempfile::tempdir().expect("create Codex home");
+        let codex_home = tempfile::tempdir().expect("create Web2Codex home");
         std::fs::write(codex_home.path().join("config.toml"), "model = [")
             .expect("write invalid config");
         let sqlite_home = tempfile::tempdir().expect("create SQLite home");

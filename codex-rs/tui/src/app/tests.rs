@@ -3649,16 +3649,16 @@ async fn reopen_saved_side_chat(during: DuringOpen) -> Result<()> {
 
     let reply = format!(
         "<send_user_message_question_reply>{}</send_user_message_question_reply>",
-        serde_json::json!({"questionItemId": "choice", "question": "Which branch?", "answer": "Keep ## My request for Codex: literal"})
+        serde_json::json!({"questionItemId": "choice", "question": "Which branch?", "answer": "Keep ## My request for Web2Codex: literal"})
     );
     for (prompt, expected) in [
         (
-            "# Context\n## My request for Codex:\nOld context\n## My request for Codex:\nActual request",
+            "# Context\n## My request for Web2Codex:\nOld context\n## My request for Web2Codex:\nActual request",
             "Actual request",
         ),
         (
             reply.as_str(),
-            "> Which branch? Keep ## My request for Codex: literal",
+            "> Which branch? Keep ## My request for Web2Codex: literal",
         ),
     ] {
         side_chat_policy_tests::ask(&mut server, &model, sibling, prompt).await?;
@@ -8857,7 +8857,7 @@ async fn ctrl_l_preserves_the_transcript_and_draft_after_clearing_the_screen() -
     let compact = transcript_composer::buffer_text(
         crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal),
     );
-    assert!(compact.contains("OpenAI Codex"));
+    assert!(compact.contains("Web2Codex"));
     assert!(compact.contains("New exchange"));
     assert!(!compact.contains("Earlier exchange"));
     let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
@@ -9222,7 +9222,7 @@ async fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_p
     let saved_objective = goal.objective.clone();
     let codex_home = app_server
         .codex_home_path(&app.chat_widget.config_ref().codex_home)
-        .expect("codex home");
+        .expect("Web2Codex home");
     assert!(goal_files::objective_file_path(&goal.objective, Some(&codex_home)).is_some());
     assert_eq!(
         goal_files::objective_text_for_edit(&mut app_server, Some(&codex_home), &goal.objective)

@@ -12,16 +12,16 @@ python := if os_family() == "windows" { "python" } else { "python3" }
 help:
     just -l
 
-# `codex`
-alias c := codex
-codex *args:
-    cargo run --bin codex -- {args}
+# `web2codex`
+alias c := web2codex
+web2codex *args:
+    cargo run --bin web2codex -- {args}
 
-# `codex exec`
+# `web2codex exec`
 exec *args:
-    cargo run --bin codex -- exec {args}
+    cargo run --bin web2codex -- exec {args}
 
-# Start `codex exec-server` and run codex-tui.
+# Start `web2codex exec-server` and run the TUI.
 [no-cd]
 [positional-arguments]
 [unix]

@@ -380,17 +380,7 @@ async fn run_compact_task_inner_impl(
 
     let history_snapshot = sess.clone_history().await;
     let history_items = history_snapshot.annotated_items();
-    let summary_suffix = if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
-        get_last_assistant_message_from_turn(compaction_response.output.iter())
-            .filter(|summary| !summary.trim().is_empty())
-            .ok_or_else(|| {
-                CodexErr::Stream(
-                    "Post-turn compaction completed without an assistant summary".to_string(),
-                )
-            })?
-    } else {
-        get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default()
-    };
+    let summary_suffix = compaction_response.summary;
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     let user_messages = collect_annotated_user_messages(history_items);
 
@@ -834,7 +824,7 @@ fn build_compacted_history_with_limit(
 
 struct CompactionResponse {
     response_id: String,
-    output: Vec<ResponseItem>,
+    summary: String,
 }
 
 async fn drain_to_completed(
@@ -887,8 +877,13 @@ async fn drain_to_completed(
                 usage_metadata,
                 ..
             }) => {
-                if !matches!(phase, CompactionPhase::PostTurn) {
-                    for item in std::mem::take(&mut output) {
+                // Only this request can supply the checkpoint. In particular, a
+                // tool-only or empty response must never substitute an earlier
+                // assistant reply and then discard the history it was summarizing.
+                let summary = get_last_assistant_message_from_turn(output.iter())
+                    .filter(|text| !text.trim().is_empty());
+                if summary.is_some() && !matches!(phase, CompactionPhase::PostTurn) {
+                    for item in output {
                         sess.record_annotated_conversation_items(
                             turn_context,
                             turn_context.model_info(),
@@ -916,9 +911,12 @@ async fn drain_to_completed(
                     includes_reasoning,
                 )
                 .await?;
+                let summary = summary.ok_or_else(|| {
+                    CodexErr::Stream("Compaction completed without an assistant summary".into())
+                })?;
                 return Ok(CompactionResponse {
                     response_id,
-                    output,
+                    summary,
                 });
             }
             Ok(_) => continue,

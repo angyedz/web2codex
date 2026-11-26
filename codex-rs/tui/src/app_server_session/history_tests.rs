@@ -35,7 +35,7 @@ fn advancing_cursor_rejects_repeated_cursors() {
 
 #[tokio::test]
 async fn owned_initial_history_stops_after_viewport_or_scan_budget() {
-    let codex_home = tempfile::tempdir().expect("temporary codex home");
+    let codex_home = tempfile::tempdir().expect("temporary Web2Codex home");
     let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .build()

@@ -18,9 +18,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
 
-#[cfg(unix)]
-const CODEX_MANAGED_CONFIG_SYSTEM_PATH: &str = "/etc/codex/managed_config.toml";
-
 #[derive(Debug, Clone)]
 pub(super) struct MangedConfigFromFile {
     pub managed_config: TomlValue,
@@ -82,10 +79,17 @@ pub(super) async fn load_config_layers_internal(
             )
             .await
         {
-            Ok(_) => vec![format!(
-                "Ignoring deprecated managed config file at {}; CODEX_HOME/managed_config.toml is no longer supported on Windows. Use %ProgramData%\\OpenAI\\Codex\\requirements.toml for enforced settings or config.toml for defaults.",
-                managed_config_path.as_path().display()
-            )],
+            Ok(_) => {
+                let system_dir = if super::is_web2codex_runtime() {
+                    "%ProgramData%\\Web2Codex"
+                } else {
+                    "%ProgramData%\\OpenAI\\Codex"
+                };
+                vec![format!(
+                    "Ignoring deprecated managed config file at {}; CODEX_HOME/managed_config.toml is no longer supported on Windows. Use {system_dir}\\requirements.toml for enforced settings or config.toml for defaults.",
+                    managed_config_path.as_path().display()
+                )]
+            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(err) => {
                 tracing::debug!(
@@ -223,7 +227,11 @@ pub(super) fn managed_config_default_path(codex_home: &Path) -> PathBuf {
     #[cfg(unix)]
     {
         let _ = codex_home;
-        PathBuf::from(CODEX_MANAGED_CONFIG_SYSTEM_PATH)
+        if super::is_web2codex_runtime() {
+            PathBuf::from("/etc/web2codex/managed_config.toml")
+        } else {
+            PathBuf::from("/etc/codex/managed_config.toml")
+        }
     }
 
     #[cfg(not(unix))]

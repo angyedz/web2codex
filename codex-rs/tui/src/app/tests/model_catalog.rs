@@ -409,7 +409,7 @@ fn select_model_availability_nux_returns_none_when_all_models_are_exhausted() {
 
 #[tokio::test]
 async fn prepare_startup_tooltip_override_persists_model_availability_nux_count() {
-    let codex_home = tempdir().expect("temp codex home");
+    let codex_home = tempdir().expect("temp Web2Codex home");
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .build()
@@ -563,11 +563,11 @@ async fn accepted_model_migration_persists_target_default_reasoning_effort() -> 
     assert_snapshot!(migration_copies.join("\n"), @r"
     GPT-5.4 is no longer available
 
-    Codex now uses GPT-6 Sol in place of GPT-5.4. Switch to GPT-6 Sol to continue.
+    Web2Codex now uses GPT-6 Sol in place of GPT-5.4. Switch to GPT-6 Sol to continue.
 
     GPT-5.4 Mini is no longer available
 
-    Codex now uses GPT-6 Luna in place of GPT-5.4 Mini. Switch to GPT-6 Luna to continue.
+    Web2Codex now uses GPT-6 Luna in place of GPT-5.4 Mini. Switch to GPT-6 Luna to continue.
 
     Meet GPT-6 Sol
 
@@ -585,9 +585,9 @@ async fn accepted_model_migration_persists_target_default_reasoning_effort() -> 
 
     Our latest Sol is more intelligent and more efficient so your usage limits go further. This model is a great daily driver for complex tasks, especially coding.
 
-    GPT-5.4 on Amazon Bedrock is no longer offered in Codex
+    GPT-5.4 on Amazon Bedrock is no longer offered in Web2Codex
 
-    Codex now uses GPT-6 Sol on Amazon Bedrock in place of GPT-5.4 on Amazon Bedrock. Switch to GPT-6 Sol on Amazon Bedrock to continue.
+    Web2Codex now uses GPT-6 Sol on Amazon Bedrock in place of GPT-5.4 on Amazon Bedrock. Switch to GPT-6 Sol on Amazon Bedrock to continue.
     ");
     Ok(())
 }
@@ -685,7 +685,7 @@ async fn model_migration_prompt_skips_when_target_missing_or_hidden() {
 
 #[tokio::test]
 async fn model_migration_prompt_shows_for_hidden_model() {
-    let codex_home = tempdir().expect("temp codex home");
+    let codex_home = tempdir().expect("temp Web2Codex home");
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .build()

@@ -1,4 +1,6 @@
-## Contributing
+## Upstream contribution policy
+
+This inherited guide describes the upstream OpenAI Codex project. It is not the contribution policy for Web2Codex.
 
 We welcome community contributions through the [openai/codex issue tracker](https://github.com/openai/codex/issues). Bug reports, root-cause analyses, and feature requests help us understand what matters most and improve Codex.
 
@@ -20,7 +22,7 @@ When reporting a bug, include as much relevant detail as possible:
 
 - Clear, detailed steps to reproduce the problem.
 - Expected and actual behavior.
-- Your Codex version, operating system, and other relevant environment details.
+- Your Web2Codex version, operating system, and other relevant environment details.
 - Logs, error messages, or other diagnostic information, with sensitive information removed.
 - Root-cause analysis, technical observations, or potential approaches to a fix, if available.
 
