@@ -216,8 +216,12 @@ jobs:
           browser="$package/codex-resources/codex-web-browser"
           test -x "$cli"
           test -f "$browser"
-          "$cli" --version
-          "$cli" web --help >/dev/null
+          if [[ "$TARGET" == "aarch64-apple-darwin" && "$(uname -m)" != "arm64" ]]; then
+            echo "Skipping runtime smoke test for the cross-compiled arm64 package on $(uname -m)."
+          else
+            "$cli" --version
+            "$cli" web --help >/dev/null
+          fi
 
       - name: Smoke-test the assembled package (Windows)
         if: runner.os == 'Windows'
