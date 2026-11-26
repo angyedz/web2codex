@@ -5053,7 +5053,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "winsplit",
  "wiremock",
- "zbus",
+ "zbus 4.4.0",
  "zeroize",
 ]
 

@@ -95,10 +95,6 @@ jobs:
           python .github/scripts/set_fork_release_version.py "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Refresh Cargo.lock for the release version
-        shell: bash
-        run: cargo metadata --manifest-path codex-rs/Cargo.toml --format-version 1 >/dev/null
-
       - name: Build the native WebView browser
         if: runner.os == 'Linux'
         shell: bash
