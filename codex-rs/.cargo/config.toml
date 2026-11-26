@@ -9,13 +9,15 @@ CFLAGS_x86_64_pc_windows_gnullvm = "-DCURL_ENABLE_NTLM"
 CFLAGS_x86_64_pc_windows_msvc = "-DCURL_ENABLE_NTLM"
 
 [target.'cfg(all(windows, target_env = "msvc"))']
-rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "target-feature=+crt-static"]
+# Rusty V8's Windows allocator shim intentionally overrides UCRT allocation
+# symbols, so allow the linker to resolve those duplicate definitions.
+rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "target-feature=+crt-static", "-C", "link-arg=/FORCE:MULTIPLE"]
 
 # MSVC emits a warning about code that may trip "Cortex-A53 MPCore processor bug #843419" (see
 # https://developer.arm.com/documentation/epm048406/latest) which is sometimes emitted by LLVM.
 # Since Arm64 Windows 10+ isn't supported on that processor, it's safe to disable the warning.
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "link-arg=/arm64hazardfree"]
+rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "link-arg=/arm64hazardfree", "-C", "link-arg=/FORCE:MULTIPLE"]
 
 [target.'cfg(all(windows, target_env = "gnu"))']
 rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]
