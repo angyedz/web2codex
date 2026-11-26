@@ -89,7 +89,10 @@ def main() -> int:
     lock_updated_names: set[str] = set()
 
     def update_lock_package(block: str) -> str:
-        package = tomllib.loads(block).get("package", {})
+        packages = tomllib.loads(block).get("package", [])
+        if not isinstance(packages, list) or len(packages) != 1:
+            raise RuntimeError("expected one package entry in Cargo.lock block")
+        package = packages[0]
         name = package.get("name")
         if (
             package.get("source") is not None
