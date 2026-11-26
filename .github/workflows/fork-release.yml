@@ -159,7 +159,7 @@ jobs:
           fi
           output_dir="codex-rs/target/$TARGET/release"
           cargo_args=(
-            --locked --release --manifest-path codex-rs/Cargo.toml --target "$TARGET"
+            --locked --release --target "$TARGET"
             -p codex-cli --bin web2codex
             -p codex-code-mode-host --bin codex-code-mode-host
             -p codex-app-server --bin exec-server
@@ -176,7 +176,10 @@ jobs:
           if [[ "$TARGET" == *-windows-msvc ]]; then
             cargo_args+=(-p codex-windows-sandbox --bin codex-command-runner --bin codex-windows-sandbox-setup)
           fi
-          cargo build "${cargo_args[@]}"
+          (
+            cd codex-rs
+            cargo build "${cargo_args[@]}"
+          )
           package_args=(
             --target "$TARGET"
             --variant web2codex
