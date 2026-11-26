@@ -2,21 +2,27 @@
 
 import gzip
 import hashlib
+import http.client
 import json
 import shutil
+import socket
 import stat
 import tarfile
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .targets import TargetSpec
 
 
 DOWNLOAD_TIMEOUT_SECS = 60
+DOWNLOAD_MAX_ATTEMPTS = 5
+DOWNLOAD_RETRY_DELAY_SECS = 2
 
 
 @dataclass(frozen=True)
@@ -166,15 +172,42 @@ def verify_archive(
 def download_archive(url: str, archive_path: Path) -> None:
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = archive_path.with_suffix(f"{archive_path.suffix}.tmp")
-    temp_path.unlink(missing_ok=True)
-    try:
-        request = Request(url, headers={"User-Agent": "codex-package"})
-        with urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECS) as response:
-            with open(temp_path, "wb") as out:
-                shutil.copyfileobj(response, out)
-        temp_path.replace(archive_path)
-    finally:
+    for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
         temp_path.unlink(missing_ok=True)
+        try:
+            request = Request(url, headers={"User-Agent": "codex-package"})
+            with urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECS) as response:
+                with open(temp_path, "wb") as out:
+                    shutil.copyfileobj(response, out)
+            temp_path.replace(archive_path)
+            return
+        except (HTTPError, URLError, TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+            if attempt == DOWNLOAD_MAX_ATTEMPTS or not is_retryable_download_error(exc):
+                raise
+            delay = DOWNLOAD_RETRY_DELAY_SECS * (2 ** (attempt - 1))
+            print(
+                f"Temporary network error downloading {archive_filename(url)} "
+                f"(attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS}): {exc}. "
+                f"Retrying in {delay}s.",
+                flush=True,
+            )
+            time.sleep(delay)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+
+def is_retryable_download_error(error: Exception) -> bool:
+    if isinstance(error, HTTPError):
+        return error.code in (408, 429) or error.code >= 500
+    if isinstance(error, URLError):
+        return isinstance(
+            error.reason,
+            (TimeoutError, ConnectionError, socket.gaierror, http.client.HTTPException),
+        )
+    return isinstance(
+        error,
+        (TimeoutError, ConnectionError, socket.gaierror, http.client.HTTPException),
+    )
 
 
 def extract_archive_member(
