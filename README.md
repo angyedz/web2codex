@@ -30,6 +30,13 @@ The installers below download the latest [GitHub Release](https://github.com/ang
 curl -fsSL https://github.com/angyedz/web2codex/releases/latest/download/install.sh | sh
 ```
 
+On Linux, the installer selects the musl build by default. To install the glibc
+build instead, pass `WEB2CODEX_LINUX_LIBC=gnu` to the installer:
+
+```sh
+curl -fsSL https://github.com/angyedz/web2codex/releases/latest/download/install.sh | WEB2CODEX_LINUX_LIBC=gnu sh
+```
+
 **Windows PowerShell**
 
 ```powershell
@@ -156,7 +163,7 @@ cargo build --locked --release --manifest-path codex-rs/Cargo.toml -p codex-cli 
 cargo build --locked --release --manifest-path codex-rs/Cargo.toml -p codex-web-browser --bin codex-web-browser
 ```
 
-To publish a release, push a `codex-web-vX.Y.Z` tag. GitHub Actions packages Linux x64/ARM64, Windows x64/ARM64, and macOS Intel/Apple Silicon builds, then publishes installers and checksums. The release workflow also configures the updater to use this repository.
+To publish a release, push a `codex-web-vX.Y.Z` tag. GitHub Actions packages Linux x64/ARM64 musl and glibc variants, Windows x64/ARM64, and macOS Intel/Apple Silicon builds, then publishes installers and checksums. The release workflow also configures the updater to use this repository.
 
 ## Project background
 

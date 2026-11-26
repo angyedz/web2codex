@@ -103,6 +103,7 @@ Environment:
   CODEX_RELEASE          Version to install; overridden by --release.
   CODEX_NON_INTERACTIVE  Set to 1, true, or yes to skip prompts.
   WEB2CODEX_HOME         Web2Codex data directory; defaults to ~/.web2codex.
+  WEB2CODEX_LINUX_LIBC   Linux package flavor: musl (default) or gnu.
 EOF
         exit 0
         ;;
@@ -765,7 +766,7 @@ prune_standalone_releases() (
       [ "$entrypoint" = "bin/$COMMAND_NAME" ] && [ -f "$candidate/$entrypoint" ] || continue
     validate_version "$version" >/dev/null 2>&1 || continue
     case "$target" in
-      aarch64-apple-darwin | x86_64-apple-darwin | aarch64-unknown-linux-musl | x86_64-unknown-linux-musl) ;;
+      aarch64-apple-darwin | x86_64-apple-darwin | aarch64-unknown-linux-musl | x86_64-unknown-linux-musl | aarch64-unknown-linux-gnu | x86_64-unknown-linux-gnu) ;;
       *) continue ;;
     esac
 
@@ -1312,12 +1313,26 @@ if [ "$os" = "darwin" ]; then
 else
   if [ "$arch" = "aarch64" ]; then
     npm_tag="linux-arm64"
-    vendor_target="aarch64-unknown-linux-musl"
-    platform_label="Linux (ARM64)"
+    linux_arch="aarch64"
+    platform_arch="ARM64"
   else
     npm_tag="linux-x64"
-    vendor_target="x86_64-unknown-linux-musl"
-    platform_label="Linux (x64)"
+    linux_arch="x86_64"
+    platform_arch="x64"
+  fi
+  linux_libc="${WEB2CODEX_LINUX_LIBC:-musl}"
+  case "$linux_libc" in
+    musl | gnu) ;;
+    *)
+      echo "Unsupported WEB2CODEX_LINUX_LIBC: $linux_libc. Choose musl or gnu." >&2
+      exit 1
+      ;;
+  esac
+  vendor_target="$linux_arch-unknown-linux-$linux_libc"
+  if [ "$linux_libc" = "gnu" ]; then
+    platform_label="Linux ($platform_arch, glibc)"
+  else
+    platform_label="Linux ($platform_arch, musl)"
   fi
 fi
 

@@ -25,6 +25,10 @@ jobs:
             runner: ubuntu-24.04
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             runner: macos-15-intel
           - target: x86_64-apple-darwin
@@ -52,7 +56,7 @@ jobs:
           target: ${{ matrix.target }}
 
       - name: Install GNU target for the Linux WebView
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && contains(matrix.target, '-musl')
         shell: bash
         run: rustup target add "${TARGET%-musl}-gnu"
 
@@ -113,21 +117,21 @@ jobs:
           fi
 
       - name: Install Zig for native musl builds
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && contains(matrix.target, '-musl')
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.14.0
           use-cache: false
 
       - name: Configure native musl toolchain
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && contains(matrix.target, '-musl')
         env:
           TARGET: ${{ matrix.target }}
           CODEX_MUSL_RELEASE_LINK_FLAGS: "1"
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
       - name: Disable aws-lc jitter entropy for musl
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && contains(matrix.target, '-musl')
         shell: bash
         run: |
           set -euo pipefail
@@ -153,8 +157,10 @@ jobs:
             -p codex-code-mode-host --bin codex-code-mode-host
             -p codex-app-server --bin exec-server
           )
-          if [[ "$TARGET" == *-unknown-linux-musl ]]; then
+          if [[ "$TARGET" == *-unknown-linux-* ]]; then
             cargo_args+=(-p codex-bwrap --bin bwrap)
+          fi
+          if [[ "$TARGET" == *-unknown-linux-musl ]]; then
             browser_bin="$RUNNER_TEMP/codex-web-browser"
           else
             cargo_args+=(-p codex-web-browser --bin codex-web-browser)
@@ -177,7 +183,7 @@ jobs:
             --web-browser-bin "$browser_bin"
             --force
           )
-          if [[ "$TARGET" == *-unknown-linux-musl ]]; then
+          if [[ "$TARGET" == *-unknown-linux-* ]]; then
             bwrap_path="$output_dir/bwrap"
             strip --strip-debug --strip-unneeded "$bwrap_path"
             bwrap_sha256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
